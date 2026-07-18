@@ -1,0 +1,83 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+dist-ssr/
+src-tauri/target/
+target-codex-test/
+src-tauri/gen/schemas/
+
+# Reproducible release staging (generated from tracked manifests)
+/src-tauri/resources/bin/ffmpeg.exe
+/third_party/ffmpeg/cache/
+/release-secrets/
+*.pfx
+*.p12
+
+# Local design/reference inputs (provenance is recorded in tracked docs)
+/VALOFRAME_正规图标格式包.zip
+/prototype-cinematic-arsenal/
+
+# Logs and diagnostics
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Runtime data and local databases
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.tmp/
+*.local
+.env
+.env.*
+!.env.example
+
+# Python scratch/cache files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local agent/editor state
+.agents/
+.codex/
+.claude/
+.superpowers/
+.worktrees/
+docs/superpowers/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Privacy-sensitive local research scripts and analysis artifacts
+/research/
+/last_match_events.json
+/design-qa.md
+/design-qa-*.png
+/product-audit-*/
+/analyze_*.py
+/check_*.py
+/crypto_analysis.py
+/deep_match_analysis.py
+/experiment_results.py
+/extract_events.py
+/match_stats.py
+/monitor_wdb.py
+/post_analyze.py

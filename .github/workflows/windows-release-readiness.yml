@@ -1,0 +1,395 @@
+name: Windows internal release readiness
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-readiness-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  internal-rc:
+    name: Build and smoke unsigned internal RC
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ runner.temp }}\vhm-release-target
+      RC_EVIDENCE_DIR: ${{ runner.temp }}\vhm-internal-rc-evidence
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Python for SQLite smoke inspection
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.96.1 --profile minimal --component clippy --component rustfmt
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Check Rust formatting
+        shell: pwsh
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Run Clippy
+        shell: pwsh
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings
+
+      - name: Run Rust tests
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features
+
+      - name: Prepare pinned FFmpeg for local validation
+        shell: pwsh
+        run: |
+          & ./scripts/release/prepare-ffmpeg.ps1 `
+            -ValidationOnly `
+            -CacheDirectory (Join-Path $env:RUNNER_TEMP 'vhm-ffmpeg-cache')
+
+      - name: Verify pinned FFmpeg runtime contract
+        shell: pwsh
+        run: ./scripts/release/verify-ffmpeg.ps1 -ValidationOnly
+
+      - name: Build unsigned NSIS internal RC
+        run: npm run release:bundle:windows:internal
+
+      - name: Check internal RC artifacts
+        shell: pwsh
+        run: |
+          $main = Join-Path $env:CARGO_TARGET_DIR 'release\valorant-highlight-manager.exe'
+          $installers = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release\bundle\nsis') -Filter '*.exe')
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($installers.Count)."
+          }
+          $nsisScripts = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release\nsis') -Filter 'installer.nsi' -File -Recurse)
+          if ($nsisScripts.Count -ne 1) {
+            throw "Expected exactly one generated installer.nsi, found $($nsisScripts.Count)."
+          }
+          $sevenZip = (Get-Command 7z.exe -CommandType Application -ErrorAction Stop).Source
+          $verifiedPayload = Join-Path $env:RUNNER_TEMP 'vhm-verified-installer-payload'
+          if (Test-Path -LiteralPath $verifiedPayload) {
+            throw "Verified payload output already exists: $verifiedPayload"
+          }
+          [void] (New-Item -ItemType Directory -Path $verifiedPayload)
+
+          $report = & ./scripts/release/check-bundle.ps1 `
+            -MainExecutablePath $main `
+            -NsisBundlePath $installers[0].FullName `
+            -NsisScriptPath $nsisScripts[0].FullName `
+            -NsisExtractorPath $sevenZip `
+            -VerifiedPayloadOutputDirectory $verifiedPayload `
+            -ResourceDirectory (Join-Path $env:CARGO_TARGET_DIR 'release') `
+            -AllowUnsignedInternalRc
+          $report | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'vhm-internal-rc-report.json') -Encoding UTF8
+          $report | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+
+      - name: Capture internal RC hashes and toolchain metadata
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath $env:RC_EVIDENCE_DIR) {
+            throw "RC evidence directory must be fresh: $env:RC_EVIDENCE_DIR"
+          }
+          [void] (New-Item -ItemType Directory -Path $env:RC_EVIDENCE_DIR)
+
+          $reportPath = Join-Path $env:RUNNER_TEMP 'vhm-internal-rc-report.json'
+          $report = Get-Content -Raw -LiteralPath $reportPath -Encoding UTF8 | ConvertFrom-Json -Depth 20
+          if ($report.status -cne 'passed') {
+            throw 'Only a passed bundle-gate report may be retained as internal RC evidence.'
+          }
+          Copy-Item -LiteralPath $reportPath -Destination (Join-Path $env:RC_EVIDENCE_DIR 'vhm-internal-rc-report.json')
+
+          $payloadRoot = [System.IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'vhm-verified-installer-payload'))
+          $payloadFiles = @(Get-ChildItem -LiteralPath $payloadRoot -File -Recurse | Sort-Object FullName)
+          $reportedEntries = @($report.nsisPayload.entries)
+          if ($payloadFiles.Count -ne 6 -or $reportedEntries.Count -ne 6) {
+            throw 'Expected exactly six verified payload files and six matching report entries.'
+          }
+          $payloadHashes = foreach ($file in $payloadFiles) {
+            $destination = [System.IO.Path]::GetRelativePath($payloadRoot, $file.FullName)
+            $reportedEntry = @($reportedEntries | Where-Object { [string] $_.destination -ceq $destination })
+            if ($reportedEntry.Count -ne 1) {
+              throw "Verified payload evidence does not have one report entry for '$destination'."
+            }
+            $sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($file.Length -ne [long] $reportedEntry[0].sizeBytes -or
+                -not [string]::Equals($sha256, [string] $reportedEntry[0].sha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+              throw "Verified payload evidence differs from the bundle-gate report for '$destination'."
+            }
+            [ordered]@{
+              path = $destination.Replace('\', '/')
+              sizeBytes = [long] $file.Length
+              sha256 = $sha256
+            }
+          }
+          [ordered]@{
+            schemaVersion = 1
+            sourceReport = 'vhm-internal-rc-report.json'
+            fileCount = $payloadHashes.Count
+            files = @($payloadHashes)
+          } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $env:RC_EVIDENCE_DIR 'verified-payload-sha256.json') -Encoding UTF8
+
+          $main = Get-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release\valorant-highlight-manager.exe') -Force
+          $installers = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release\bundle\nsis') -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($installers.Count)."
+          }
+          $mainSignature = (Get-AuthenticodeSignature -LiteralPath $main.FullName).Status.ToString()
+          $installerSignature = (Get-AuthenticodeSignature -LiteralPath $installers[0].FullName).Status.ToString()
+          if ($mainSignature -cne 'NotSigned' -or $installerSignature -cne 'NotSigned') {
+            throw "The internal-only workflow accepts only unsigned build inputs; staging=$mainSignature installer=$installerSignature."
+          }
+          [ordered]@{
+            schemaVersion = 1
+            releaseMode = 'internal-rc'
+            distribution = 'internal-only'
+            signing = 'unsigned'
+            installer = [ordered]@{
+              fileName = $installers[0].Name
+              sizeBytes = [long] $installers[0].Length
+              sha256 = (Get-FileHash -LiteralPath $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              authenticodeStatus = $installerSignature
+            }
+            stagingMainExecutable = [ordered]@{
+              fileName = $main.Name
+              sizeBytes = [long] $main.Length
+              sha256 = (Get-FileHash -LiteralPath $main.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              authenticodeStatus = $mainSignature
+            }
+          } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $env:RC_EVIDENCE_DIR 'installer-sha256.json') -Encoding UTF8
+
+          $tauriCommand = Join-Path $env:GITHUB_WORKSPACE 'node_modules\.bin\tauri.cmd'
+          [ordered]@{
+            schemaVersion = 1
+            capturedAtUtc = [datetime]::UtcNow.ToString('o')
+            source = [ordered]@{
+              repository = $env:GITHUB_REPOSITORY
+              sha = $env:GITHUB_SHA
+              ref = $env:GITHUB_REF
+              workflow = $env:GITHUB_WORKFLOW
+              runId = $env:GITHUB_RUN_ID
+              runAttempt = $env:GITHUB_RUN_ATTEMPT
+            }
+            runner = [ordered]@{
+              os = $env:RUNNER_OS
+              arch = $env:RUNNER_ARCH
+              imageOs = $env:ImageOS
+              imageVersion = $env:ImageVersion
+            }
+            tools = [ordered]@{
+              node = ((& node --version) -join "`n").Trim()
+              npm = ((& npm --version) -join "`n").Trim()
+              python = ((& python --version) -join "`n").Trim()
+              rustc = ((& rustc --version) -join "`n").Trim()
+              cargo = ((& cargo --version) -join "`n").Trim()
+              rustupActiveToolchain = ((& rustup show active-toolchain) -join "`n").Trim()
+              tauriCli = ((& $tauriCommand --version) -join "`n").Trim()
+              powershell = $PSVersionTable.PSVersion.ToString()
+            }
+          } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $env:RC_EVIDENCE_DIR 'toolchain-metadata.json') -Encoding UTF8
+
+      - name: Assert public redistribution remains fail-closed
+        shell: pwsh
+        run: |
+          $main = Join-Path $env:CARGO_TARGET_DIR 'release\valorant-highlight-manager.exe'
+          $installers = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release\bundle\nsis') -Filter '*.exe')
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($installers.Count)."
+          }
+          $nsisScripts = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release\nsis') -Filter 'installer.nsi' -File -Recurse)
+          if ($nsisScripts.Count -ne 1) {
+            throw "Expected exactly one generated installer.nsi, found $($nsisScripts.Count)."
+          }
+          $sevenZip = (Get-Command 7z.exe -CommandType Application -ErrorAction Stop).Source
+          $mainSignature = (Get-AuthenticodeSignature -LiteralPath $main).Status.ToString()
+          $installerSignature = (Get-AuthenticodeSignature -LiteralPath $installers[0].FullName).Status.ToString()
+          if ($mainSignature -cne 'NotSigned' -or $installerSignature -cne 'NotSigned') {
+            throw "The internal-only public-gate assertion requires unsigned inputs; staging=$mainSignature installer=$installerSignature."
+          }
+
+          $publicGateFailure = $null
+          try {
+            $null = & ./scripts/release/check-bundle.ps1 `
+              -MainExecutablePath $main `
+              -NsisBundlePath $installers[0].FullName `
+              -NsisScriptPath $nsisScripts[0].FullName `
+              -NsisExtractorPath $sevenZip `
+              -ResourceDirectory (Join-Path $env:CARGO_TARGET_DIR 'release')
+          }
+          catch {
+            $publicGateFailure = $_.Exception.Message
+          }
+
+          if ([string]::IsNullOrWhiteSpace($publicGateFailure)) {
+            [ordered]@{
+              schemaVersion = 1
+              status = 'unexpectedly-passed'
+              testedMode = 'public-redistribution'
+              inputReleaseMode = 'unsigned-internal-rc'
+              allowUnsignedInternalRc = $false
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $env:RC_EVIDENCE_DIR 'public-release-gate.json') -Encoding UTF8
+            throw 'Public redistribution check unexpectedly passed for an unsigned internal RC.'
+          }
+
+          $knownPolicyBlockers = @(
+            'sourceCompliance\.redistributionReady is false',
+            "NSIS embedded main executable Authenticode status must be Valid; got 'NotSigned'",
+            "NSIS installer Authenticode status must be Valid; got 'NotSigned'"
+          )
+          $knownPolicyBlocker = @($knownPolicyBlockers | Where-Object { $publicGateFailure -match $_ }).Count -gt 0
+          [ordered]@{
+            schemaVersion = 1
+            status = $(if ($knownPolicyBlocker) { 'blocked-as-required' } else { 'unexpected-error' })
+            testedMode = 'public-redistribution'
+            inputReleaseMode = 'unsigned-internal-rc'
+            allowUnsignedInternalRc = $false
+            stagingAuthenticodeStatus = $mainSignature
+            installerAuthenticodeStatus = $installerSignature
+            reason = $publicGateFailure
+          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $env:RC_EVIDENCE_DIR 'public-release-gate.json') -Encoding UTF8
+          if (-not $knownPolicyBlocker) {
+            throw "Public redistribution gate failed for an unexpected reason: $publicGateFailure"
+          }
+          Write-Host "Public redistribution correctly remains blocked: $publicGateFailure"
+
+      - name: Run isolated release startup smoke
+        shell: pwsh
+        run: |
+          $reportPath = Join-Path $env:RUNNER_TEMP 'vhm-internal-rc-report.json'
+          $report = Get-Content -Raw -LiteralPath $reportPath -Encoding UTF8 | ConvertFrom-Json -Depth 20
+          if ($report.status -cne 'passed' -or
+              $report.nsisPayload.verifiedPayloadOutputVerification.entriesMatchedReport -ne $true -or
+              [int] $report.nsisPayload.verifiedPayloadOutputVerification.fileCount -ne 6) {
+            throw 'Bundle gate report does not authorize a six-file verified startup payload.'
+          }
+
+          $expectedPayloadRoot = [System.IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'vhm-verified-installer-payload'))
+          $payloadRoot = [System.IO.Path]::GetFullPath([string] $report.nsisPayload.verifiedPayloadOutputDirectory)
+          if (-not [string]::Equals($payloadRoot, $expectedPayloadRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Bundle gate report points outside the workflow verified-payload directory.'
+          }
+          $rootItem = Get-Item -LiteralPath $payloadRoot -Force -ErrorAction Stop
+          if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Verified startup payload root must not be a reparse point.'
+          }
+
+          $entries = @($report.nsisPayload.entries)
+          if ($entries.Count -ne 6) {
+            throw "Bundle gate report must contain exactly six payload entries; found $($entries.Count)."
+          }
+          $reportedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+          foreach ($entry in $entries) {
+            $destination = [string] $entry.destination
+            if ([string]::IsNullOrWhiteSpace($destination) -or
+                [System.IO.Path]::IsPathRooted($destination) -or
+                $destination.Contains(':') -or $destination.Contains('/') -or
+                @($destination.Split('\') | Where-Object { [string]::IsNullOrWhiteSpace($_) -or $_ -in @('.', '..') }).Count -ne 0) {
+              throw "Bundle gate report contains an unsafe payload destination: '$destination'."
+            }
+            $candidate = [System.IO.Path]::GetFullPath((Join-Path $payloadRoot $destination))
+            $rootPrefix = $payloadRoot.TrimEnd('\') + '\'
+            if (-not $candidate.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+                -not $reportedPaths.Add($candidate)) {
+              throw "Bundle gate report contains an escaping or duplicate payload destination: '$destination'."
+            }
+            $item = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+            if ($item.PSIsContainer -or
+                ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                $item.Length -ne [long] $entry.sizeBytes) {
+              throw "Verified startup payload metadata mismatch: '$destination'."
+            }
+            $actualHash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash
+            if (-not [string]::Equals($actualHash, [string] $entry.sha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+              throw "Verified startup payload hash mismatch: '$destination'."
+            }
+          }
+          $actualItems = @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force)
+          foreach ($item in $actualItems) {
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "Verified startup payload contains a reparse point: '$($item.FullName)'."
+            }
+          }
+          $actualFiles = @($actualItems | Where-Object { -not $_.PSIsContainer })
+          if ($actualFiles.Count -ne 6 -or
+              @($actualFiles | Where-Object { -not $reportedPaths.Contains([System.IO.Path]::GetFullPath($_.FullName)) }).Count -ne 0) {
+            throw 'Verified startup payload files do not exactly match the six bundle-gate report entries.'
+          }
+
+          $mainEntries = @($entries | Where-Object { $_.destination -ceq 'valorant-highlight-manager.exe' })
+          if ($mainEntries.Count -ne 1) {
+            throw 'Bundle gate report must identify exactly one embedded main executable.'
+          }
+          $main = Join-Path $payloadRoot 'valorant-highlight-manager.exe'
+          $expectedMainHash = [string] $mainEntries[0].normalization.rawEmbeddedSha256
+          if ($expectedMainHash -notmatch '^[0-9a-fA-F]{64}$' -or
+              -not [string]::Equals($expectedMainHash, [string] $mainEntries[0].sha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Bundle gate report embedded-main raw SHA-256 is missing or inconsistent.'
+          }
+          $smokeOutput = & ./scripts/release/windows-release-smoke.ps1 `
+            -ExecutablePath $main `
+            -ResourceDirectory $payloadRoot `
+            -FfmpegMode ResourceOverride `
+            -IsolationParent $env:RUNNER_TEMP `
+            -ExpectedExecutableSha256 $expectedMainHash
+          $smokeJson = ($smokeOutput -join [Environment]::NewLine)
+          $smokeReportPath = Join-Path $env:RC_EVIDENCE_DIR 'vhm-release-smoke-report.json'
+          $smokeJson | Set-Content -LiteralPath $smokeReportPath -Encoding UTF8
+          $smokeReport = $smokeJson | ConvertFrom-Json -Depth 20
+          if ($smokeReport.status -cne 'passed') {
+            throw 'Release startup smoke report did not finish with passed status.'
+          }
+          if ([int] $smokeReport.database.schemaVersion -ne 13 -or
+              [int] $smokeReport.database.requiredTableCount -ne 16 -or
+              [long] $smokeReport.database.trashSnapshotCount -ne 0 -or
+              [long] $smokeReport.database.deleteIntentCount -ne 0) {
+            throw 'Release startup smoke did not prove a fresh schema-v13 database with empty trash-snapshot and delete-intent journals.'
+          }
+          $singleInstance = $smokeReport.runtime.singleInstance
+          if ($singleInstance.verified -ne $true -or
+              -not [string]::Equals([string] $singleInstance.sharedSmokeRoot, [string] $smokeReport.runtime.isolationRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+              [int] $singleInstance.secondInstanceExitCode -ne 0 -or
+              [uint32] $singleInstance.secondInstanceJobActiveProcessesAfterExit -ne 0 -or
+              $singleInstance.onlyPrimaryNamedRootAfterHandoff -ne $true -or
+              $singleInstance.primaryWindowMinimizedBeforeHandoff -ne $true -or
+              $singleInstance.primaryWindowHandlePreserved -ne $true -or
+              $singleInstance.primaryWindowVisibleAfterHandoff -ne $true -or
+              $singleInstance.primaryWindowMinimizedAfterHandoff -ne $false) {
+            throw 'Release startup smoke did not prove the required single-instance handoff invariants.'
+          }
+          $smokeJson | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+
+      - name: Upload internal RC evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: vhm-internal-rc-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.RC_EVIDENCE_DIR }}\vhm-internal-rc-report.json
+            ${{ env.RC_EVIDENCE_DIR }}\verified-payload-sha256.json
+            ${{ env.RC_EVIDENCE_DIR }}\installer-sha256.json
+            ${{ env.RC_EVIDENCE_DIR }}\toolchain-metadata.json
+            ${{ env.RC_EVIDENCE_DIR }}\public-release-gate.json
+            ${{ env.RC_EVIDENCE_DIR }}\vhm-release-smoke-report.json
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 9
