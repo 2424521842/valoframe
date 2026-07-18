@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "component": "FFmpeg",
+  "version": "n8.1.2-21-gce3c09c101-20260630",
+  "licenseExpression": "LGPL-3.0-or-later",
+  "provider": "BtbN/FFmpeg-Builds",
+  "providerReleaseTag": "autobuild-2026-06-30-13-34",
+  "providerBuildScriptsCommit": "7a83528ea3431e9eca982a712bc3a7cd0789d5d0",
+  "ffmpegCommit": "ce3c09c101c83add623774d414a9f9498caf5c25",
+  "compiler": "gcc 15.2.0 (crosstool-NG 1.28.0.23_185f348)",
+  "variant": "win64-lgpl-static",
+  "archive": {
+    "fileName": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1.zip",
+    "sizeBytes": 144332533,
+    "sha256": "3b9eceb438016b647e0755a51ce3a388cd4ed5679e2427cb83a01e1ae2cd0eba"
+  },
+  "executable": {
+    "pathInArchive": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1/bin/ffmpeg.exe",
+    "sizeBytes": 112509440,
+    "sha256": "c623359f35e7db4820694b77d0f032f075e783a9c7207b81d908c28f148e8a68"
+  },
+  "configurePolicy": {
+    "required": [
+      "--enable-version3"
+    ],
+    "requiredDisabled": [
+      "--disable-libx264",
+      "--disable-libx265",
+      "--disable-libfdk-aac"
+    ],
+    "forbidden": [
+      "--enable-gpl",
+      "--enable-nonfree",
+      "--enable-libx264",
+      "--enable-libx265",
+      "--enable-libfdk-aac"
+    ]
+  },
+  "redistributionStatus": "blocked-pending-corresponding-source-mirror-and-third-party-license-review"
+}

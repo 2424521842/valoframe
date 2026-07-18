@@ -1,0 +1,49 @@
+{
+  "name": "valorant-highlight-manager",
+  "private": true,
+  "version": "0.1.0",
+  "description": "瓦刻（VALOFRAME）——本地无畏契约高光素材管理器",
+  "packageManager": "npm@11.9.0",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11 <12"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "test": "npm run test:node && npm run test:ui",
+    "test:node": "tsx --test tests/*.test.ts",
+    "test:ui": "vitest run",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "release:ffmpeg:prepare:internal": "pwsh -NoLogo -NoProfile -File ./scripts/release/prepare-ffmpeg.ps1 -ValidationOnly",
+    "release:ffmpeg:verify:internal": "pwsh -NoLogo -NoProfile -File ./scripts/release/verify-ffmpeg.ps1 -ValidationOnly",
+    "release:bundle:windows:internal": "tauri build --bundles nsis --ci --no-sign",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
+    "@tanstack/react-virtual": "^3.14.6",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "cmdk": "^1.1.1",
+    "motion": "^12.42.2",
+    "radix-ui": "^1.6.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "jsdom": "^29.1.1",
+    "tsx": "^4.22.4",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4",
+    "vitest": "^4.1.10"
+  }
+}

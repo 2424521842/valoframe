@@ -17,10 +17,14 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: "0"
-      CARGO_TARGET_DIR: ${{ runner.temp }}\vhm-release-target
-      RC_EVIDENCE_DIR: ${{ runner.temp }}\vhm-internal-rc-evidence
       RUST_BACKTRACE: "1"
     steps:
+      - name: Configure runner-local paths
+        shell: pwsh
+        run: |
+          "CARGO_TARGET_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-release-target')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RC_EVIDENCE_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-internal-rc-evidence')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Check out repository
         uses: actions/checkout@v6
 
@@ -366,7 +370,7 @@ jobs:
           }
           $singleInstance = $smokeReport.runtime.singleInstance
           if ($singleInstance.verified -ne $true -or
-              -not [string]::Equals([string] $singleInstance.sharedSmokeRoot, [string] $smokeReport.runtime.isolationRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+              -not [string]::Equals([string] $singleInstance.sharedLaunchConfiguration.environmentOverrides.VHM_RELEASE_SMOKE_ROOT, [string] $smokeReport.runtime.isolationRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
               [int] $singleInstance.secondInstanceExitCode -ne 0 -or
               [uint32] $singleInstance.secondInstanceJobActiveProcessesAfterExit -ne 0 -or
               $singleInstance.onlyPrimaryNamedRootAfterHandoff -ne $true -or
@@ -384,12 +388,12 @@ jobs:
         with:
           name: vhm-internal-rc-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ env.RC_EVIDENCE_DIR }}\vhm-internal-rc-report.json
-            ${{ env.RC_EVIDENCE_DIR }}\verified-payload-sha256.json
-            ${{ env.RC_EVIDENCE_DIR }}\installer-sha256.json
-            ${{ env.RC_EVIDENCE_DIR }}\toolchain-metadata.json
-            ${{ env.RC_EVIDENCE_DIR }}\public-release-gate.json
-            ${{ env.RC_EVIDENCE_DIR }}\vhm-release-smoke-report.json
+            ${{ runner.temp }}\vhm-internal-rc-evidence\vhm-internal-rc-report.json
+            ${{ runner.temp }}\vhm-internal-rc-evidence\verified-payload-sha256.json
+            ${{ runner.temp }}\vhm-internal-rc-evidence\installer-sha256.json
+            ${{ runner.temp }}\vhm-internal-rc-evidence\toolchain-metadata.json
+            ${{ runner.temp }}\vhm-internal-rc-evidence\public-release-gate.json
+            ${{ runner.temp }}\vhm-internal-rc-evidence\vhm-release-smoke-report.json
           if-no-files-found: warn
           retention-days: 30
           compression-level: 9

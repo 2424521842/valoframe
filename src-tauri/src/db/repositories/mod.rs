@@ -1,0 +1,6 @@
+pub(super) mod clips;
+pub(super) mod deletions;
+pub(super) mod library;
+pub(super) mod sources;
+pub(super) mod tags;
+pub(super) mod thumbnails;

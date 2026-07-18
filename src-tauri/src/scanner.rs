@@ -1,0 +1,3462 @@
+mod scan_runs;
+mod scan_service;
+
+use std::{
+    collections::HashSet,
+    env, fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use base64::{engine::general_purpose, Engine as _};
+use rusqlite::Connection;
+use serde::Serialize;
+
+use crate::db::{self, ClipInput, ClipSaveOutcome, DbResult};
+use crate::metadata_ingest::{ingest_match_metadata, MetadataIngestInput};
+
+use scan_runs::ScanRunGuard;
+pub use scan_runs::{
+    ensure_scan_run_started, ensure_scan_run_terminal, finalize_scan_run_for_job,
+    latest_scan_summary, mark_scan_run_cancelling, recover_interrupted_scan_runs,
+};
+#[cfg(test)]
+use scan_service::scan_library_roots;
+pub use scan_service::{
+    default_aclos_dir, scan_custom_directory, scan_custom_directory_with_progress,
+    scan_custom_directory_with_progress_and_cancel, scan_default_aclos_library,
+    scan_default_aclos_library_with_progress, scan_default_aclos_library_with_progress_and_cancel,
+    scan_directory, scan_directory_with_progress, scan_discovered_aclos_roots_with_progress,
+    scan_discovered_aclos_roots_with_progress_and_cancel, scan_roots, scan_roots_with_progress,
+    scan_roots_with_progress_and_cancel,
+};
+
+const EDIT_AGENT_ASSET_WINDOW_SECONDS: i64 = 60;
+const VIDEO_EXPORT_CONFIG_WINDOW_SECONDS: i64 = 120;
+pub(crate) const MAX_SCAN_ERROR_SAMPLES: usize = 200;
+pub(crate) const MAX_SCAN_ERROR_MESSAGE_BYTES: usize = 2 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanSummary {
+    pub root_path: String,
+    pub source_dir_count: i64,
+    pub clip_group_count: i64,
+    pub new_clip_count: i64,
+    pub updated_clip_count: i64,
+    pub missing_clip_count: i64,
+    pub cover_missing_count: i64,
+    pub metadata_match_count: i64,
+    pub metadata_enriched_clip_count: i64,
+    pub metadata_event_count: i64,
+    pub metadata_warning_count: i64,
+    #[serde(skip)]
+    pub(crate) omitted_error_count: i64,
+    pub errors: Vec<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanProgress {
+    pub phase: String,
+    pub root_path: String,
+    pub source: Option<String>,
+    pub current: i64,
+    pub total: i64,
+    pub source_dir_count: i64,
+    pub clip_group_count: i64,
+    pub clip_file_count: i64,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanProgressPhase {
+    Discovering,
+    Scanning,
+    Metadata,
+    Finalizing,
+    Completed,
+    Partial,
+    Cancelled,
+}
+
+impl ScanProgressPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Discovering => "discovering",
+            Self::Scanning => "scanning",
+            Self::Metadata => "metadata",
+            Self::Finalizing => "finalizing",
+            Self::Completed => "completed",
+            Self::Partial => "partial",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScanExecutionStatus {
+    Completed,
+    Partial,
+    Cancelled,
+}
+
+impl ScanExecutionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Partial => "partial",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanExecution {
+    pub status: ScanExecutionStatus,
+    pub summary: ScanSummary,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ScanRuntime<'a> {
+    job_id: Option<&'a str>,
+    cancellation: Option<&'a AtomicBool>,
+}
+
+impl ScanRuntime<'_> {
+    fn is_cancelled(self) -> bool {
+        self.cancellation
+            .is_some_and(|cancellation| cancellation.load(Ordering::Acquire))
+    }
+}
+
+type ScanProgressReporter<'a> = &'a dyn Fn(ScanProgress);
+
+struct ScanProgressState<'a> {
+    reporter: Option<ScanProgressReporter<'a>>,
+    root_path: String,
+    source: Option<String>,
+    current: i64,
+    total: i64,
+    source_dir_count: i64,
+    clip_group_count: i64,
+    clip_file_count: i64,
+}
+
+impl<'a> ScanProgressState<'a> {
+    fn new(root_path: String, reporter: Option<ScanProgressReporter<'a>>) -> Self {
+        Self {
+            reporter,
+            root_path,
+            source: None,
+            current: 0,
+            total: 0,
+            source_dir_count: 0,
+            clip_group_count: 0,
+            clip_file_count: 0,
+        }
+    }
+
+    fn set_total_sources(&mut self, total: usize) {
+        self.total = total.min(i64::MAX as usize) as i64;
+    }
+
+    fn emit(&self, phase: ScanProgressPhase, message: impl Into<String>) {
+        let Some(reporter) = self.reporter else {
+            return;
+        };
+
+        reporter(ScanProgress {
+            phase: phase.as_str().to_string(),
+            root_path: self.root_path.clone(),
+            source: self.source.clone(),
+            current: self.current,
+            total: self.total,
+            source_dir_count: self.source_dir_count,
+            clip_group_count: self.clip_group_count,
+            clip_file_count: self.clip_file_count,
+            message: message.into(),
+        });
+    }
+
+    fn source_started(&mut self, source_name: &str, source_path: &Path) {
+        self.source = Some(path_to_string(source_path));
+        self.emit(
+            ScanProgressPhase::Scanning,
+            format!("正在扫描 {source_name}"),
+        );
+    }
+
+    fn clip_scanned(&mut self, file_name: &str) {
+        self.clip_file_count += 1;
+        self.emit(
+            ScanProgressPhase::Scanning,
+            format!("已扫描文件 {file_name}"),
+        );
+    }
+
+    fn group_scanned(&mut self, group_name: &str) {
+        self.clip_group_count += 1;
+        self.emit(
+            ScanProgressPhase::Scanning,
+            format!("已扫描分组 {group_name}"),
+        );
+    }
+
+    fn source_finished(&mut self, source_name: &str) {
+        self.current += 1;
+        self.source_dir_count += 1;
+        self.emit(
+            ScanProgressPhase::Scanning,
+            format!("已完成来源 {source_name}"),
+        );
+        self.source = None;
+    }
+
+    fn source_interrupted(&mut self, source_name: &str) {
+        self.emit(
+            ScanProgressPhase::Scanning,
+            format!("已停止扫描来源 {source_name}"),
+        );
+        self.source = None;
+    }
+}
+
+impl ScanSummary {
+    pub fn empty(root_path: String) -> Self {
+        Self {
+            root_path,
+            source_dir_count: 0,
+            clip_group_count: 0,
+            new_clip_count: 0,
+            updated_clip_count: 0,
+            missing_clip_count: 0,
+            cover_missing_count: 0,
+            metadata_match_count: 0,
+            metadata_enriched_clip_count: 0,
+            metadata_event_count: 0,
+            metadata_warning_count: 0,
+            omitted_error_count: 0,
+            errors: Vec::new(),
+            message: None,
+        }
+    }
+
+    pub(crate) fn push_error(&mut self, error: String) {
+        let error = truncate_utf8_bytes(error, MAX_SCAN_ERROR_MESSAGE_BYTES);
+        if self.errors.contains(&error) {
+            return;
+        }
+        if self.errors.len() >= MAX_SCAN_ERROR_SAMPLES {
+            self.omitted_error_count = self.omitted_error_count.saturating_add(1);
+            return;
+        }
+        self.errors.push(error);
+    }
+
+    pub(crate) fn merge_errors(&mut self, errors: impl IntoIterator<Item = String>) {
+        for error in errors {
+            self.push_error(error);
+        }
+    }
+}
+
+struct MetadataScanConfig {
+    anchor: Option<PathBuf>,
+    allow_external_fallback: bool,
+    account_hint_scope: Option<PathBuf>,
+    use_local_account_hint_scope: bool,
+}
+
+struct ScanBatchInput {
+    requested_roots: Vec<PathBuf>,
+    source_paths: Vec<PathBuf>,
+    metadata_config: MetadataScanConfig,
+    initial_errors: Vec<String>,
+    empty_message: Option<String>,
+}
+
+struct LibrarySourceDiscovery {
+    roots: Vec<PathBuf>,
+    sources: Vec<PathBuf>,
+    errors: Vec<String>,
+    empty_message: Option<String>,
+}
+
+struct SourceScanOutcome {
+    source_path: PathBuf,
+    source_id: Option<i64>,
+    accessible: bool,
+    complete_for_missing: bool,
+    seen_paths: HashSet<String>,
+}
+
+struct SourceScanStep {
+    outcome: SourceScanOutcome,
+    cancelled: bool,
+}
+
+impl SourceScanStep {
+    fn finished(outcome: SourceScanOutcome) -> Self {
+        Self {
+            outcome,
+            cancelled: false,
+        }
+    }
+
+    fn cancelled(outcome: SourceScanOutcome) -> Self {
+        Self {
+            outcome,
+            cancelled: true,
+        }
+    }
+}
+
+fn push_unique_scan_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
+    let normalized = scan_path_key(&root);
+    if roots
+        .iter()
+        .any(|existing| scan_path_key(existing) == normalized)
+    {
+        return;
+    }
+    roots.push(root);
+}
+
+struct CachedMetadataIngest {
+    leveldb_result: crate::leveldb_reader::LevelDbBattleListResult,
+    log_result: crate::highlight_log_parser::HighlightLogParseResult,
+    wonderful_result: crate::wonderful_db::WonderfulDbReadResult,
+    local_account_hint_scope: Option<PathBuf>,
+    errors: Vec<String>,
+}
+
+fn discover_library_sources(
+    roots: &[PathBuf],
+    source_path_filter: Option<&HashSet<String>>,
+) -> LibrarySourceDiscovery {
+    let roots = normalize_unique_scan_paths(roots.iter().map(PathBuf::as_path));
+    let mut sources = Vec::new();
+    let mut errors = Vec::new();
+    let mut empty_message = None;
+
+    for root in &roots {
+        let root_path = path_to_string(root);
+        let metadata = match fs::metadata(root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if roots.len() == 1 {
+                    empty_message = Some(format!("Scan root not found: {root_path}"));
+                }
+                continue;
+            }
+            Err(error) => {
+                push_unique_error(
+                    &mut errors,
+                    format!("Failed to inspect scan root {root_path}: {error}"),
+                );
+                continue;
+            }
+        };
+        if !metadata.is_dir() {
+            if roots.len() == 1 {
+                empty_message = Some(format!("Scan root is not a directory: {root_path}"));
+            }
+            continue;
+        }
+
+        let entries = match read_sorted_entries(root) {
+            Ok(entries) => entries,
+            Err(error) => {
+                push_unique_error(&mut errors, error);
+                continue;
+            }
+        };
+        for source_path in entries {
+            if !source_path.is_dir() || !is_source_directory_name(&source_path) {
+                continue;
+            }
+            if source_path_filter
+                .is_some_and(|filter| !filter.contains(&scan_path_key(&source_path)))
+            {
+                continue;
+            }
+            push_unique_scan_root(&mut sources, source_path);
+        }
+    }
+
+    LibrarySourceDiscovery {
+        roots,
+        sources,
+        errors,
+        empty_message,
+    }
+}
+
+fn run_scan_batch(
+    connection: &Connection,
+    input: ScanBatchInput,
+    progress_reporter: Option<ScanProgressReporter<'_>>,
+    runtime: ScanRuntime<'_>,
+) -> DbResult<ScanExecution> {
+    let ScanBatchInput {
+        requested_roots,
+        source_paths,
+        metadata_config,
+        initial_errors,
+        empty_message,
+    } = input;
+    let requested_roots = normalize_unique_scan_paths(requested_roots.iter().map(PathBuf::as_path));
+    let source_paths = normalize_unique_scan_paths(source_paths.iter().map(PathBuf::as_path));
+    let root_path = requested_roots
+        .iter()
+        .map(|root| path_to_string(root))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut summary = ScanSummary::empty(root_path.clone());
+    summary.merge_errors(initial_errors);
+    let scan_run = ScanRunGuard::start(connection, runtime.job_id, &root_path)?;
+    let mut progress = ScanProgressState::new(root_path.clone(), progress_reporter);
+    progress.emit(
+        ScanProgressPhase::Discovering,
+        format!("正在准备扫描 {root_path}"),
+    );
+
+    if runtime.is_cancelled() {
+        return finish_cancelled_scan(scan_run, &progress, summary);
+    }
+
+    if source_paths.is_empty() {
+        summary.message = empty_message.or_else(|| {
+            Some(format!(
+                "Scan completed: {} sources, {} groups",
+                summary.source_dir_count, summary.clip_group_count
+            ))
+        });
+        let status = completed_status(&summary);
+        return finish_scan_execution(scan_run, &progress, status, summary);
+    }
+
+    progress.set_total_sources(source_paths.len());
+    progress.emit(
+        ScanProgressPhase::Scanning,
+        format!("发现 {} 个来源目录", source_paths.len()),
+    );
+    let mut outcomes = Vec::with_capacity(source_paths.len());
+    for source_path in source_paths {
+        if runtime.is_cancelled() {
+            return finish_cancelled_scan(scan_run, &progress, summary);
+        }
+        let step = scan_one_source(
+            connection,
+            source_path,
+            &mut summary,
+            &mut progress,
+            runtime,
+        )?;
+        outcomes.push(step.outcome);
+        if step.cancelled {
+            return finish_cancelled_scan(scan_run, &progress, summary);
+        }
+    }
+
+    progress.emit(ScanProgressPhase::Finalizing, "正在检查丢失文件");
+    if !reconcile_missing_clips(connection, &outcomes, &mut summary, runtime)? {
+        return finish_cancelled_scan(scan_run, &progress, summary);
+    }
+
+    let accessible_sources = outcomes
+        .iter()
+        .filter(|outcome| outcome.accessible)
+        .map(|outcome| outcome.source_path.clone())
+        .collect::<Vec<_>>();
+    if !accessible_sources.is_empty() {
+        if runtime.is_cancelled() {
+            return finish_cancelled_scan(scan_run, &progress, summary);
+        }
+        progress.emit(ScanProgressPhase::Metadata, "正在导入对局元数据");
+        let mut effective_account_hint_scope = metadata_config.account_hint_scope.clone();
+        let metadata_anchor = metadata_config.anchor.clone().or_else(|| {
+            accessible_sources
+                .first()
+                .map(|source| metadata_scan_root_for_source(source))
+        });
+        if let Some(metadata_anchor) = metadata_anchor {
+            let snapshot = collect_metadata_snapshot(
+                &metadata_anchor,
+                metadata_config.allow_external_fallback,
+            );
+            if runtime.is_cancelled() {
+                return finish_cancelled_scan(scan_run, &progress, summary);
+            }
+            if metadata_config.use_local_account_hint_scope
+                && effective_account_hint_scope.is_none()
+            {
+                effective_account_hint_scope = snapshot.local_account_hint_scope.clone();
+            }
+            run_metadata_ingest(
+                connection,
+                &mut summary,
+                &snapshot,
+                effective_account_hint_scope.as_deref(),
+            );
+        }
+
+        if runtime.is_cancelled() {
+            return finish_cancelled_scan(scan_run, &progress, summary);
+        }
+        finalize_scanned_metadata(
+            connection,
+            &accessible_sources,
+            effective_account_hint_scope.as_deref(),
+            &mut summary,
+        )?;
+        if runtime.is_cancelled() {
+            return finish_cancelled_scan(scan_run, &progress, summary);
+        }
+    }
+
+    summary.message = Some(if summary.errors.is_empty() {
+        format!(
+            "Scan completed: {} roots, {} sources, {} groups",
+            requested_roots.len(),
+            summary.source_dir_count,
+            summary.clip_group_count
+        )
+    } else {
+        format!(
+            "Scan completed with warnings: {} roots, {} sources, {} groups",
+            requested_roots.len(),
+            summary.source_dir_count,
+            summary.clip_group_count
+        )
+    });
+    let status = completed_status(&summary);
+    finish_scan_execution(scan_run, &progress, status, summary)
+}
+
+fn completed_status(summary: &ScanSummary) -> ScanExecutionStatus {
+    if summary.errors.is_empty() {
+        ScanExecutionStatus::Completed
+    } else {
+        ScanExecutionStatus::Partial
+    }
+}
+
+fn finish_cancelled_scan(
+    scan_run: ScanRunGuard<'_>,
+    progress: &ScanProgressState<'_>,
+    mut summary: ScanSummary,
+) -> DbResult<ScanExecution> {
+    summary.message = Some(format!(
+        "Scan cancelled after {} sources and {} groups",
+        summary.source_dir_count, summary.clip_group_count
+    ));
+    finish_scan_execution(scan_run, progress, ScanExecutionStatus::Cancelled, summary)
+}
+
+fn finish_scan_execution(
+    scan_run: ScanRunGuard<'_>,
+    progress: &ScanProgressState<'_>,
+    status: ScanExecutionStatus,
+    summary: ScanSummary,
+) -> DbResult<ScanExecution> {
+    scan_run.finish(status.as_str(), &summary)?;
+    let phase = match status {
+        ScanExecutionStatus::Completed => ScanProgressPhase::Completed,
+        ScanExecutionStatus::Partial => ScanProgressPhase::Partial,
+        ScanExecutionStatus::Cancelled => ScanProgressPhase::Cancelled,
+    };
+    progress.emit(
+        phase,
+        summary
+            .message
+            .clone()
+            .unwrap_or_else(|| status.as_str().to_string()),
+    );
+    Ok(ScanExecution { status, summary })
+}
+
+fn scan_one_source(
+    connection: &Connection,
+    source_path: PathBuf,
+    summary: &mut ScanSummary,
+    progress: &mut ScanProgressState<'_>,
+    runtime: ScanRuntime<'_>,
+) -> DbResult<SourceScanStep> {
+    let source_name = path_file_name(&source_path);
+    let source_path_string = path_to_string(&source_path);
+    progress.source_started(&source_name, &source_path);
+    summary.source_dir_count += 1;
+
+    if runtime.is_cancelled() {
+        return Ok(cancelled_source_step(
+            progress,
+            &source_name,
+            source_path,
+            None,
+            HashSet::new(),
+        ));
+    }
+
+    let source_dir = match db::upsert_source_dir(
+        connection,
+        db::SourceDirInput {
+            path: &source_path_string,
+            name: &source_name,
+        },
+    ) {
+        Ok(source_dir) => source_dir,
+        Err(error) => {
+            push_source_error(summary, &source_path, &error);
+            progress.source_finished(&source_name);
+            return Ok(SourceScanStep::finished(SourceScanOutcome {
+                source_path,
+                source_id: None,
+                accessible: false,
+                complete_for_missing: false,
+                seen_paths: HashSet::new(),
+            }));
+        }
+    };
+
+    if runtime.is_cancelled() {
+        return Ok(cancelled_source_step(
+            progress,
+            &source_name,
+            source_path,
+            Some(source_dir.id),
+            HashSet::new(),
+        ));
+    }
+
+    let mut source_errors = Vec::new();
+    let metadata = match fs::metadata(&source_path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let error = format!("Failed to inspect source directory {source_path_string}: {error}");
+            push_source_error(summary, &source_path, &error);
+            db::mark_source_dir_scan_error(connection, source_dir.id, "unavailable", &error)?;
+            progress.source_finished(&source_name);
+            return Ok(SourceScanStep::finished(SourceScanOutcome {
+                source_path,
+                source_id: Some(source_dir.id),
+                accessible: false,
+                complete_for_missing: false,
+                seen_paths: HashSet::new(),
+            }));
+        }
+    };
+    if !metadata.is_dir() {
+        let error = format!("Source path is not a directory: {source_path_string}");
+        push_source_error(summary, &source_path, &error);
+        db::mark_source_dir_scan_error(connection, source_dir.id, "unavailable", &error)?;
+        progress.source_finished(&source_name);
+        return Ok(SourceScanStep::finished(SourceScanOutcome {
+            source_path,
+            source_id: Some(source_dir.id),
+            accessible: false,
+            complete_for_missing: false,
+            seen_paths: HashSet::new(),
+        }));
+    }
+
+    let entries = match read_sorted_entries(&source_path) {
+        Ok(entries) => entries,
+        Err(error) => {
+            push_source_error(summary, &source_path, &error);
+            db::mark_source_dir_scan_error(connection, source_dir.id, "unavailable", &error)?;
+            progress.source_finished(&source_name);
+            return Ok(SourceScanStep::finished(SourceScanOutcome {
+                source_path,
+                source_id: Some(source_dir.id),
+                accessible: false,
+                complete_for_missing: false,
+                seen_paths: HashSet::new(),
+            }));
+        }
+    };
+
+    if runtime.is_cancelled() {
+        return Ok(cancelled_source_step(
+            progress,
+            &source_name,
+            source_path,
+            Some(source_dir.id),
+            HashSet::new(),
+        ));
+    }
+
+    let parsed_configs = match crate::metadata::parse_video_export_configs(&source_path) {
+        Ok(configs) => configs,
+        Err(error) => {
+            push_source_error(summary, &source_path, &error);
+            push_unique_error(&mut source_errors, error);
+            Vec::new()
+        }
+    };
+    let scan_groups = entries
+        .into_iter()
+        .filter_map(|path| {
+            if path.is_dir() {
+                let group_name = path_file_name(&path);
+                return Some((path, group_name, None));
+            }
+            if path.is_file() && has_extension(&path, "mp4") {
+                let group_name = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| path_file_name(&path));
+                return Some((source_path.clone(), group_name, Some(path)));
+            }
+            None
+        })
+        .collect::<Vec<_>>();
+    let mut complete_for_missing = true;
+    let mut seen_paths = HashSet::new();
+
+    for (group_path, group_name, root_clip_path) in scan_groups {
+        if runtime.is_cancelled() {
+            return Ok(cancelled_source_step(
+                progress,
+                &source_name,
+                source_path,
+                Some(source_dir.id),
+                seen_paths,
+            ));
+        }
+        let mp4_files = if let Some(root_clip_path) = root_clip_path {
+            vec![root_clip_path]
+        } else {
+            match mp4_files_in_dir(&group_path) {
+                Ok(files) => files,
+                Err(error) => {
+                    complete_for_missing = false;
+                    push_source_error(summary, &source_path, &error);
+                    push_unique_error(&mut source_errors, error);
+                    continue;
+                }
+            }
+        };
+        if mp4_files.is_empty() {
+            continue;
+        }
+
+        let clip_group = match db::upsert_clip_group(
+            connection,
+            db::ClipGroupInput {
+                source_dir_id: source_dir.id,
+                group_key: &group_name,
+                display_name: &group_name,
+            },
+        ) {
+            Ok(group) => group,
+            Err(error) => {
+                complete_for_missing = false;
+                push_source_error(summary, &source_path, &error);
+                push_unique_error(&mut source_errors, error);
+                continue;
+            }
+        };
+        summary.clip_group_count += 1;
+
+        let cover_paths = match find_cover_jpegs(&group_path) {
+            Ok(paths) => paths,
+            Err(error) => {
+                complete_for_missing = false;
+                push_source_error(summary, &source_path, &error);
+                push_unique_error(&mut source_errors, error);
+                Vec::new()
+            }
+        };
+        let clip_count = mp4_files.len();
+
+        for (clip_index, clip_path) in mp4_files.iter().enumerate() {
+            if runtime.is_cancelled() {
+                return Ok(cancelled_source_step(
+                    progress,
+                    &source_name,
+                    source_path,
+                    Some(source_dir.id),
+                    seen_paths,
+                ));
+            }
+            let clip_metadata = match fs::metadata(clip_path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    complete_for_missing = false;
+                    let error = format!(
+                        "Failed to read clip metadata {}: {error}",
+                        path_to_string(clip_path)
+                    );
+                    push_source_error(summary, &source_path, &error);
+                    push_unique_error(&mut source_errors, error);
+                    continue;
+                }
+            };
+            let video_path = path_to_string(clip_path);
+            let normalized_path = db::normalize_path(&video_path);
+            let modified_time = clip_metadata.modified().ok();
+            let modified_at = modified_time.map(format_system_time);
+            let modified_at_unix =
+                modified_time.and_then(|time| system_time_unix_seconds(time).ok());
+            let file_name = path_file_name(clip_path);
+            let selected_metadata = select_video_export_metadata(&parsed_configs, modified_at_unix);
+            let cover_path = select_cover_for_clip(clip_path, &cover_paths, clip_index, clip_count);
+            let cover_path_string = cover_path.map(path_to_string);
+            let cover_source = if cover_path_string.is_some() {
+                "file"
+            } else {
+                "missing"
+            };
+
+            let saved = match db::upsert_scanned_clip(
+                connection,
+                ClipInput {
+                    source_dir_id: source_dir.id,
+                    clip_group_id: Some(clip_group.id),
+                    video_path: &video_path,
+                    file_name: &file_name,
+                    file_size: clip_metadata.len().min(i64::MAX as u64) as i64,
+                    modified_at: modified_at.as_deref(),
+                    duration_ms: None,
+                    recorded_at: None,
+                    cover_path: cover_path_string.as_deref(),
+                    cover_source,
+                },
+            ) {
+                Ok(saved) => saved,
+                Err(error) => {
+                    complete_for_missing = false;
+                    push_source_error(summary, &source_path, &error);
+                    push_unique_error(&mut source_errors, error);
+                    continue;
+                }
+            };
+            seen_paths.insert(normalized_path);
+            match saved.outcome {
+                ClipSaveOutcome::Inserted => summary.new_clip_count += 1,
+                ClipSaveOutcome::Updated => summary.updated_clip_count += 1,
+                ClipSaveOutcome::Unchanged => {}
+            }
+            if cover_source == "missing" {
+                summary.cover_missing_count += 1;
+            }
+            progress.clip_scanned(&file_name);
+
+            if runtime.is_cancelled() {
+                return Ok(cancelled_source_step(
+                    progress,
+                    &source_name,
+                    source_path,
+                    Some(source_dir.id),
+                    seen_paths,
+                ));
+            }
+            if let Some(metadata) = selected_metadata {
+                let metadata_result = db::upsert_clip_metadata(
+                    connection,
+                    db::ClipMetadataInput {
+                        clip_id: saved.clip.id,
+                        metadata_status: match metadata.parse_status {
+                            crate::metadata::ParseStatus::Parsed => "parsed",
+                            crate::metadata::ParseStatus::Partial => "partial",
+                            crate::metadata::ParseStatus::Failed => "failed",
+                        },
+                        json_path: Some(metadata.json_path.as_str()),
+                        account_name: metadata.player_name.as_deref(),
+                        player_name: metadata.player_name.as_deref(),
+                        agent_name: metadata.agent_name.as_deref(),
+                        map_name: metadata.map_name.as_deref(),
+                        game_mode: metadata.game_mode.as_deref(),
+                        scoreline: None,
+                        kda: metadata.kda.as_deref(),
+                        extracted_text: Some(metadata.extracted_text.as_str()),
+                        parse_error: metadata.parse_error.as_deref(),
+                    },
+                )
+                .and_then(|_| {
+                    let video_type = metadata.detected_video_type();
+                    db::update_video_export_classification(
+                        connection,
+                        saved.clip.id,
+                        video_type.map(|value| value.highlight_type()),
+                        video_type.and_then(|value| value.kill_count()),
+                    )
+                });
+                if let Err(error) = metadata_result {
+                    complete_for_missing = false;
+                    push_source_error(summary, &source_path, &error);
+                    push_unique_error(&mut source_errors, error);
+                    continue;
+                }
+            }
+        }
+        if runtime.is_cancelled() {
+            return Ok(cancelled_source_step(
+                progress,
+                &source_name,
+                source_path,
+                Some(source_dir.id),
+                seen_paths,
+            ));
+        }
+        progress.group_scanned(&group_name);
+    }
+
+    if runtime.is_cancelled() {
+        return Ok(cancelled_source_step(
+            progress,
+            &source_name,
+            source_path,
+            Some(source_dir.id),
+            seen_paths,
+        ));
+    }
+    if source_errors.is_empty() {
+        db::mark_source_dir_scanned(connection, source_dir.id)?;
+    } else {
+        db::mark_source_dir_scan_error(
+            connection,
+            source_dir.id,
+            "partial",
+            &source_errors.join(" | "),
+        )?;
+    }
+    progress.source_finished(&source_name);
+    Ok(SourceScanStep::finished(SourceScanOutcome {
+        source_path,
+        source_id: Some(source_dir.id),
+        accessible: true,
+        complete_for_missing,
+        seen_paths,
+    }))
+}
+
+fn cancelled_source_step(
+    progress: &mut ScanProgressState<'_>,
+    source_name: &str,
+    source_path: PathBuf,
+    source_id: Option<i64>,
+    seen_paths: HashSet<String>,
+) -> SourceScanStep {
+    progress.source_interrupted(source_name);
+    SourceScanStep::cancelled(SourceScanOutcome {
+        source_path,
+        source_id,
+        accessible: true,
+        complete_for_missing: false,
+        seen_paths,
+    })
+}
+
+fn reconcile_missing_clips(
+    connection: &Connection,
+    outcomes: &[SourceScanOutcome],
+    summary: &mut ScanSummary,
+    runtime: ScanRuntime<'_>,
+) -> DbResult<bool> {
+    for outcome in outcomes {
+        if runtime.is_cancelled() {
+            return Ok(false);
+        }
+        if !outcome.complete_for_missing {
+            continue;
+        }
+        let Some(source_id) = outcome.source_id else {
+            continue;
+        };
+        for normalized_path in db::list_active_clip_paths_for_source(connection, source_id)? {
+            if runtime.is_cancelled() {
+                return Ok(false);
+            }
+            if outcome.seen_paths.contains(&normalized_path) {
+                continue;
+            }
+            if db::mark_clip_missing_by_normalized_path(connection, &normalized_path)? {
+                summary.missing_clip_count += 1;
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn collect_metadata_snapshot(
+    scan_root: &Path,
+    allow_external_fallback: bool,
+) -> CachedMetadataIngest {
+    let metadata_paths = metadata_source_paths(scan_root, allow_external_fallback);
+    let mut errors = Vec::new();
+    let leveldb_result =
+        match crate::leveldb_reader::read_leveldb_battle_lists(&metadata_paths.leveldb_dir) {
+            Ok(result) => result,
+            Err(error) => {
+                errors.push(error);
+                Default::default()
+            }
+        };
+    let log_result =
+        match crate::highlight_log_parser::parse_highlight_logs(&metadata_paths.logs_dir) {
+            Ok(result) => result,
+            Err(error) => {
+                errors.push(error);
+                Default::default()
+            }
+        };
+    let wonderful_result = if metadata_paths.wonderful_dir.is_dir() {
+        crate::wonderful_db::read_wonderful_db_dir(&metadata_paths.wonderful_dir)
+    } else {
+        Default::default()
+    };
+
+    CachedMetadataIngest {
+        leveldb_result,
+        log_result,
+        wonderful_result,
+        local_account_hint_scope: metadata_paths.account_hint_scope,
+        errors,
+    }
+}
+
+fn finalize_scanned_metadata(
+    connection: &Connection,
+    source_paths: &[PathBuf],
+    account_hint_scope: Option<&Path>,
+    summary: &mut ScanSummary,
+) -> DbResult<()> {
+    db::clear_invalid_display_metadata(connection)?;
+    db::clear_mismatched_match_metadata(connection)?;
+    for source_path in source_paths {
+        if account_hint_scope.is_none_or(|scope| !path_is_within(source_path, scope)) {
+            db::clear_weak_account_name_hints_for_source_root(connection, source_path)?;
+        }
+    }
+    db::backfill_agent_names_from_export_text(connection)?;
+
+    let mut all_hints = Vec::new();
+    for source_path in source_paths {
+        match collect_edit_agent_asset_hints(source_path) {
+            Ok(mut hints) => all_hints.append(&mut hints),
+            Err(error) => {
+                summary.metadata_warning_count += 1;
+                summary.push_error(error);
+            }
+        }
+    }
+    db::backfill_agent_names_from_asset_hints(
+        connection,
+        &all_hints,
+        EDIT_AGENT_ASSET_WINDOW_SECONDS,
+    )?;
+    if let Some(scope) = account_hint_scope {
+        db::propagate_known_account_names(connection, Some(scope))?;
+    }
+    Ok(())
+}
+
+fn push_source_error(summary: &mut ScanSummary, source_path: &Path, error: &str) {
+    summary.push_error(format!("Source {}: {error}", path_to_string(source_path)));
+}
+
+fn push_unique_error(errors: &mut Vec<String>, error: String) {
+    let error = truncate_utf8_bytes(error, MAX_SCAN_ERROR_MESSAGE_BYTES);
+    if !errors.contains(&error) && errors.len() < MAX_SCAN_ERROR_SAMPLES {
+        errors.push(error);
+    }
+}
+
+fn truncate_utf8_bytes(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    value
+}
+
+fn is_source_directory_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("wonderfulvideos"))
+}
+
+fn normalize_unique_scan_paths<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Vec<PathBuf> {
+    let mut normalized_paths = Vec::new();
+    let mut keys = HashSet::new();
+    for path in paths {
+        let Some(path) = normalize_scan_path(path) else {
+            continue;
+        };
+        if keys.insert(scan_path_key(&path)) {
+            normalized_paths.push(path);
+        }
+    }
+    normalized_paths
+}
+
+fn normalize_scan_path(path: &Path) -> Option<PathBuf> {
+    let value = path.to_string_lossy();
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let normalized = Path::new(value).components().collect::<PathBuf>();
+    if normalized.as_os_str().is_empty() {
+        Some(PathBuf::from("."))
+    } else {
+        Some(normalized)
+    }
+}
+
+fn scan_path_key(path: &Path) -> String {
+    let comparable = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let normalized = db::normalize_path(&path_to_string(&comparable));
+    let trimmed = normalized.trim_end_matches('/');
+    if trimmed.is_empty() {
+        normalized
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    let path_key = scan_path_key(path);
+    let root_key = scan_path_key(root);
+    path_key == root_key
+        || path_key
+            .strip_prefix(&root_key)
+            .is_some_and(|remainder| remainder.starts_with('/'))
+}
+
+fn metadata_scan_root_for_source(source_path: &Path) -> PathBuf {
+    source_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(source_path)
+        .to_path_buf()
+}
+
+fn run_metadata_ingest(
+    connection: &Connection,
+    summary: &mut ScanSummary,
+    metadata: &CachedMetadataIngest,
+    account_hint_scope: Option<&Path>,
+) {
+    summary.metadata_warning_count += metadata.errors.len().min(i64::MAX as usize) as i64;
+    for error in &metadata.errors {
+        summary.push_error(error.clone());
+    }
+    let leveldb_result = &metadata.leveldb_result;
+    let log_result = &metadata.log_result;
+
+    summary.metadata_warning_count += (leveldb_result.warning_count
+        + leveldb_result.bad_record_count
+        + log_result.bad_line_count) as i64;
+    push_metadata_warnings(summary, leveldb_result, log_result);
+
+    match ingest_match_metadata(
+        connection,
+        MetadataIngestInput {
+            leveldb_battles: &leveldb_result.battles,
+            log_records: &log_result.records,
+        },
+    ) {
+        Ok(ingest_summary) => {
+            summary.metadata_match_count = ingest_summary.matches_upserted as i64;
+            summary.metadata_enriched_clip_count = ingest_summary.enriched_clip_count as i64;
+            summary.metadata_event_count = ingest_summary.events_inserted as i64;
+        }
+        Err(error) => {
+            summary.metadata_warning_count += 1;
+            summary.push_error(error);
+        }
+    }
+
+    let mut account_name_hints = leveldb_result
+        .account_roles
+        .iter()
+        .filter_map(|role| {
+            role.player_name
+                .as_ref()
+                .map(|account_name| db::AccountNameHint {
+                    account_id: role.account_id.clone(),
+                    account_name: account_name.clone(),
+                })
+        })
+        .collect::<Vec<_>>();
+    account_name_hints.extend(log_result.account_name_hints.iter().filter_map(|hint| {
+        hint.account_name
+            .as_ref()
+            .map(|account_name| db::AccountNameHint {
+                account_id: hint.account_id.clone(),
+                account_name: account_name.clone(),
+            })
+    }));
+    if let Some(scope) = account_hint_scope {
+        if let Err(error) =
+            db::propagate_account_name_hints(connection, &account_name_hints, Some(scope))
+        {
+            summary.metadata_warning_count += 1;
+            summary.push_error(error);
+        }
+    }
+
+    let wonderful_result = &metadata.wonderful_result;
+    summary.metadata_warning_count += wonderful_result.warnings.len().min(i64::MAX as usize) as i64;
+    for warning in &wonderful_result.warnings {
+        let warning = format!(
+            "WonderfulDb 账号文件 {} 读取警告：{}",
+            warning.account_filename, warning.message
+        );
+        summary.push_error(warning);
+    }
+    match crate::wonderful_ingest::ingest_wonderful_metadata_with_round_scores(
+        connection,
+        &wonderful_result.accounts,
+        &log_result.round_scores,
+    ) {
+        Ok(ingest_summary) => {
+            summary.metadata_enriched_clip_count +=
+                ingest_summary.matched_video_count.min(i64::MAX as usize) as i64;
+            summary.metadata_event_count +=
+                ingest_summary.event_count.min(i64::MAX as usize) as i64;
+        }
+        Err(error) => {
+            summary.metadata_warning_count += 1;
+            summary.push_error(error);
+        }
+    }
+    if let Err(error) = crate::wonderful_ingest::ingest_wonderful_snapshots(
+        connection,
+        &wonderful_result.snapshot_accounts,
+    ) {
+        summary.metadata_warning_count += 1;
+        summary.push_error(error);
+    }
+}
+
+fn push_metadata_warnings(
+    summary: &mut ScanSummary,
+    leveldb_result: &crate::leveldb_reader::LevelDbBattleListResult,
+    log_result: &crate::highlight_log_parser::HighlightLogParseResult,
+) {
+    if leveldb_result.warning_count > 0 {
+        summary.push_error(format!(
+            "LevelDB 读取警告 {} 条，已跳过不可读文件并继续扫描",
+            leveldb_result.warning_count
+        ));
+    }
+
+    if leveldb_result.bad_record_count > 0 {
+        summary.push_error(format!(
+            "LevelDB 对局记录解析失败 {} 条，其他记录已继续导入",
+            leveldb_result.bad_record_count
+        ));
+    }
+
+    if log_result.bad_line_count > 0 {
+        summary.push_error(format!(
+            "highlight.log 解析坏行 {} 条，其他日志行已继续导入",
+            log_result.bad_line_count
+        ));
+    }
+}
+
+fn collect_edit_agent_asset_hints(
+    source_path: &Path,
+) -> Result<Vec<db::ClipAgentAssetHint>, String> {
+    let mut hints = Vec::new();
+    let edit_dir = source_path.join("edit");
+    if !edit_dir.is_dir() {
+        return Ok(hints);
+    }
+
+    let source_dir_name = path_file_name(source_path);
+    for asset_path in read_sorted_entries(&edit_dir)? {
+        if !asset_path.is_file() {
+            continue;
+        }
+
+        let Some(decoded_url) = decode_base64_file_stem(&asset_path) else {
+            continue;
+        };
+        let Some(asset_id) = agent_asset_id_from_url(&decoded_url) else {
+            continue;
+        };
+        let Some(agent_name) = crate::display_names::agent_name_from_asset_id(&asset_id) else {
+            continue;
+        };
+        let Some(observed_at) = fs::metadata(&asset_path)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| system_time_unix_seconds(time).ok())
+        else {
+            continue;
+        };
+
+        hints.push(db::ClipAgentAssetHint {
+            source_dir_name: source_dir_name.clone(),
+            observed_at,
+            agent_name,
+        });
+    }
+
+    Ok(hints)
+}
+
+fn decode_base64_file_stem(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let mut padded = stem.to_string();
+    let remainder = padded.len() % 4;
+    if remainder != 0 {
+        padded.extend(std::iter::repeat_n('=', 4 - remainder));
+    }
+
+    let bytes = general_purpose::STANDARD.decode(padded).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+fn agent_asset_id_from_url(value: &str) -> Option<String> {
+    let lower = value.replace('\\', "/").to_ascii_lowercase();
+    agent_asset_id_after_marker(&lower, "agentbackground/agent/").or_else(|| {
+        let id = agent_asset_id_after_marker(&lower, "agentskill/")?;
+        let marker = format!("agentskill/{id}_");
+        if lower.contains(&marker) {
+            Some(id)
+        } else {
+            None
+        }
+    })
+}
+
+fn agent_asset_id_after_marker(value: &str, marker: &str) -> Option<String> {
+    let start = value.find(marker)? + marker.len();
+    let id = value[start..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+struct MetadataSourcePaths {
+    leveldb_dir: PathBuf,
+    logs_dir: PathBuf,
+    wonderful_dir: PathBuf,
+    account_hint_scope: Option<PathBuf>,
+}
+
+fn metadata_source_paths(
+    scan_root: &Path,
+    allow_external_metadata_fallback: bool,
+) -> MetadataSourcePaths {
+    let is_default_shape = scan_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("aclos-highlight"));
+
+    let (fallback_aclos_root, wonderful_aclos_root, account_hint_scope) = if is_default_shape
+        || allow_external_metadata_fallback
+    {
+        let candidate_aclos_root = if is_default_shape {
+            scan_root.parent().map(Path::to_path_buf)
+        } else {
+            Some(scan_root.to_path_buf())
+        };
+        let default_aclos_root = default_aclos_app_data_dir();
+        let fallback_aclos_root =
+            select_metadata_aclos_root(candidate_aclos_root.clone(), default_aclos_root.clone());
+        let account_hint_scope = candidate_aclos_root
+            .as_ref()
+            .filter(|candidate| scan_path_key(candidate) == scan_path_key(&fallback_aclos_root))
+            .map(|_| scan_root.to_path_buf());
+        let wonderful_aclos_root =
+            select_wonderful_aclos_root(candidate_aclos_root, default_aclos_root);
+        (
+            fallback_aclos_root,
+            wonderful_aclos_root,
+            account_hint_scope,
+        )
+    } else {
+        (
+            scan_root.to_path_buf(),
+            scan_root.to_path_buf(),
+            Some(scan_root.to_path_buf()),
+        )
+    };
+
+    MetadataSourcePaths {
+        leveldb_dir: fallback_aclos_root.join("Local Storage").join("leveldb"),
+        logs_dir: fallback_aclos_root.join("logs"),
+        wonderful_dir: wonderful_aclos_root.join("WonderfulDb"),
+        account_hint_scope,
+    }
+}
+
+fn select_metadata_aclos_root(
+    scan_parent_aclos_root: Option<PathBuf>,
+    default_appdata_aclos_root: PathBuf,
+) -> PathBuf {
+    match scan_parent_aclos_root {
+        Some(scan_parent_aclos_root)
+            if metadata_root_has_sources(&scan_parent_aclos_root)
+                || !metadata_root_has_sources(&default_appdata_aclos_root) =>
+        {
+            scan_parent_aclos_root
+        }
+        Some(_) | None => default_appdata_aclos_root,
+    }
+}
+
+fn metadata_root_has_sources(aclos_root: &Path) -> bool {
+    aclos_root.join("Local Storage").join("leveldb").is_dir()
+        || aclos_root.join("logs").join("highlight.log").is_file()
+}
+
+fn select_wonderful_aclos_root(
+    candidate_aclos_root: Option<PathBuf>,
+    default_appdata_aclos_root: PathBuf,
+) -> PathBuf {
+    match candidate_aclos_root {
+        Some(candidate_aclos_root) if candidate_aclos_root.join("WonderfulDb").is_dir() => {
+            candidate_aclos_root
+        }
+        Some(_) | None => default_appdata_aclos_root,
+    }
+}
+
+fn default_aclos_app_data_dir() -> PathBuf {
+    env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Users\Default"))
+                .join("AppData")
+                .join("Roaming")
+        })
+        .join("ACLOS")
+}
+
+fn scan_roots_from_videocut_log(path: &Path) -> Result<Vec<PathBuf>, String> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+
+    let content = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "Failed to read videocut log {}: {error}",
+            path_to_string(path)
+        )
+    })?;
+    let mut roots = Vec::new();
+
+    for line in content.lines() {
+        for marker in ["clip file:", "file path:"] {
+            let Some(path_text) = path_after_log_marker(line, marker) else {
+                continue;
+            };
+            if let Some(root) = scan_root_from_aclos_path(path_text) {
+                push_unique_scan_root(&mut roots, root);
+            }
+        }
+    }
+
+    Ok(roots)
+}
+
+fn path_after_log_marker<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    let marker_index = line.find(marker)? + marker.len();
+    let tail = line[marker_index..].trim();
+    tail.split(',')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn scan_root_from_aclos_path(value: &str) -> Option<PathBuf> {
+    let normalized = value.trim().replace('/', "\\");
+    let lower = normalized.to_ascii_lowercase();
+    let marker_index = lower.find("\\wonderfulvideos")?;
+    let root = normalized[..marker_index].trim();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
+}
+
+fn mp4_files_in_dir(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let files = read_sorted_entries(path)?
+        .into_iter()
+        .filter(|entry| entry.is_file() && has_extension(entry, "mp4"))
+        .collect::<Vec<_>>();
+
+    Ok(files)
+}
+
+fn find_cover_jpegs(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let covers = read_sorted_entries(path)?
+        .into_iter()
+        .filter(|entry| entry.is_file())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("cover-"))
+                && has_extension(entry, "jpeg")
+        })
+        .collect::<Vec<_>>();
+
+    Ok(covers)
+}
+
+fn select_cover_for_clip<'a>(
+    clip_path: &Path,
+    cover_paths: &'a [PathBuf],
+    clip_index: usize,
+    clip_count: usize,
+) -> Option<&'a Path> {
+    let clip_stem = path_file_stem_lower(clip_path)?;
+
+    for cover_path in cover_paths {
+        let cover_stem = path_file_stem_lower(cover_path)?;
+        let cover_key = cover_stem.strip_prefix("cover-").unwrap_or(&cover_stem);
+
+        if cover_key == clip_stem {
+            return Some(cover_path.as_path());
+        }
+    }
+
+    if cover_paths.len() == clip_count {
+        return cover_paths.get(clip_index).map(PathBuf::as_path);
+    }
+
+    if cover_paths.len() == 1 && clip_count == 1 {
+        return cover_paths.first().map(PathBuf::as_path);
+    }
+
+    None
+}
+
+fn select_video_export_metadata(
+    configs: &[crate::metadata::VideoExportConfigMetadata],
+    clip_modified_at: Option<i64>,
+) -> Option<&crate::metadata::VideoExportConfigMetadata> {
+    let clip_modified_at = clip_modified_at?;
+
+    configs
+        .iter()
+        .filter_map(|config| {
+            let observed_at = video_export_config_observed_at(config)?;
+            let difference = (observed_at - clip_modified_at).abs();
+            if difference <= VIDEO_EXPORT_CONFIG_WINDOW_SECONDS {
+                Some((difference, config))
+            } else {
+                None
+            }
+        })
+        .min_by_key(|(difference, _config)| *difference)
+        .map(|(_difference, config)| config)
+}
+
+fn video_export_config_observed_at(
+    config: &crate::metadata::VideoExportConfigMetadata,
+) -> Option<i64> {
+    fs::metadata(&config.json_path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| system_time_unix_seconds(time).ok())
+}
+
+fn read_sorted_entries(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| format!("Failed to read directory {}: {error}", path_to_string(path)))?
+        .map(|entry| {
+            entry.map(|entry| entry.path()).map_err(|error| {
+                format!(
+                    "Failed to read directory entry {}: {error}",
+                    path_to_string(path)
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    entries.sort_by_key(|path| path_to_string(path).to_lowercase());
+    Ok(entries)
+}
+
+fn has_extension(path: &Path, expected: &str) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+}
+
+fn path_file_stem_lower(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_lowercase())
+}
+
+fn path_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path_to_string(path))
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.display().to_string()
+}
+
+fn format_system_time(time: SystemTime) -> String {
+    system_time_unix_seconds(time)
+        .map(|seconds| seconds.to_string())
+        .unwrap_or_else(|_| "0".to_string())
+}
+
+fn system_time_unix_seconds(time: SystemTime) -> Result<i64, std::time::SystemTimeError> {
+    time.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    // Account IDs, player names, match IDs, and paths below are synthetic fixtures.
+    use aes::Aes256;
+    use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+    use sha2::{Digest, Sha256};
+    use std::{
+        fs::{self, File, FileTimes},
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Mutex,
+        },
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
+    use rusqlite::Connection;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    use crate::db;
+
+    type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+
+    #[test]
+    fn scan_directory_indexes_sources_groups_clips_and_cover_status() {
+        let fixture = TestFixture::new("indexes");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let group_with_cover = source.join("11111111-1111-1111-1111-111111111111");
+        let group_without_cover = source.join("22222222-2222-2222-2222-222222222222");
+        let ignored_empty_group = source.join("33333333-3333-3333-3333-333333333333");
+        fs::create_dir_all(&group_with_cover).expect("group should be created");
+        fs::create_dir_all(&group_without_cover).expect("group should be created");
+        fs::create_dir_all(&ignored_empty_group).expect("group should be created");
+        fs::write(group_with_cover.join("ace.mp4"), b"video-one").expect("clip should be written");
+        fs::write(group_with_cover.join("cover-ace.jpeg"), b"cover")
+            .expect("cover should be written");
+        fs::write(group_without_cover.join("clutch.MP4"), b"video-two")
+            .expect("clip should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        let summary = crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(summary.source_dir_count, 1);
+        assert_eq!(summary.clip_group_count, 2);
+        assert_eq!(summary.new_clip_count, 2);
+        assert_eq!(summary.updated_clip_count, 0);
+        assert_eq!(summary.missing_clip_count, 0);
+        assert_eq!(summary.cover_missing_count, 1);
+        assert!(summary.errors.is_empty());
+        assert_eq!(clips.len(), 2);
+        assert!(clips.iter().any(|clip| {
+            clip.file_name == "ace.mp4"
+                && clip.cover_source == "file"
+                && clip
+                    .cover_path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .ends_with("cover-ace.jpeg")
+                && clip.status == "available"
+        }));
+        assert!(clips.iter().any(|clip| {
+            clip.file_name == "clutch.MP4"
+                && clip.cover_source == "missing"
+                && clip.cover_path.is_none()
+                && clip.status == "available"
+        }));
+    }
+
+    #[test]
+    fn scan_directory_indexes_legacy_mp4_files_in_source_root() {
+        let fixture = TestFixture::new("root-level-legacy-video");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos1001");
+        fs::create_dir_all(&source).expect("source should be created");
+        fs::write(source.join("legacy-video.mp4"), b"legacy-video")
+            .expect("root-level clip should be written");
+        fs::write(source.join("cover-legacy-video.jpeg"), b"legacy-cover")
+            .expect("root-level cover should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        let summary = crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(summary.source_dir_count, 1);
+        assert_eq!(summary.clip_group_count, 1);
+        assert_eq!(summary.new_clip_count, 1);
+        assert!(summary.errors.is_empty());
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].file_name, "legacy-video.mp4");
+        assert_eq!(clips[0].clip_group_name.as_deref(), Some("legacy-video"));
+        assert!(clips[0]
+            .cover_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("cover-legacy-video.jpeg")));
+    }
+
+    #[test]
+    fn scan_roots_indexes_two_sources_in_one_scan_run() {
+        let fixture = ScanBatchFixture::new("two-sources");
+        let library = fixture.path().join("Library");
+        prepare_empty_metadata_root(&library);
+        let sources = [
+            library.join("wonderfulVideos1001"),
+            library.join("wonderfulVideos2002"),
+        ];
+        for (index, source) in sources.iter().enumerate() {
+            let group = source.join(format!("match-{index}"));
+            fs::create_dir_all(&group).expect("source group should be created");
+            fs::write(group.join(format!("clip-{index}.mp4")), b"video")
+                .expect("source clip should be written");
+        }
+        let connection = fixture.open();
+
+        let summary = crate::scanner::scan_roots(&connection, &sources)
+            .expect("multi-source scan should run");
+        let listed_sources = db::list_sources(&connection).expect("sources should list");
+
+        assert_eq!(summary.source_dir_count, 2);
+        assert_eq!(summary.clip_group_count, 2);
+        assert_eq!(summary.new_clip_count, 2);
+        assert!(summary.errors.is_empty());
+        assert_eq!(scan_run_count(&connection), 1);
+        assert_eq!(listed_sources.len(), 2);
+        assert!(listed_sources
+            .iter()
+            .all(|source| source.status == "available" && source.clip_count == 1));
+    }
+
+    #[test]
+    fn scan_roots_deduplicates_windows_case_insensitive_paths() {
+        let fixture = ScanBatchFixture::new("deduplicated-roots");
+        let library = fixture.path().join("Library");
+        prepare_empty_metadata_root(&library);
+        let source = library.join("wonderfulVideos1001");
+        let group = source.join("match-a");
+        fs::create_dir_all(&group).expect("source group should be created");
+        fs::write(group.join("clip.mp4"), b"video").expect("source clip should be written");
+        let case_variant = PathBuf::from(source.to_string_lossy().to_uppercase());
+        let connection = fixture.open();
+
+        let summary = crate::scanner::scan_roots(
+            &connection,
+            &[source.clone(), case_variant, source.join(".")],
+        )
+        .expect("deduplicated scan should run");
+
+        assert_eq!(summary.source_dir_count, 1);
+        assert_eq!(summary.new_clip_count, 1);
+        assert_eq!(db::list_sources(&connection).unwrap().len(), 1);
+        assert_eq!(db::list_clips(&connection).unwrap().len(), 1);
+        assert_eq!(scan_run_count(&connection), 1);
+    }
+
+    #[test]
+    fn scan_roots_empty_input_creates_one_noop_run() {
+        let fixture = ScanBatchFixture::new("empty-roots");
+        let connection = fixture.open();
+
+        let summary = crate::scanner::scan_roots(&connection, &[])
+            .expect("empty source list should be a normal no-op");
+
+        assert_eq!(summary.root_path, "");
+        assert_eq!(summary.source_dir_count, 0);
+        assert_eq!(summary.new_clip_count, 0);
+        assert_eq!(
+            summary.message.as_deref(),
+            Some("No source directories provided")
+        );
+        assert!(summary.errors.is_empty());
+        assert_eq!(scan_run_count(&connection), 1);
+    }
+
+    #[test]
+    fn scan_roots_indexes_mp4_at_direct_source_root() {
+        let fixture = ScanBatchFixture::new("direct-root-mp4");
+        let library = fixture.path().join("Library");
+        prepare_empty_metadata_root(&library);
+        let source = library.join("wonderfulVideos1001");
+        fs::create_dir_all(&source).expect("source should be created");
+        fs::write(source.join("legacy.mp4"), b"video").expect("root clip should be written");
+        fs::write(source.join("cover-legacy.jpeg"), b"cover")
+            .expect("root cover should be written");
+        let connection = fixture.open();
+
+        let summary = crate::scanner::scan_roots(&connection, std::slice::from_ref(&source))
+            .expect("direct source scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(summary.source_dir_count, 1);
+        assert_eq!(summary.clip_group_count, 1);
+        assert_eq!(summary.new_clip_count, 1);
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].file_name, "legacy.mp4");
+        assert_eq!(clips[0].clip_group_name.as_deref(), Some("legacy"));
+        assert_eq!(clips[0].cover_source, "file");
+        assert_eq!(scan_run_count(&connection), 1);
+    }
+
+    #[test]
+    fn scan_roots_uses_adjacent_account_hints_for_direct_source() {
+        let fixture = ScanBatchFixture::new("direct-source-account-hints");
+        let aclos_root = fixture.path().join("ACLOS");
+        prepare_empty_metadata_root(&aclos_root);
+        let account_id = "9000000000000000002";
+        let source = aclos_root
+            .join("aclos-highlight")
+            .join(format!("wonderfulVideos{account_id}"));
+        let group = source.join("match-without-full-metadata");
+        fs::create_dir_all(&group).expect("source group should be created");
+        fs::write(group.join("clip.mp4"), b"video").expect("source clip should be written");
+        fs::write(
+            aclos_root
+                .join("Local Storage")
+                .join("leveldb")
+                .join("000005.ldb"),
+            account_roles_blob(
+                r#"[{"openid":"9000000000000000002","nick":"FixtureBravo","tag":"0002"}]"#,
+            ),
+        )
+        .expect("adjacent account hints should be written");
+        let connection = fixture.open();
+
+        crate::scanner::scan_roots(&connection, std::slice::from_ref(&source))
+            .expect("direct source scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].account_name.as_deref(), Some("FixtureBravo#0002"));
+        assert_eq!(clips[0].player_name.as_deref(), Some("FixtureBravo#0002"));
+    }
+
+    #[test]
+    fn scan_roots_continues_after_unavailable_source_without_marking_history_missing() {
+        let fixture = ScanBatchFixture::new("partial-source-failure");
+        let library = fixture.path().join("Library");
+        prepare_empty_metadata_root(&library);
+        let unavailable_source = library.join("wonderfulVideos1001");
+        let unavailable_group = unavailable_source.join("old-match");
+        let unavailable_clip = unavailable_group.join("old.mp4");
+        fs::create_dir_all(&unavailable_group).expect("historical group should be created");
+        fs::write(&unavailable_clip, b"old-video").expect("historical clip should be written");
+        let connection = fixture.open();
+        crate::scanner::scan_roots(&connection, std::slice::from_ref(&unavailable_source))
+            .expect("initial source scan should run");
+        connection
+            .execute("DELETE FROM scan_runs", [])
+            .expect("initial scan run should be cleared for batch assertion");
+        fs::remove_dir_all(&unavailable_source).expect("source should become unavailable");
+
+        let available_source = library.join("wonderfulVideos2002");
+        let available_group = available_source.join("new-match");
+        fs::create_dir_all(&available_group).expect("available group should be created");
+        fs::write(available_group.join("new.mp4"), b"new-video")
+            .expect("available clip should be written");
+
+        let summary = crate::scanner::scan_roots(
+            &connection,
+            &[unavailable_source.clone(), available_source.clone()],
+        )
+        .expect("partial source failure should not abort the batch");
+        let clips = db::list_clips(&connection).expect("clips should list");
+        let sources = db::list_sources(&connection).expect("sources should list");
+        let unavailable = sources
+            .iter()
+            .find(|source| {
+                super::scan_path_key(Path::new(&source.path))
+                    == super::scan_path_key(&unavailable_source)
+            })
+            .expect("unavailable source should remain indexed");
+        let available = sources
+            .iter()
+            .find(|source| {
+                super::scan_path_key(Path::new(&source.path))
+                    == super::scan_path_key(&available_source)
+            })
+            .expect("available source should be indexed");
+
+        assert_eq!(summary.source_dir_count, 2);
+        assert_eq!(summary.new_clip_count, 1);
+        assert_eq!(summary.missing_clip_count, 0);
+        assert!(!summary.errors.is_empty());
+        assert_eq!(scan_run_count(&connection), 1);
+        let scan_status: String = connection
+            .query_row("SELECT status FROM scan_runs", [], |row| row.get(0))
+            .expect("partial scan status should load");
+        assert_eq!(scan_status, "partial");
+        assert_eq!(unavailable.status, "unavailable");
+        assert!(unavailable.last_error.is_some());
+        assert_eq!(unavailable.clip_count, 1);
+        assert_eq!(available.status, "available");
+        assert_eq!(available.clip_count, 1);
+        assert_eq!(clips.len(), 2);
+        assert!(clips
+            .iter()
+            .any(|clip| { clip.file_name == "old.mp4" && clip.status == "available" }));
+        assert!(clips
+            .iter()
+            .any(|clip| { clip.file_name == "new.mp4" && clip.status == "available" }));
+    }
+
+    #[test]
+    fn scan_roots_imports_one_shared_metadata_snapshot() {
+        let fixture = ScanBatchFixture::new("shared-metadata");
+        let archive_a = fixture.path().join("ArchiveA");
+        let archive_b = fixture.path().join("ArchiveB");
+        prepare_empty_metadata_root(&archive_a);
+        let sources = [
+            archive_a.join("wonderfulVideos1001"),
+            archive_b.join("wonderfulVideos1001"),
+        ];
+        for (index, source) in sources.iter().enumerate() {
+            let group = source.join("match-shared");
+            fs::create_dir_all(&group).expect("shared match group should be created");
+            fs::write(group.join(format!("clip-{index}.mp4")), b"video")
+                .expect("shared match clip should be written");
+        }
+        let leveldb_payload = r#"[{
+            "battleId":"battle-shared",
+            "matchId":"match-shared",
+            "kills":18,
+            "deaths":7,
+            "assists":3,
+            "date":"2026-07-01T10:00:00Z"
+        }]"#;
+        fs::write(
+            archive_a
+                .join("Local Storage")
+                .join("leveldb")
+                .join("000003.ldb"),
+            leveldb_blob("1001", leveldb_payload),
+        )
+        .expect("shared LevelDB fixture should be written");
+        let log_content = concat!(
+            "2026-07-01 first request data is [{",
+            r#""matchId":"match-shared","#,
+            r#""battleId":"battle-shared","#,
+            r#""recordSrc":"D:/ArchiveA/wonderfulVideos1001/match-shared","#,
+            r#""player":{"name":"PlayerOne#0000"},"#,
+            r#""map":{"id":"maps/ascent","name":"Ascent"},"#,
+            r#""mode":"Competitive","#,
+            r#""agent":{"name":"Jett"},"#,
+            r#""killEvents":[{"#,
+            r#""eventTime":"2026-07-01T10:00:31Z","#,
+            r#""roundId":3,"#,
+            r#""weaponName":"Vandal","#,
+            r#""killerName":"PlayerOne#0000","#,
+            r#""killedName":"Opponent#0000""#,
+            "}]}]"
+        );
+        fs::write(archive_a.join("logs").join("highlight.log"), log_content)
+            .expect("shared log fixture should be written");
+        let connection = fixture.open();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE match_write_audit (operation TEXT NOT NULL);
+                CREATE TRIGGER audit_match_insert
+                AFTER INSERT ON matches
+                BEGIN
+                    INSERT INTO match_write_audit (operation) VALUES ('insert');
+                END;
+                CREATE TRIGGER audit_match_update
+                AFTER UPDATE ON matches
+                BEGIN
+                    INSERT INTO match_write_audit (operation) VALUES ('update');
+                END;
+                ",
+            )
+            .expect("metadata write audit should be installed");
+
+        let summary = crate::scanner::scan_roots(&connection, &sources)
+            .expect("shared metadata scan should run");
+        let match_write_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM match_write_audit", [], |row| {
+                row.get(0)
+            })
+            .expect("metadata write count should load");
+        let clips = db::list_clips(&connection).expect("enriched clips should list");
+
+        assert_eq!(summary.metadata_match_count, 1);
+        assert_eq!(summary.metadata_enriched_clip_count, 2);
+        assert_eq!(summary.metadata_event_count, 1);
+        assert_eq!(summary.metadata_warning_count, 0);
+        assert_eq!(match_write_count, 1);
+        assert_eq!(scan_run_count(&connection), 1);
+        assert_eq!(clips.len(), 2);
+        assert!(clips
+            .iter()
+            .all(|clip| clip.player_name.as_deref() == Some("PlayerOne#0000")));
+    }
+
+    #[test]
+    fn scan_custom_directory_matches_scan_roots_summary_for_direct_source() {
+        let fixture = ScanBatchFixture::new("compat-summary");
+        let library = fixture.path().join("Library");
+        prepare_empty_metadata_root(&library);
+        let source = library.join("wonderfulVideos1001");
+        let group = source.join("match-a");
+        fs::create_dir_all(&group).expect("source group should be created");
+        fs::write(group.join("clip.mp4"), b"video").expect("source clip should be written");
+        let new_connection = fixture.open();
+        let compatibility_database = fixture.path().join("compatibility.sqlite3");
+        db::migrate_database(&compatibility_database)
+            .expect("compatibility database should migrate explicitly");
+        let compatibility_connection =
+            db::open_database(&compatibility_database).expect("compatibility database should open");
+
+        let new_summary =
+            crate::scanner::scan_roots(&new_connection, std::slice::from_ref(&source))
+                .expect("new scan core should run");
+        let compatibility_summary =
+            crate::scanner::scan_custom_directory(&compatibility_connection, &source)
+                .expect("compatibility scan should run");
+
+        assert_eq!(compatibility_summary, new_summary);
+        assert_eq!(scan_run_count(&new_connection), 1);
+        assert_eq!(scan_run_count(&compatibility_connection), 1);
+    }
+
+    #[test]
+    fn scan_imports_wonderful_db_after_indexing_files() {
+        let fixture = TestFixture::new("wonderful-db-ingest");
+        let aclos_root = fixture.path().join("ACLOS");
+        let root = aclos_root.join("aclos-highlight");
+        let group = root.join("wonderfulVideos1001").join("match-a");
+        let wonderful_dir = aclos_root.join("WonderfulDb");
+        fs::create_dir_all(&group).expect("clip group should be created");
+        fs::create_dir_all(&wonderful_dir).expect("WonderfulDb should be created");
+        fs::create_dir_all(aclos_root.join("Local Storage").join("leveldb"))
+            .expect("local metadata root should be created");
+        let clip_path = group.join("video-six.mp4");
+        fs::write(&clip_path, b"video-six").expect("clip should be written");
+        let events = (0..6)
+            .map(|index| {
+                format!(
+                    r#"{{"event_id":"event-{index}","event_type":"kill","event_sTime":{},"killer_is_me":true}}"#,
+                    index * 500
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let plaintext = format!(
+            r#"{{"key_wonderful_list_1001":[{{"matches_id":"match-a","match_startTime":"2026-07-04T12:00:00Z","match_map":"隐世修所","videos":[{{"video_id":"video-six","video_name":"六杀时刻","video_type":"10","round_clips":[{{"segment_id":"segment-a","round_id":7,"clip_sTime":1000,"clip_eTime":5000,"clip_events":[{events}]}}]}}]}}]}}"#
+        );
+        fs::write(
+            wonderful_dir.join("1001"),
+            encrypt_wonderful_db_text("1001", &plaintext),
+        )
+        .expect("WonderfulDb account fixture should be written");
+        fs::write(wonderful_dir.join("1002"), "not-hex")
+            .expect("corrupt WonderfulDb account fixture should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        let summary = crate::scanner::scan_directory(&connection, &root).expect("scan should run");
+        let normalized_path = db::normalize_path(&super::path_to_string(&clip_path));
+        let (clip_id, official_video_name, kill_count): (i64, Option<String>, Option<i64>) =
+            connection
+                .query_row(
+                    "
+                    SELECT clips.id, clip_metadata.official_video_name, clip_metadata.kill_count
+                    FROM clips
+                    JOIN clip_metadata ON clip_metadata.clip_id = clips.id
+                    WHERE clips.normalized_path = ?1
+                    ",
+                    rusqlite::params![normalized_path],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("indexed clip metadata should load");
+
+        assert_eq!(official_video_name.as_deref(), Some("六杀时刻"));
+        assert_eq!(kill_count, Some(6));
+        assert_eq!(summary.metadata_warning_count, 1);
+        assert_eq!(
+            db::list_clip_events_for_clip(&connection, clip_id)
+                .expect("clip events should load")
+                .len(),
+            6
+        );
+
+        let metadata_dir = root.join("wonderfulVideos1001").join("videoExportTmp");
+        fs::create_dir_all(&metadata_dir).expect("fallback metadata dir should be created");
+        fs::write(
+            metadata_dir.join("config-fallback.json"),
+            r#"{"玩家昵称":"Fallback#0001","地图":"天枢之阙","游戏模式":"竞技模式","KDA":"1/1/1"}"#,
+        )
+        .expect("fallback metadata should be written");
+        fs::remove_file(wonderful_dir.join("1001"))
+            .expect("valid WonderfulDb fixture should be removed");
+
+        crate::scanner::scan_directory(&connection, &root).expect("rescan should run");
+        let preserved: (String, Option<String>, Option<String>, Option<i64>, Option<String>) =
+            connection
+                .query_row(
+                    "
+                    SELECT metadata_status, map_name, official_video_name, kill_count, metadata_source
+                    FROM clip_metadata
+                    WHERE clip_id = ?1
+                    ",
+                    rusqlite::params![clip_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .expect("rescanned official metadata should load");
+        assert_eq!(preserved.0, "enriched");
+        assert_eq!(preserved.1.as_deref(), Some("隐世修所"));
+        assert_eq!(preserved.2.as_deref(), Some("六杀时刻"));
+        assert_eq!(preserved.3, Some(6));
+        assert_eq!(preserved.4.as_deref(), Some("wonderful_db"));
+        let clip_times: (Option<i64>, Option<String>) = connection
+            .query_row(
+                "SELECT duration_ms, recorded_at FROM clips WHERE id = ?1",
+                rusqlite::params![clip_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("rescanned official clip times should load");
+        assert_eq!(clip_times.0, Some(5_000));
+        assert_eq!(clip_times.1.as_deref(), Some("2026-07-04T12:00:00Z"));
+    }
+
+    #[test]
+    fn official_ingest_replaces_fallback_video_type_without_creating_tags() {
+        let fixture = TestFixture::new("official-video-type-wins");
+        let aclos_root = fixture.path().join("ACLOS");
+        let root = aclos_root.join("aclos-highlight");
+        let source = root.join("wonderfulVideos1001");
+        let group = source.join("match-death");
+        let metadata_dir = source.join("videoExportTmp");
+        let wonderful_dir = aclos_root.join("WonderfulDb");
+        fs::create_dir_all(&group).expect("clip group should be created");
+        fs::create_dir_all(&metadata_dir).expect("fallback metadata dir should be created");
+        fs::create_dir_all(&wonderful_dir).expect("WonderfulDb should be created");
+        fs::write(group.join("death.mp4"), b"death-video").expect("clip should be written");
+        fs::write(
+            metadata_dir.join("config-death.json"),
+            r#"{"title":"ACE 击杀合集","玩家昵称":"Fallback#0001","地图":"天枢之阙"}"#,
+        )
+        .expect("fallback metadata should be written");
+        let plaintext = r#"{"key_wonderful_list_1001":[{"matches_id":"match-death","videos":[{"video_id":"death","video_name":"死亡集锦","video_type":"3","round_clips":[]}]}]}"#;
+        fs::write(
+            wonderful_dir.join("1001"),
+            encrypt_wonderful_db_text("1001", plaintext),
+        )
+        .expect("WonderfulDb account fixture should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        crate::scanner::scan_directory(&connection, &root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(clips[0].highlight_type, Some(3));
+        assert_eq!(clips[0].official_video_name.as_deref(), Some("死亡集锦"));
+        assert!(clips[0].tag_ids.is_empty());
+    }
+
+    #[test]
+    fn scan_directory_assigns_matching_cover_to_each_clip() {
+        let fixture = TestFixture::new("matching-covers");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let group = source.join("11111111-1111-1111-1111-111111111111");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::write(group.join("ace.mp4"), b"video-one").expect("clip should be written");
+        fs::write(group.join("clutch.mp4"), b"video-two").expect("clip should be written");
+        fs::write(group.join("cover-ace.jpeg"), b"cover-one").expect("cover should be written");
+        fs::write(group.join("cover-clutch.jpeg"), b"cover-two").expect("cover should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        let summary = crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+        let ace = clips
+            .iter()
+            .find(|clip| clip.file_name == "ace.mp4")
+            .expect("ace clip should exist");
+        let clutch = clips
+            .iter()
+            .find(|clip| clip.file_name == "clutch.mp4")
+            .expect("clutch clip should exist");
+
+        assert_eq!(summary.cover_missing_count, 0);
+        assert!(ace
+            .cover_path
+            .as_deref()
+            .unwrap_or_default()
+            .ends_with("cover-ace.jpeg"));
+        assert!(clutch
+            .cover_path
+            .as_deref()
+            .unwrap_or_default()
+            .ends_with("cover-clutch.jpeg"));
+    }
+
+    #[test]
+    fn scan_directory_ignores_package_match_covers_for_clip_thumbnails() {
+        let fixture = TestFixture::new("package-summary-cover");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let group_with_cover = source.join("match-a");
+        let group_without_cover = source.join("match-b");
+        let snapshot_dir = source.join("snapshot");
+        fs::create_dir_all(&group_with_cover).expect("group should be created");
+        fs::create_dir_all(&group_without_cover).expect("group should be created");
+        fs::create_dir_all(&snapshot_dir).expect("snapshot dir should be created");
+        let clip_with_cover_path = group_with_cover.join("ace.mp4");
+        let clip_without_cover_path = group_without_cover.join("clutch.mp4");
+        let ordinary_cover = group_with_cover.join("cover-ace.jpeg");
+        let package_cover = snapshot_dir.join("package_match_a.jpeg");
+        fs::write(&clip_with_cover_path, b"video-one").expect("clip should be written");
+        fs::write(&clip_without_cover_path, b"video-two").expect("clip should be written");
+        fs::write(&ordinary_cover, b"ordinary-cover").expect("cover should be written");
+        fs::write(&package_cover, b"summary-cover").expect("package cover should be written");
+        let clip_time = UNIX_EPOCH + Duration::from_secs(1_782_000_000);
+        set_file_modified_time(&clip_with_cover_path, clip_time);
+        set_file_modified_time(&clip_without_cover_path, clip_time);
+        set_file_modified_time(&ordinary_cover, clip_time);
+        set_file_modified_time(&package_cover, clip_time + Duration::from_secs(4));
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        let summary = crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+        let clip_with_cover = clips
+            .iter()
+            .find(|clip| clip.file_name == "ace.mp4")
+            .expect("clip with cover should exist");
+        let clip_without_cover = clips
+            .iter()
+            .find(|clip| clip.file_name == "clutch.mp4")
+            .expect("clip without cover should exist");
+
+        assert_eq!(summary.cover_missing_count, 1);
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clip_with_cover.cover_source, "file");
+        assert_eq!(
+            clip_with_cover.cover_path.as_deref(),
+            Some(super::path_to_string(&ordinary_cover).as_str())
+        );
+        assert_eq!(clip_without_cover.cover_source, "missing");
+        assert_eq!(clip_without_cover.cover_path, None);
+    }
+
+    #[test]
+    fn scan_directory_stores_source_metadata_on_clips() {
+        let fixture = TestFixture::new("metadata");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let metadata_dir = source.join("videoExportTmp");
+        let group = source.join("11111111-1111-1111-1111-111111111111");
+        fs::create_dir_all(&metadata_dir).expect("metadata dir should be created");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::write(group.join("ace.mp4"), b"video-one").expect("clip should be written");
+        fs::write(
+            metadata_dir.join("config-player.json"),
+            r#"{
+                "玩家昵称": "FixtureAlpha#0001",
+                "地图": "天枢之阙",
+                "游戏模式": "竞技模式",
+                "KDA": "36/17/6"
+            }"#,
+        )
+        .expect("metadata should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].account_name.as_deref(), Some("FixtureAlpha#0001"));
+        assert_eq!(clips[0].player_name.as_deref(), Some("FixtureAlpha#0001"));
+        assert_eq!(clips[0].map_name.as_deref(), Some("天枢之阙"));
+        assert_eq!(clips[0].game_mode.as_deref(), Some("竞技模式"));
+        assert_eq!(clips[0].kda.as_deref(), Some("36/17/6"));
+        assert!(clips[0].extracted_text.contains("FixtureAlpha#0001"));
+    }
+
+    #[test]
+    fn scan_directory_persists_exported_video_type_without_creating_tags() {
+        let fixture = TestFixture::new("metadata-video-type");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let metadata_dir = source.join("videoExportTmp");
+        let group = source.join("11111111-1111-1111-1111-111111111111");
+        fs::create_dir_all(&metadata_dir).expect("metadata dir should be created");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::write(group.join("ace.mp4"), b"video-one").expect("clip should be written");
+        fs::write(
+            metadata_dir.join("config-video-type.json"),
+            r#"{
+                "title": "六杀时刻",
+                "玩家昵称": "FixtureAlpha#0001",
+                "地图": "天枢之阙"
+            }"#,
+        )
+        .expect("metadata should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].highlight_type, Some(10));
+        assert_eq!(clips[0].kill_count, Some(6));
+        assert!(clips[0].tag_ids.is_empty());
+    }
+
+    #[test]
+    fn scan_directory_uses_nearest_export_config_for_each_clip_group() {
+        let fixture = TestFixture::new("metadata-nearest-config");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let metadata_dir = source.join("videoExportTmp");
+        let old_group = source.join("old-match");
+        let new_group = source.join("new-match");
+        fs::create_dir_all(&metadata_dir).expect("metadata dir should be created");
+        fs::create_dir_all(&old_group).expect("old group should be created");
+        fs::create_dir_all(&new_group).expect("new group should be created");
+
+        let old_config = metadata_dir.join("config-100-old.json");
+        let new_config = metadata_dir.join("config-200-new.json");
+        let old_clip = old_group.join("old.mp4");
+        let new_clip = new_group.join("new.mp4");
+        fs::write(
+            &old_config,
+            r#"{"玩家昵称":"Old#0001","地图":"源工重镇","游戏模式":"竞技模式","KDA":"10/1/2"}"#,
+        )
+        .expect("old metadata should be written");
+        fs::write(
+            &new_config,
+            r#"{"玩家昵称":"New#0002","地图":"隐世修所","游戏模式":"竞技模式","KDA":"20/2/4"}"#,
+        )
+        .expect("new metadata should be written");
+        fs::write(&old_clip, b"old-video").expect("old clip should be written");
+        fs::write(&new_clip, b"new-video").expect("new clip should be written");
+
+        let old_time = UNIX_EPOCH + Duration::from_secs(1_782_000_000);
+        let new_time = old_time + Duration::from_secs(600);
+        set_file_modified_time(&old_config, old_time);
+        set_file_modified_time(&old_clip, old_time + Duration::from_secs(3));
+        set_file_modified_time(&new_config, new_time);
+        set_file_modified_time(&new_clip, new_time + Duration::from_secs(3));
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+        let old = clips
+            .iter()
+            .find(|clip| clip.clip_group_name.as_deref() == Some("old-match"))
+            .expect("old clip should exist");
+        let new = clips
+            .iter()
+            .find(|clip| clip.clip_group_name.as_deref() == Some("new-match"))
+            .expect("new clip should exist");
+
+        assert_eq!(old.account_name.as_deref(), Some("Old#0001"));
+        assert_eq!(old.map_name.as_deref(), Some("源工重镇"));
+        assert_eq!(old.kda.as_deref(), Some("10/1/2"));
+        assert_eq!(new.account_name.as_deref(), Some("New#0002"));
+        assert_eq!(new.map_name.as_deref(), Some("隐世修所"));
+        assert_eq!(new.kda.as_deref(), Some("20/2/4"));
+    }
+
+    #[test]
+    fn scan_directory_clears_stale_asset_account_metadata_without_source_config() {
+        let fixture = TestFixture::new("stale-asset-account");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos1001");
+        let group = source.join("match-a-001");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::write(group.join("ace.mp4"), b"video-one").expect("clip should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        crate::scanner::scan_directory(&connection, root).expect("initial scan should run");
+        let clip_id = db::list_clips(&connection).expect("clips should list")[0].id;
+        db::upsert_clip_metadata(
+            &connection,
+            db::ClipMetadataInput {
+                clip_id,
+                metadata_status: "parsed",
+                json_path: None,
+                account_name: Some("Cards/D3018FBE-45CD-786A-DD6C-BCAF429F7096.png"),
+                player_name: Some("Cards/D3018FBE-45CD-786A-DD6C-BCAF429F7096.png"),
+                agent_name: None,
+                map_name: Some("隐世修所"),
+                game_mode: Some("竞技模式"),
+                scoreline: None,
+                kda: Some("27/22/6"),
+                extracted_text: None,
+                parse_error: None,
+            },
+        )
+        .expect("stale metadata should seed");
+
+        crate::scanner::scan_directory(&connection, root).expect("rescan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(clips[0].account_name, None);
+        assert_eq!(clips[0].player_name, None);
+        assert_eq!(clips[0].map_name.as_deref(), Some("隐世修所"));
+        assert_eq!(clips[0].game_mode.as_deref(), Some("竞技模式"));
+    }
+
+    #[test]
+    fn scan_directory_backfills_agent_from_nearby_edit_asset() {
+        let fixture = TestFixture::new("edit-agent-asset");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos1001");
+        let group = source.join("match-a-001");
+        let edit_dir = source.join("edit");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::create_dir_all(&edit_dir).expect("edit dir should be created");
+        fs::write(group.join("ace.mp4"), b"video-one").expect("clip should be written");
+        fs::write(
+            edit_dir.join(
+                "aHR0cHM6Ly9nYW1lLmd0aW1nLmNuL2ltYWdlcy92YWwvYWdhbWV6bGsvYWdlbnRiYWNrZ3JvdW5kL2FnZW50LzE3LnBuZw==.png",
+            ),
+            b"agent-background",
+        )
+        .expect("agent asset should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].metadata_status, "partial");
+        assert_eq!(clips[0].agent_name.as_deref(), Some("Chamber"));
+    }
+
+    #[test]
+    fn scan_directory_runs_metadata_ingest_for_matching_match_group() {
+        let fixture = TestFixture::new("metadata-ingest");
+        let aclos_root = fixture.path().join("ACLOS");
+        prepare_empty_metadata_root(&aclos_root);
+        let root = aclos_root.join("aclos-highlight");
+        let source = root.join("wonderfulVideos1001");
+        let group = source.join("match-a-001");
+        let leveldb_dir = aclos_root.join("Local Storage").join("leveldb");
+        let logs_dir = aclos_root.join("logs");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::create_dir_all(&leveldb_dir).expect("leveldb dir should be created");
+        fs::create_dir_all(&logs_dir).expect("logs dir should be created");
+        fs::write(group.join("ace.mp4"), b"video-one").expect("clip should be written");
+        let leveldb_payload = r#"[{
+            "battleId":"battle-a-001",
+            "matchId":"match-a-001",
+            "kills":18,
+            "deaths":7,
+            "assists":3,
+            "date":"2026-07-01T10:00:00Z",
+            "heroAvatarUrl":"https://assets.example/jett.png"
+        }]"#;
+        let log_content = concat!(
+            "2026-07-01 first request data is [{",
+            r#""matchId":"match-a-001","#,
+            r#""battleId":"battle-a-001","#,
+            r#""recordSrc":"D:/ACLOS/aclos-highlight/wonderfulVideos1001/match-a-001","#,
+            r#""player":{"name":"PlayerOne#0000"},"#,
+            r#""map":{"id":"maps/ascent","name":"Ascent"},"#,
+            r#""mode":"Competitive","#,
+            r#""agent":{"name":"Jett"},"#,
+            r#""score":{"roundsWon":13,"roundsLost":11,"hasWon":true},"#,
+            r#""combatScore":287,"#,
+            r#""killEvents":[{"#,
+            r#""eventTime":"2026-07-01T10:00:31Z","#,
+            r#""roundId":3,"#,
+            r#""weaponName":"Vandal","#,
+            r#""killerName":"PlayerOne#0000","#,
+            r#""killedName":"Opponent#0000""#,
+            "}]}]"
+        );
+        fs::write(
+            leveldb_dir.join("000003.ldb"),
+            leveldb_blob("1001", leveldb_payload),
+        )
+        .expect("leveldb fixture should be written");
+        fs::write(logs_dir.join("highlight.log"), log_content)
+            .expect("log fixture should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        let summary = crate::scanner::scan_directory(&connection, &root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(summary.metadata_match_count, 1);
+        assert_eq!(summary.metadata_enriched_clip_count, 1);
+        assert_eq!(summary.metadata_event_count, 1);
+        assert_eq!(summary.metadata_warning_count, 0);
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].player_name.as_deref(), Some("PlayerOne#0000"));
+        assert_eq!(clips[0].agent_name.as_deref(), Some("Jett"));
+        assert_eq!(clips[0].map_name.as_deref(), Some("亚海悬城"));
+        assert_eq!(clips[0].game_mode.as_deref(), Some("竞技模式"));
+        assert_eq!(clips[0].scoreline.as_deref(), Some("13/11"));
+        assert_eq!(clips[0].kda.as_deref(), Some("18/7/3"));
+        assert_eq!(clips[0].recorded_at.as_deref(), None);
+
+        let latest = crate::scanner::latest_scan_summary(&connection)
+            .expect("summary query should run")
+            .expect("summary should exist");
+        assert_eq!(latest.metadata_match_count, 1);
+        assert_eq!(latest.metadata_enriched_clip_count, 1);
+        assert_eq!(latest.metadata_event_count, 1);
+        assert_eq!(latest.metadata_warning_count, 0);
+    }
+
+    #[test]
+    fn scan_directory_backfills_account_name_from_leveldb_account_roles() {
+        let fixture = TestFixture::new("account-role-ingest");
+        let aclos_root = fixture.path().join("ACLOS");
+        prepare_empty_metadata_root(&aclos_root);
+        let root = aclos_root.join("aclos-highlight");
+        let source = root.join("wonderfulVideos9000000000000000002");
+        let group = source.join("match-without-full-metadata");
+        let leveldb_dir = aclos_root.join("Local Storage").join("leveldb");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::create_dir_all(&leveldb_dir).expect("leveldb dir should be created");
+        fs::write(group.join("ace.mp4"), b"video-one").expect("clip should be written");
+        fs::write(
+            leveldb_dir.join("000005.ldb"),
+            account_roles_blob(
+                r#"[{"openid":"9000000000000000002","nick":"FixtureBravo","tag":"0002"}]"#,
+            ),
+        )
+        .expect("leveldb account role fixture should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        crate::scanner::scan_directory(&connection, &root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].account_name.as_deref(), Some("FixtureBravo#0002"));
+        assert_eq!(clips[0].player_name.as_deref(), Some("FixtureBravo#0002"));
+    }
+
+    #[test]
+    fn scan_directory_backfills_account_name_from_highlight_log_account_hints() {
+        let fixture = TestFixture::new("log-account-role-ingest");
+        let aclos_root = fixture.path().join("ACLOS");
+        prepare_empty_metadata_root(&aclos_root);
+        let root = aclos_root.join("aclos-highlight");
+        let source = root.join("wonderfulVideos90000000000000000005");
+        let group = source.join("match-without-full-metadata");
+        let logs_dir = aclos_root.join("logs");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::create_dir_all(&logs_dir).expect("logs dir should be created");
+        fs::write(group.join("ace.mp4"), b"video-one").expect("clip should be written");
+        fs::write(
+            logs_dir.join("highlight.log"),
+            r#"RESPONSE: {"result":0,"data":{"list":[{"role_name":"FixtureCharlie","nick_id":"0004","g_open_id":"90000000000000000005"}]}}"#,
+        )
+        .expect("highlight log fixture should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        crate::scanner::scan_directory(&connection, &root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(clips.len(), 1);
+        assert_eq!(
+            clips[0].account_name.as_deref(),
+            Some("FixtureCharlie#0004")
+        );
+        assert_eq!(clips[0].player_name.as_deref(), Some("FixtureCharlie#0004"));
+    }
+
+    #[test]
+    fn metadata_source_paths_fall_back_to_appdata_when_scan_parent_has_no_metadata() {
+        let fixture = TestFixture::new("metadata-paths");
+        let scan_aclos_root = fixture.path().join("AppData").join("ACLOS");
+        let appdata_aclos_root = fixture.path().join("Roaming").join("ACLOS");
+        let scan_root = scan_aclos_root.join("aclos-highlight");
+        fs::create_dir_all(&scan_root).expect("scan root should be created");
+        fs::create_dir_all(appdata_aclos_root.join("Local Storage").join("leveldb"))
+            .expect("appdata leveldb should be created");
+        fs::create_dir_all(appdata_aclos_root.join("logs"))
+            .expect("appdata logs should be created");
+        fs::write(appdata_aclos_root.join("logs").join("highlight.log"), b"")
+            .expect("appdata log should be written");
+
+        let selected_root =
+            super::select_metadata_aclos_root(Some(scan_aclos_root), appdata_aclos_root.clone());
+
+        assert_eq!(selected_root, appdata_aclos_root);
+    }
+
+    #[test]
+    fn metadata_source_paths_select_wonderful_db_independently_from_logs() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let fixture = TestFixture::new("split-metadata-paths");
+        let original_appdata = std::env::var_os("APPDATA");
+        let candidate_aclos_root = fixture.path().join("Local").join("ACLOS");
+        let scan_root = candidate_aclos_root.join("aclos-highlight");
+        let appdata = fixture.path().join("Roaming");
+        let appdata_aclos_root = appdata.join("ACLOS");
+        fs::create_dir_all(candidate_aclos_root.join("logs"))
+            .expect("candidate logs should be created");
+        fs::write(candidate_aclos_root.join("logs").join("highlight.log"), b"")
+            .expect("candidate log should be written");
+        fs::create_dir_all(appdata_aclos_root.join("WonderfulDb"))
+            .expect("appdata WonderfulDb should be created");
+        std::env::set_var("APPDATA", &appdata);
+
+        let paths = super::metadata_source_paths(&scan_root, false);
+
+        match original_appdata {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+        assert_eq!(paths.logs_dir, candidate_aclos_root.join("logs"));
+        assert_eq!(
+            paths.leveldb_dir,
+            candidate_aclos_root.join("Local Storage").join("leveldb")
+        );
+        assert_eq!(paths.wonderful_dir, appdata_aclos_root.join("WonderfulDb"));
+    }
+
+    #[test]
+    fn metadata_source_paths_prefer_adjacent_wonderful_db() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let fixture = TestFixture::new("adjacent-wonderful-path");
+        let original_appdata = std::env::var_os("APPDATA");
+        let candidate_aclos_root = fixture.path().join("Local").join("ACLOS");
+        let scan_root = candidate_aclos_root.join("aclos-highlight");
+        let appdata = fixture.path().join("Roaming");
+        fs::create_dir_all(candidate_aclos_root.join("WonderfulDb"))
+            .expect("candidate WonderfulDb should be created");
+        fs::create_dir_all(appdata.join("ACLOS").join("WonderfulDb"))
+            .expect("appdata WonderfulDb should be created");
+        std::env::set_var("APPDATA", &appdata);
+
+        let paths = super::metadata_source_paths(&scan_root, false);
+
+        match original_appdata {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+        assert_eq!(
+            paths.wonderful_dir,
+            candidate_aclos_root.join("WonderfulDb")
+        );
+    }
+
+    #[test]
+    fn metadata_source_paths_fall_back_to_appdata_for_custom_roots_without_metadata() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let fixture = TestFixture::new("metadata-paths-custom-root");
+        let original_appdata = std::env::var_os("APPDATA");
+        let custom_root = fixture.path().join("Imported");
+        let appdata_aclos_root = fixture.path().join("Roaming").join("ACLOS");
+        fs::create_dir_all(&custom_root).expect("custom root should be created");
+        fs::create_dir_all(appdata_aclos_root.join("logs")).expect("appdata logs should exist");
+        fs::write(appdata_aclos_root.join("logs").join("highlight.log"), b"")
+            .expect("appdata log should be written");
+        std::env::set_var("APPDATA", fixture.path().join("Roaming"));
+
+        let paths = super::metadata_source_paths(&custom_root, true);
+
+        match original_appdata {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+        assert_eq!(paths.logs_dir, appdata_aclos_root.join("logs"));
+        assert_eq!(
+            paths.leveldb_dir,
+            appdata_aclos_root.join("Local Storage").join("leveldb")
+        );
+        assert_eq!(paths.wonderful_dir, appdata_aclos_root.join("WonderfulDb"));
+        assert_eq!(paths.account_hint_scope, None);
+    }
+
+    #[test]
+    fn metadata_source_paths_keep_custom_root_without_external_fallback() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let fixture = TestFixture::new("metadata-paths-custom-no-fallback");
+        let original_appdata = std::env::var_os("APPDATA");
+        let custom_root = fixture.path().join("Imported");
+        let appdata_aclos_root = fixture.path().join("Roaming").join("ACLOS");
+        fs::create_dir_all(&custom_root).expect("custom root should be created");
+        fs::create_dir_all(appdata_aclos_root.join("logs")).expect("appdata logs should exist");
+        fs::write(appdata_aclos_root.join("logs").join("highlight.log"), b"")
+            .expect("appdata log should be written");
+        std::env::set_var("APPDATA", fixture.path().join("Roaming"));
+
+        let paths = super::metadata_source_paths(&custom_root, false);
+
+        match original_appdata {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+        assert_eq!(paths.logs_dir, custom_root.join("logs"));
+        assert_eq!(
+            paths.leveldb_dir,
+            custom_root.join("Local Storage").join("leveldb")
+        );
+        assert_eq!(paths.wonderful_dir, custom_root.join("WonderfulDb"));
+        assert_eq!(
+            paths.account_hint_scope.as_deref(),
+            Some(custom_root.as_path())
+        );
+    }
+
+    #[test]
+    fn discovers_scan_roots_from_videocut_log() {
+        let fixture = TestFixture::new("videocut-roots");
+        let archive_root = fixture.path().join("Archive");
+        let default_root = fixture
+            .path()
+            .join("AppData")
+            .join("ACLOS")
+            .join("aclos-highlight");
+        fs::create_dir_all(&archive_root).expect("archive root should be created");
+        fs::create_dir_all(&default_root).expect("default root should be created");
+        let log_path = fixture.path().join("videocut.txt");
+        fs::write(
+            &log_path,
+            format!(
+                "[cut] clip file:{}\\wonderfulVideos1001\\snapshot\\snapshot_match_a.jpeg\n\
+                 [cut] export video successfully, file path:{}\\wonderfulVideos1001\\videoExportTmp\\template.mp4\n\
+                 [cut] clip file:{}\\wonderfulVideos2002\\snapshot\\snapshot_match_b.jpeg\n",
+                archive_root.display(),
+                archive_root.display(),
+                default_root.display()
+            ),
+        )
+        .expect("videocut fixture should be written");
+
+        let roots =
+            super::scan_roots_from_videocut_log(&log_path).expect("videocut roots should parse");
+
+        assert_eq!(roots, vec![archive_root, default_root]);
+    }
+
+    #[test]
+    fn scan_default_aclos_library_includes_videocut_external_roots() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let fixture = TestFixture::new("default-library-with-archive");
+        let original_appdata = std::env::var_os("APPDATA");
+        let original_userprofile = std::env::var_os("USERPROFILE");
+        let user_profile = fixture.path().join("User");
+        let appdata = fixture.path().join("Roaming");
+        let default_root = user_profile
+            .join("AppData")
+            .join("ACLOS")
+            .join("aclos-highlight");
+        let archive_root = fixture.path().join("Archive");
+        let default_group = default_root
+            .join("wonderfulVideos1001")
+            .join("default-match");
+        let archive_group = archive_root
+            .join("wonderfulVideos2002")
+            .join("archive-match");
+        fs::create_dir_all(&default_group).expect("default group should be created");
+        fs::create_dir_all(&archive_group).expect("archive group should be created");
+        fs::create_dir_all(appdata.join("ACLOS").join("logs"))
+            .expect("fake logs dir should be created");
+        fs::write(default_group.join("default.mp4"), b"default-video")
+            .expect("default clip should be written");
+        fs::write(archive_group.join("archive.mp4"), b"archive-video")
+            .expect("archive clip should be written");
+        fs::write(
+            appdata.join("ACLOS").join("logs").join("videocut.txt"),
+            format!(
+                "[cut] clip file:{}\\wonderfulVideos2002\\snapshot\\snapshot_match_b.jpeg\n",
+                archive_root.display()
+            ),
+        )
+        .expect("videocut fixture should be written");
+        std::env::set_var("APPDATA", &appdata);
+        std::env::set_var("USERPROFILE", &user_profile);
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        let summary = crate::scanner::scan_default_aclos_library(&connection)
+            .expect("default library scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        match original_appdata {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+        match original_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        assert_eq!(summary.source_dir_count, 2);
+        assert_eq!(summary.clip_group_count, 2);
+        assert_eq!(clips.len(), 2);
+        assert!(clips
+            .iter()
+            .any(|clip| clip.video_path.ends_with("default.mp4")));
+        assert!(clips
+            .iter()
+            .any(|clip| clip.video_path.ends_with("archive.mp4")));
+    }
+
+    #[test]
+    fn scan_default_aclos_library_does_not_apply_default_log_account_hints_to_external_roots() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let fixture = TestFixture::new("default-library-hints-scoped-to-root");
+        let original_appdata = std::env::var_os("APPDATA");
+        let original_userprofile = std::env::var_os("USERPROFILE");
+        let user_profile = fixture.path().join("User");
+        let appdata = fixture.path().join("Roaming");
+        let default_aclos_root = user_profile.join("AppData").join("ACLOS");
+        let default_root = default_aclos_root.join("aclos-highlight");
+        let archive_root = fixture.path().join("Archive");
+        let account_id = "90000000000000000006";
+        let default_group = default_root
+            .join(format!("wonderfulVideos{account_id}"))
+            .join("default-match");
+        let archive_source = archive_root.join(format!("wonderfulVideos{account_id}"));
+        let archive_group = archive_root
+            .join(format!("wonderfulVideos{account_id}"))
+            .join("archive-match");
+        fs::create_dir_all(&default_group).expect("default group should be created");
+        fs::create_dir_all(&archive_group).expect("archive group should be created");
+        fs::create_dir_all(default_aclos_root.join("logs"))
+            .expect("default logs dir should be created");
+        fs::create_dir_all(appdata.join("ACLOS").join("logs"))
+            .expect("appdata logs dir should be created");
+        fs::write(default_group.join("default.mp4"), b"default-video")
+            .expect("default clip should be written");
+        fs::write(archive_group.join("archive.mp4"), b"archive-video")
+            .expect("archive clip should be written");
+        fs::write(
+            default_aclos_root.join("logs").join("highlight.log"),
+            format!(
+                r#"RESPONSE: {{"result":0,"data":{{"list":[{{"role_name":"FixtureDelta","nick_id":"0004","g_open_id":"{account_id}"}}]}}}}"#
+            ),
+        )
+        .expect("highlight log fixture should be written");
+        fs::write(
+            appdata.join("ACLOS").join("logs").join("videocut.txt"),
+            format!(
+                "[cut] clip file:{}\\wonderfulVideos{}\\snapshot\\snapshot_match_b.jpeg\n",
+                archive_root.display(),
+                account_id
+            ),
+        )
+        .expect("videocut fixture should be written");
+        std::env::set_var("APPDATA", &appdata);
+        std::env::set_var("USERPROFILE", &user_profile);
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        let seeded_source = db::upsert_source_dir(
+            &connection,
+            db::SourceDirInput {
+                path: &super::path_to_string(&archive_source),
+                name: &format!("wonderfulVideos{account_id}"),
+            },
+        )
+        .expect("stale archive source should seed");
+        let seeded_group = db::upsert_clip_group(
+            &connection,
+            db::ClipGroupInput {
+                source_dir_id: seeded_source.id,
+                group_key: "archive-match",
+                display_name: "archive-match",
+            },
+        )
+        .expect("stale archive group should seed");
+        let seeded_clip = db::upsert_clip(
+            &connection,
+            db::ClipInput {
+                source_dir_id: seeded_source.id,
+                clip_group_id: Some(seeded_group.id),
+                video_path: &super::path_to_string(&archive_group.join("archive.mp4")),
+                file_name: "archive.mp4",
+                file_size: 13,
+                modified_at: None,
+                duration_ms: None,
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+        )
+        .expect("stale archive clip should seed");
+        db::upsert_clip_metadata(
+            &connection,
+            db::ClipMetadataInput {
+                clip_id: seeded_clip.id,
+                metadata_status: "partial",
+                json_path: None,
+                account_name: Some("FixtureDelta#0004"),
+                player_name: None,
+                agent_name: Some("Jett"),
+                map_name: None,
+                game_mode: None,
+                scoreline: None,
+                kda: None,
+                extracted_text: None,
+                parse_error: None,
+            },
+        )
+        .expect("stale archive metadata should seed");
+        crate::scanner::scan_default_aclos_library(&connection)
+            .expect("default library scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        match original_appdata {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+        match original_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        let default_clip = clips
+            .iter()
+            .find(|clip| clip.video_path.ends_with("default.mp4"))
+            .expect("default clip should be indexed");
+        let archive_clip = clips
+            .iter()
+            .find(|clip| clip.video_path.ends_with("archive.mp4"))
+            .expect("archive clip should be indexed");
+        assert_eq!(
+            default_clip.account_name.as_deref(),
+            Some("FixtureDelta#0004")
+        );
+        assert_eq!(archive_clip.account_name, None);
+    }
+
+    #[test]
+    fn scan_directory_reports_metadata_parse_warnings() {
+        let fixture = TestFixture::new("metadata-warnings");
+        let aclos_root = fixture.path().join("ACLOS");
+        prepare_empty_metadata_root(&aclos_root);
+        let root = aclos_root.join("aclos-highlight");
+        let source = root.join("wonderfulVideos1001");
+        let group = source.join("match-a-001");
+        let logs_dir = aclos_root.join("logs");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::create_dir_all(&logs_dir).expect("logs dir should be created");
+        fs::write(group.join("ace.mp4"), b"video-one").expect("clip should be written");
+        fs::write(
+            logs_dir.join("highlight.log"),
+            "first request data is {\"matchId\":",
+        )
+        .expect("bad log fixture should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        let summary = crate::scanner::scan_directory(&connection, &root).expect("scan should run");
+
+        assert_eq!(summary.new_clip_count, 1);
+        assert_eq!(summary.metadata_warning_count, 1);
+        assert!(summary
+            .errors
+            .iter()
+            .any(|error| error.contains("highlight.log") && error.contains("1")));
+    }
+
+    #[test]
+    fn scan_directory_returns_empty_summary_when_root_is_missing() {
+        let fixture = TestFixture::new("missing-root");
+        let missing_root = fixture.path().join("does-not-exist");
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        let summary =
+            crate::scanner::scan_directory(&connection, &missing_root).expect("scan should run");
+
+        assert_eq!(summary.source_dir_count, 0);
+        assert_eq!(summary.clip_group_count, 0);
+        assert_eq!(summary.new_clip_count, 0);
+        assert_eq!(summary.updated_clip_count, 0);
+        assert_eq!(summary.missing_clip_count, 0);
+        assert_eq!(summary.cover_missing_count, 0);
+        assert!(summary
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not found"));
+        assert!(summary.errors.is_empty());
+    }
+
+    #[test]
+    fn scan_directory_marks_previously_indexed_missing_clip() {
+        let fixture = TestFixture::new("missing-clip");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let group = source.join("11111111-1111-1111-1111-111111111111");
+        let clip_path = group.join("ace.mp4");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::write(&clip_path, b"video-one").expect("clip should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        crate::scanner::scan_directory(&connection, root).expect("first scan should run");
+        fs::remove_file(&clip_path).expect("clip should be removed from fixture");
+
+        let summary = crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(summary.new_clip_count, 0);
+        assert_eq!(summary.updated_clip_count, 0);
+        assert_eq!(summary.missing_clip_count, 1);
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].status, "missing");
+    }
+
+    #[test]
+    fn latest_scan_summary_returns_most_recent_scan() {
+        let fixture = TestFixture::new("summary");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let group = source.join("11111111-1111-1111-1111-111111111111");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::write(group.join("ace.mp4"), b"video-one").expect("clip should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        crate::scanner::scan_directory(&connection, root).expect("scan should run");
+
+        let summary = crate::scanner::latest_scan_summary(&connection)
+            .expect("summary query should run")
+            .expect("summary should exist");
+
+        assert_eq!(summary.source_dir_count, 1);
+        assert_eq!(summary.clip_group_count, 1);
+        assert_eq!(summary.new_clip_count, 1);
+        assert_eq!(summary.cover_missing_count, 1);
+        assert!(summary.errors.is_empty());
+
+        crate::scanner::ensure_scan_run_started(
+            &connection,
+            "job-running",
+            root.to_string_lossy().as_ref(),
+        )
+        .expect("running scan should be recorded");
+        let while_running = crate::scanner::latest_scan_summary(&connection)
+            .expect("summary query should run")
+            .expect("completed summary should remain available");
+        assert_eq!(while_running, summary);
+
+        crate::scanner::ensure_scan_run_terminal(
+            &connection,
+            "job-running",
+            root.to_string_lossy().as_ref(),
+            "cancelled",
+            "cancelled for test",
+        )
+        .expect("cancelled scan should finalize");
+        let after_cancel = crate::scanner::latest_scan_summary(&connection)
+            .expect("summary query should run")
+            .expect("completed summary should survive cancellation");
+        assert_eq!(after_cancel, summary);
+    }
+
+    #[test]
+    fn scan_directory_reports_progress_for_sources_groups_and_clips() {
+        let fixture = TestFixture::new("progress");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let group = source.join("11111111-1111-1111-1111-111111111111");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::write(group.join("ace.mp4"), b"video-one").expect("first clip should be written");
+        fs::write(group.join("retake.mp4"), b"video-two").expect("second clip should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        let progress_events = std::cell::RefCell::new(Vec::new());
+
+        let summary = crate::scanner::scan_directory_with_progress(&connection, root, |event| {
+            progress_events.borrow_mut().push(event);
+        })
+        .expect("scan should run");
+        let progress_events = progress_events.into_inner();
+
+        assert_eq!(summary.new_clip_count, 2);
+        assert!(progress_events
+            .iter()
+            .any(|event| { event.phase == "scanning" && event.total == 1 && event.current == 0 }));
+        assert!(progress_events.iter().any(|event| {
+            event.phase == "scanning"
+                && event.source_dir_count == 1
+                && event.clip_group_count == 1
+                && event.clip_file_count == 2
+        }));
+        assert_eq!(
+            progress_events.last().map(|event| event.phase.as_str()),
+            Some("completed")
+        );
+    }
+
+    #[test]
+    fn file_level_cancellation_preserves_missing_state_and_allows_immediate_rescan() {
+        let fixture = TestFixture::new("cancel-file");
+        let source = fixture.path().join("wonderfulVideos-main");
+        let group = source.join("match-a");
+        let removed_clip = group.join("removed.mp4");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::write(&removed_clip, b"old-video").expect("old clip should be written");
+        fs::write(group.join("survivor.mp4"), b"survivor")
+            .expect("surviving clip should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        crate::scanner::scan_roots(&connection, std::slice::from_ref(&source))
+            .expect("initial scan should run");
+        connection
+            .execute("DELETE FROM scan_runs", [])
+            .expect("initial run should be cleared");
+        fs::remove_file(&removed_clip).expect("old clip should be removed");
+        fs::write(group.join("added.mp4"), b"added").expect("new clip should be written");
+
+        let cancellation = AtomicBool::new(false);
+        let execution = crate::scanner::scan_roots_with_progress_and_cancel(
+            &connection,
+            std::slice::from_ref(&source),
+            "job-cancel-file",
+            &cancellation,
+            |event| {
+                if event.clip_file_count >= 1 {
+                    cancellation.store(true, Ordering::Release);
+                }
+            },
+        )
+        .expect("cancelled scan should return a result");
+
+        assert_eq!(execution.status, super::ScanExecutionStatus::Cancelled);
+        assert_eq!(execution.summary.missing_clip_count, 0);
+        assert_eq!(scan_run_status(&connection, "job-cancel-file"), "cancelled");
+        assert_eq!(running_scan_run_count(&connection), 0);
+        assert!(db::list_clips(&connection)
+            .expect("clips should list")
+            .iter()
+            .any(|clip| clip.file_name == "removed.mp4" && clip.status == "available"));
+
+        let next_cancellation = AtomicBool::new(false);
+        let next = crate::scanner::scan_roots_with_progress_and_cancel(
+            &connection,
+            std::slice::from_ref(&source),
+            "job-after-cancel",
+            &next_cancellation,
+            |_| {},
+        )
+        .expect("a new scan should start immediately after cancellation");
+        assert_ne!(next.status, super::ScanExecutionStatus::Cancelled);
+        assert_eq!(next.summary.missing_clip_count, 1);
+        assert_eq!(running_scan_run_count(&connection), 0);
+        assert!(db::list_clips(&connection)
+            .expect("clips should list")
+            .iter()
+            .any(|clip| clip.file_name == "removed.mp4" && clip.status == "missing"));
+    }
+
+    #[test]
+    fn phase_boundary_cancellation_finishes_the_scan_run_as_cancelled() {
+        let fixture = TestFixture::new("cancel-phase");
+        let source = fixture.path().join("wonderfulVideos-main");
+        let group = source.join("match-a");
+        fs::create_dir_all(&group).expect("group should be created");
+        fs::write(group.join("clip.mp4"), b"video").expect("clip should be written");
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        let cancellation = AtomicBool::new(false);
+
+        let execution = crate::scanner::scan_roots_with_progress_and_cancel(
+            &connection,
+            std::slice::from_ref(&source),
+            "job-cancel-phase",
+            &cancellation,
+            |event| {
+                if event.phase == "finalizing" {
+                    cancellation.store(true, Ordering::Release);
+                }
+            },
+        )
+        .expect("phase cancellation should return a result");
+
+        assert_eq!(execution.status, super::ScanExecutionStatus::Cancelled);
+        assert_eq!(
+            scan_run_status(&connection, "job-cancel-phase"),
+            "cancelled"
+        );
+        assert_eq!(running_scan_run_count(&connection), 0);
+    }
+
+    #[test]
+    fn scan_discovered_roots_indexes_each_root_as_external() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let fixture = TestFixture::new("discovered-roots");
+        let appdata = fixture.path().join("AppData");
+        fs::create_dir_all(&appdata).expect("appdata should be created");
+        let original_appdata = std::env::var_os("APPDATA");
+        std::env::set_var("APPDATA", &appdata);
+
+        let roots = [
+            fixture.path().join("ArchiveA"),
+            fixture.path().join("ArchiveB"),
+        ];
+        for (index, root) in roots.iter().enumerate() {
+            let group = root
+                .join(format!("wonderfulVideos{index}"))
+                .join(format!("match-{index}"));
+            fs::create_dir_all(&group).expect("clip group should be created");
+            fs::write(group.join(format!("clip-{index}.mp4")), b"video")
+                .expect("clip should be written");
+        }
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        let summary = crate::scanner::scan_discovered_aclos_roots_with_progress(
+            &connection,
+            &roots,
+            &roots
+                .iter()
+                .enumerate()
+                .map(|(index, root)| root.join(format!("wonderfulVideos{index}")))
+                .collect::<Vec<_>>(),
+            |_| {},
+        )
+        .expect("discovered roots should scan");
+
+        match original_appdata {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+        assert_eq!(summary.source_dir_count, 2);
+        assert_eq!(summary.clip_group_count, 2);
+        assert_eq!(db::list_clips(&connection).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn scan_library_roots_reports_cached_metadata_read_errors() {
+        let fixture = TestFixture::new("cached-metadata-read-error");
+        let aclos_root = fixture.path();
+        prepare_empty_metadata_root(aclos_root);
+        let scan_root = aclos_root.join("aclos-highlight");
+        let group = scan_root
+            .join("wonderfulVideos1001")
+            .join("match-cached-error");
+        let logs_dir = aclos_root.join("logs");
+        fs::create_dir_all(&group).expect("clip group should be created");
+        fs::create_dir_all(&logs_dir).expect("logs directory should be created");
+        fs::write(group.join("clip.mp4"), b"video").expect("clip should be written");
+        fs::write(logs_dir.join("highlight.log"), [0xff, 0xfe])
+            .expect("invalid log should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        let summary = super::scan_library_roots(
+            &connection,
+            &[scan_root],
+            false,
+            None,
+            None,
+            super::ScanRuntime::default(),
+        )
+        .expect("library scan should continue")
+        .summary;
+
+        assert_eq!(summary.new_clip_count, 1);
+        assert_eq!(summary.metadata_warning_count, 1);
+        assert!(summary
+            .errors
+            .iter()
+            .any(|error| error.contains("Failed to read highlight log")));
+    }
+
+    fn encrypt_wonderful_db_text(openid: &str, plaintext: &str) -> String {
+        let digest = format!("{:x}", Sha256::digest(openid.as_bytes()));
+        let key = &digest.as_bytes()[..32];
+        let iv = &digest.as_bytes()[..16];
+        let ciphertext = Aes256CbcEnc::new_from_slices(key, iv)
+            .expect("synthetic key material should be valid")
+            .encrypt_padded_vec_mut::<Pkcs7>(plaintext.as_bytes());
+        hex::encode(ciphertext)
+    }
+
+    struct ScanBatchFixture {
+        root: PathBuf,
+        database_path: PathBuf,
+    }
+
+    impl ScanBatchFixture {
+        fn new(label: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should be after epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("vhm-scan-batch-{label}-{unique}"));
+            fs::create_dir_all(&root).expect("batch fixture root should be created");
+            let database_path = root.join("highlight-index.sqlite3");
+            db::migrate_database(&database_path)
+                .expect("batch fixture database should migrate explicitly");
+            Self {
+                root,
+                database_path,
+            }
+        }
+
+        fn path(&self) -> &Path {
+            &self.root
+        }
+
+        fn open(&self) -> Connection {
+            db::open_database(&self.database_path).expect("batch fixture database should open")
+        }
+    }
+
+    impl Drop for ScanBatchFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn prepare_empty_metadata_root(root: &Path) {
+        fs::create_dir_all(root.join("Local Storage").join("leveldb"))
+            .expect("fixture LevelDB directory should be created");
+        fs::create_dir_all(root.join("logs")).expect("fixture logs directory should be created");
+        fs::create_dir_all(root.join("WonderfulDb"))
+            .expect("fixture WonderfulDb directory should be created");
+    }
+
+    fn scan_run_count(connection: &Connection) -> i64 {
+        connection
+            .query_row("SELECT COUNT(*) FROM scan_runs", [], |row| row.get(0))
+            .expect("scan run count should load")
+    }
+
+    fn scan_run_status(connection: &Connection, job_id: &str) -> String {
+        connection
+            .query_row(
+                "SELECT status FROM scan_runs WHERE job_id = ?1",
+                [job_id],
+                |row| row.get(0),
+            )
+            .expect("scan run status should load")
+    }
+
+    fn running_scan_run_count(connection: &Connection) -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM scan_runs WHERE status IN ('running', 'cancelling')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("running scan run count should load")
+    }
+
+    struct TestFixture {
+        root: PathBuf,
+    }
+
+    impl TestFixture {
+        fn new(label: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should be after epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("vhm-scanner-{label}-{unique}"));
+            fs::create_dir_all(&root).expect("fixture root should be created");
+            Self { root }
+        }
+
+        fn path(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    impl Drop for TestFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn leveldb_blob(account_id: &str, json_payload: &str) -> Vec<u8> {
+        let mut blob = Vec::from("noise-acloshighlight_battle_list_".as_bytes());
+        blob.extend_from_slice(account_id.as_bytes());
+        blob.extend_from_slice(b"\x01\x02");
+        for unit in json_payload.encode_utf16() {
+            blob.extend_from_slice(&unit.to_le_bytes());
+        }
+        blob
+    }
+
+    fn account_roles_blob(json_payload: &str) -> Vec<u8> {
+        let mut blob = Vec::from("noise-ACLOS_USER_ROLES_INFO".as_bytes());
+        blob.extend_from_slice(b"\x01\x02");
+        blob.extend_from_slice(json_payload.as_bytes());
+        blob
+    }
+
+    fn set_file_modified_time(path: &Path, modified_at: SystemTime) {
+        let file = File::options()
+            .write(true)
+            .open(path)
+            .expect("file should open for timestamp update");
+        file.set_times(FileTimes::new().set_modified(modified_at))
+            .expect("modified time should update");
+    }
+}

@@ -1,0 +1,6 @@
+# Sanitized synthetic fixture for highlight.log parser tests.
+# Values use fake account tags, fake match IDs, and non-user local paths.
+2026-07-01 10:00:00 first request data is [{"matchId":"match-a-001","battleId":"battle-a-001","recordSrc":"D:\\ACLOS\\aclos-highlight\\wonderfulVideos1001\\match-a-001","player":{"name":"PlayerOne#0000"},"map":{"id":"maps/ascent","name":"Ascent"},"mode":"Competitive","agent":{"name":"Jett"},"kills":18,"deaths":7,"assists":3,"score":{"roundsWon":13,"roundsLost":11,"hasWon":true},"combatScore":287,"killEvents":[{"eventTime":"2026-07-01T10:00:31Z","roundId":3,"weaponName":"Vandal","killerName":"PlayerOne#0000","killedName":"Opponent#0000"}]}]
+2026-07-02 11:00:00 template param == {"match_id":"match-b-002","recordSrc":"D:/ACLOS/aclos-highlight/wonderfulVideos1001/match-b-002","玩家昵称":"PlayerTwo#0000","地图ID":"maps/haven","地图":"Haven","模式":"Unrated","英雄":"Sage","KDA":"12/8/9","比分":"13/9","胜负":"胜利","战斗分":221,"击杀事件时间":["2026-07-02T11:00:01Z","2026-07-02T11:05:12Z"],"weaponName":"Ghost","roundLabel":"R02"}
+2026-07-02 11:01:00 template param == {"match_id":
+2026-07-03 12:00:00 template param == {"match_id":"match-c-003","event":"H4sIAAAAAAAAA-synthetic-gzip-payload"}

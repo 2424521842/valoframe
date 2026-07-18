@@ -1,0 +1,431 @@
+use std::fmt;
+
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{
+    de::{SeqAccess, Visitor},
+    Deserialize, Deserializer,
+};
+
+use super::{
+    truncate_utf8_bytes, ScanExecutionStatus, ScanSummary, MAX_SCAN_ERROR_MESSAGE_BYTES,
+    MAX_SCAN_ERROR_SAMPLES,
+};
+use crate::db::DbResult;
+
+pub fn latest_scan_summary(connection: &Connection) -> DbResult<Option<ScanSummary>> {
+    connection
+        .query_row(
+            "
+            SELECT
+                root_path,
+                source_dir_count,
+                clip_group_count,
+                new_clip_count,
+                updated_clip_count,
+                missing_clip_count,
+                cover_missing_count,
+                metadata_match_count,
+                metadata_enriched_clip_count,
+                metadata_event_count,
+                metadata_warning_count,
+                diagnostic_omitted_count,
+                errors_json,
+                message
+            FROM scan_runs
+            WHERE status IN ('completed', 'partial')
+            ORDER BY id DESC
+            LIMIT 1
+            ",
+            [],
+            |row| {
+                let errors_json: String = row.get(12)?;
+                let bounded = parse_bounded_scan_errors(&errors_json);
+                Ok(ScanSummary {
+                    root_path: row.get(0)?,
+                    source_dir_count: row.get(1)?,
+                    clip_group_count: row.get(2)?,
+                    new_clip_count: row.get(3)?,
+                    updated_clip_count: row.get(4)?,
+                    missing_clip_count: row.get(5)?,
+                    cover_missing_count: row.get(6)?,
+                    metadata_match_count: row.get(7)?,
+                    metadata_enriched_clip_count: row.get(8)?,
+                    metadata_event_count: row.get(9)?,
+                    metadata_warning_count: row.get(10)?,
+                    omitted_error_count: row
+                        .get::<_, i64>(11)?
+                        .saturating_add(bounded.omitted_count),
+                    errors: bounded.errors,
+                    message: row.get(13)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| format!("Database reading scan summary failed: {error}"))
+}
+
+pub fn ensure_scan_run_started(
+    connection: &Connection,
+    job_id: &str,
+    root_path: &str,
+) -> DbResult<i64> {
+    start_scan_run(connection, Some(job_id), root_path)
+}
+
+pub fn mark_scan_run_cancelling(connection: &Connection, job_id: &str) -> DbResult<bool> {
+    connection
+        .execute(
+            "
+            UPDATE scan_runs
+            SET status = 'cancelling',
+                message = '正在取消扫描'
+            WHERE job_id = ?1
+              AND status = 'running'
+            ",
+            params![job_id],
+        )
+        .map(|changed| changed > 0)
+        .map_err(|error| format!("Database marking scan run cancelling failed: {error}"))
+}
+
+/// Finalizes scan rows left active when a previous application process exited unexpectedly.
+pub fn recover_interrupted_scan_runs(connection: &Connection) -> DbResult<usize> {
+    connection
+        .execute(
+            "
+            UPDATE scan_runs
+            SET status = 'failed',
+                message = '上次应用异常退出，扫描已中断',
+                finished_at = CURRENT_TIMESTAMP
+            WHERE status IN ('running', 'cancelling')
+            ",
+            [],
+        )
+        .map_err(|error| format!("Database recovering interrupted scan runs failed: {error}"))
+}
+
+pub fn ensure_scan_run_terminal(
+    connection: &Connection,
+    job_id: &str,
+    root_path: &str,
+    status: &str,
+    message: &str,
+) -> DbResult<()> {
+    if !matches!(status, "completed" | "partial" | "failed" | "cancelled") {
+        return Err(format!("Unsupported terminal scan status: {status}"));
+    }
+
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("Database starting terminal scan update failed: {error}"))?;
+    let changed = transaction
+        .execute(
+            "
+            UPDATE scan_runs
+            SET root_path = CASE
+                    WHEN NULLIF(TRIM(root_path), '') IS NULL THEN ?2
+                    ELSE root_path
+                END,
+                status = ?3,
+                message = ?4,
+                finished_at = CURRENT_TIMESTAMP
+            WHERE job_id = ?1
+            ",
+            params![job_id, root_path, status, message],
+        )
+        .map_err(|error| format!("Database finalizing scan run failed: {error}"))?;
+    if changed == 0 {
+        transaction
+            .execute(
+                "
+            INSERT INTO scan_runs (job_id, root_path, status, message)
+            VALUES (?1, ?2, ?3, ?4)
+            ",
+                params![job_id, root_path, status, message],
+            )
+            .map_err(|error| format!("Database recording terminal scan run failed: {error}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("Database committing terminal scan update failed: {error}"))
+}
+
+pub fn finalize_scan_run_for_job(
+    connection: &Connection,
+    job_id: &str,
+    status: ScanExecutionStatus,
+    summary: &ScanSummary,
+) -> DbResult<()> {
+    let scan_run_id = connection
+        .query_row(
+            "SELECT id FROM scan_runs WHERE job_id = ?1",
+            params![job_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("Database finding scan job failed: {error}"))?;
+    finish_scan_run(connection, scan_run_id, status.as_str(), summary)
+}
+
+fn start_scan_run(connection: &Connection, job_id: Option<&str>, root_path: &str) -> DbResult<i64> {
+    if let Some(job_id) = job_id {
+        let existing = connection
+            .query_row(
+                "SELECT id, status FROM scan_runs WHERE job_id = ?1",
+                params![job_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("Database reading scan run failed: {error}"))?;
+        if let Some((scan_run_id, status)) = existing {
+            if !matches!(status.as_str(), "running" | "cancelling") {
+                return Err(format!(
+                    "Scan job {job_id} is already terminal with status {status}"
+                ));
+            }
+            connection
+                .execute(
+                    "UPDATE scan_runs SET root_path = ?2 WHERE id = ?1",
+                    params![scan_run_id, root_path],
+                )
+                .map_err(|error| format!("Database updating scan root failed: {error}"))?;
+            return Ok(scan_run_id);
+        }
+    }
+
+    connection
+        .execute(
+            "
+            INSERT INTO scan_runs (job_id, root_path, status, message)
+            VALUES (?1, ?2, 'running', '正在扫描')
+            ",
+            params![job_id, root_path],
+        )
+        .map_err(|error| format!("Database starting scan run failed: {error}"))?;
+    Ok(connection.last_insert_rowid())
+}
+
+fn finish_scan_run(
+    connection: &Connection,
+    scan_run_id: i64,
+    status: &str,
+    summary: &ScanSummary,
+) -> DbResult<()> {
+    let errors_json = serde_json::to_string(&summary.errors)
+        .map_err(|error| format!("Serializing scan errors failed: {error}"))?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("Database starting scan finalization failed: {error}"))?;
+    let changed = transaction
+        .execute(
+            "
+            UPDATE scan_runs
+            SET root_path = ?2,
+                status = ?3,
+                source_dir_count = ?4,
+                clip_group_count = ?5,
+                new_clip_count = ?6,
+                updated_clip_count = ?7,
+                missing_clip_count = ?8,
+                cover_missing_count = ?9,
+                metadata_match_count = ?10,
+                metadata_enriched_clip_count = ?11,
+                metadata_event_count = ?12,
+                metadata_warning_count = ?13,
+                diagnostic_omitted_count = ?14,
+                errors_json = ?15,
+                message = ?16,
+                finished_at = CURRENT_TIMESTAMP
+            WHERE id = ?1
+            ",
+            params![
+                scan_run_id,
+                summary.root_path,
+                status,
+                summary.source_dir_count,
+                summary.clip_group_count,
+                summary.new_clip_count,
+                summary.updated_clip_count,
+                summary.missing_clip_count,
+                summary.cover_missing_count,
+                summary.metadata_match_count,
+                summary.metadata_enriched_clip_count,
+                summary.metadata_event_count,
+                summary.metadata_warning_count,
+                summary.omitted_error_count,
+                errors_json,
+                summary.message,
+            ],
+        )
+        .map_err(|error| format!("Database saving scan summary failed: {error}"))?;
+    if changed == 0 {
+        return Err(format!(
+            "Scan run {scan_run_id} disappeared before finalization"
+        ));
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("Database committing scan finalization failed: {error}"))
+}
+
+pub(super) struct ScanRunGuard<'a> {
+    connection: &'a Connection,
+    scan_run_id: i64,
+    finished: bool,
+}
+
+impl<'a> ScanRunGuard<'a> {
+    pub(super) fn start(
+        connection: &'a Connection,
+        job_id: Option<&str>,
+        root_path: &str,
+    ) -> DbResult<Self> {
+        Ok(Self {
+            connection,
+            scan_run_id: start_scan_run(connection, job_id, root_path)?,
+            finished: false,
+        })
+    }
+
+    pub(super) fn finish(mut self, status: &str, summary: &ScanSummary) -> DbResult<()> {
+        finish_scan_run(self.connection, self.scan_run_id, status, summary)?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for ScanRunGuard<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let _ = self.connection.execute(
+            "
+            UPDATE scan_runs
+            SET status = 'failed',
+                message = '扫描任务意外终止',
+                finished_at = CURRENT_TIMESTAMP
+            WHERE id = ?1
+              AND status IN ('running', 'cancelling')
+            ",
+            params![self.scan_run_id],
+        );
+    }
+}
+
+struct BoundedScanErrors {
+    errors: Vec<String>,
+    omitted_count: i64,
+}
+
+impl<'de> Deserialize<'de> for BoundedScanErrors {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(BoundedScanErrorsVisitor)
+    }
+}
+
+struct BoundedScanErrorsVisitor;
+
+impl<'de> Visitor<'de> for BoundedScanErrorsVisitor {
+    type Value = BoundedScanErrors;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an array of scan error strings")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut errors = Vec::new();
+        let mut omitted_count = 0_i64;
+        while let Some(value) = sequence.next_element::<serde_json::Value>()? {
+            let Some(error) = value.as_str() else {
+                omitted_count = omitted_count.saturating_add(1);
+                continue;
+            };
+            let error = truncate_utf8_bytes(error.to_string(), MAX_SCAN_ERROR_MESSAGE_BYTES);
+            if errors.contains(&error) {
+                continue;
+            }
+            if errors.len() < MAX_SCAN_ERROR_SAMPLES {
+                errors.push(error);
+            } else {
+                omitted_count = omitted_count.saturating_add(1);
+            }
+        }
+        Ok(BoundedScanErrors {
+            errors,
+            omitted_count,
+        })
+    }
+}
+
+fn parse_bounded_scan_errors(value: &str) -> BoundedScanErrors {
+    serde_json::from_str(value).unwrap_or_else(|_| BoundedScanErrors {
+        errors: Vec::new(),
+        omitted_count: i64::from(!value.trim().is_empty()),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    #[test]
+    fn recover_interrupted_scan_runs_fails_only_active_rows_and_is_idempotent() {
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        connection
+            .execute_batch(
+                "
+                INSERT INTO scan_runs (job_id, root_path, status, message, finished_at) VALUES
+                    ('active-running', 'D:/running', 'running', '正在扫描', '2000-01-01 00:00:00'),
+                    ('active-cancelling', 'D:/cancelling', 'cancelling', '正在取消扫描', '2000-01-01 00:00:00'),
+                    ('terminal-completed', 'D:/completed', 'completed', '完成', '2000-01-01 00:00:00'),
+                    ('terminal-partial', 'D:/partial', 'partial', '部分完成', '2000-01-01 00:00:00'),
+                    ('terminal-failed', 'D:/failed', 'failed', '已失败', '2000-01-01 00:00:00'),
+                    ('terminal-cancelled', 'D:/cancelled', 'cancelled', '已取消', '2000-01-01 00:00:00');
+                ",
+            )
+            .expect("scan run fixtures should insert");
+
+        assert_eq!(recover_interrupted_scan_runs(&connection).unwrap(), 2);
+
+        for job_id in ["active-running", "active-cancelling"] {
+            let (status, message, finished_at): (String, String, String) = connection
+                .query_row(
+                    "SELECT status, message, finished_at FROM scan_runs WHERE job_id = ?1",
+                    [job_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("recovered scan run should load");
+            assert_eq!(status, "failed");
+            assert_eq!(message, "上次应用异常退出，扫描已中断");
+            assert_ne!(finished_at, "2000-01-01 00:00:00");
+        }
+
+        for (job_id, expected_status, expected_message) in [
+            ("terminal-completed", "completed", "完成"),
+            ("terminal-partial", "partial", "部分完成"),
+            ("terminal-failed", "failed", "已失败"),
+            ("terminal-cancelled", "cancelled", "已取消"),
+        ] {
+            let (status, message, finished_at): (String, String, String) = connection
+                .query_row(
+                    "SELECT status, message, finished_at FROM scan_runs WHERE job_id = ?1",
+                    [job_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("terminal scan run should load");
+            assert_eq!(status, expected_status);
+            assert_eq!(message, expected_message);
+            assert_eq!(finished_at, "2000-01-01 00:00:00");
+        }
+
+        assert_eq!(recover_interrupted_scan_runs(&connection).unwrap(), 0);
+    }
+}

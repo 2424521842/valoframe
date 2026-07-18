@@ -1,0 +1,156 @@
+{
+  "schemaVersion": 1,
+  "platform": "windows",
+  "architecture": "x86_64",
+  "provider": {
+    "name": "BtbN/FFmpeg-Builds",
+    "repositoryUrl": "https://github.com/BtbN/FFmpeg-Builds",
+    "officialListingUrl": "https://ffmpeg.org/download.html#build-windows",
+    "releaseTag": "autobuild-2026-06-30-13-34",
+    "releaseUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-06-30-13-34",
+    "buildScriptsCommit": "7a83528ea3431e9eca982a712bc3a7cd0789d5d0",
+    "buildScriptsCommitUrl": "https://github.com/BtbN/FFmpeg-Builds/commit/7a83528ea3431e9eca982a712bc3a7cd0789d5d0"
+  },
+  "artifact": {
+    "fileName": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1.zip",
+    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1.zip",
+    "projectMirrorUrl": null,
+    "sizeBytes": 144332533,
+    "sha256": "3b9eceb438016b647e0755a51ce3a388cd4ed5679e2427cb83a01e1ae2cd0eba",
+    "archiveFormat": "zip",
+    "archiveRoot": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1",
+    "entryCount": 48,
+    "totalUncompressedBytes": 352392842,
+    "executableMember": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1/bin/ffmpeg.exe",
+    "executableSizeBytes": 112509440,
+    "executableSha256": "c623359f35e7db4820694b77d0f032f075e783a9c7207b81d908c28f148e8a68",
+    "licenseMember": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1/LICENSE.txt",
+    "licenseMemberSizeBytes": 7651,
+    "licenseMemberSha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+    "destination": "src-tauri/resources/bin/ffmpeg.exe"
+  },
+  "ffmpeg": {
+    "version": "n8.1.2-21-gce3c09c101-20260630",
+    "versionPrefix": "ffmpeg version n8.1.2-21-gce3c09c101-20260630 ",
+    "releaseBranch": "8.1",
+    "upstreamCommit": "ce3c09c101c83add623774d414a9f9498caf5c25",
+    "upstreamCommitUrl": "https://github.com/FFmpeg/FFmpeg/commit/ce3c09c101c83add623774d414a9f9498caf5c25",
+    "compiler": "gcc 15.2.0 (crosstool-NG 1.28.0.23_185f348)",
+    "licenseExpression": "LGPL-3.0-or-later"
+  },
+  "licensePolicy": {
+    "requiredConfigureFlags": [
+      "--enable-version3"
+    ],
+    "forbiddenConfigureFlags": [
+      "--enable-gpl",
+      "--enable-nonfree",
+      "--enable-libx264",
+      "--enable-libx265",
+      "--enable-libfdk-aac"
+    ],
+    "requiredDisabledConfigureFlags": [
+      "--disable-libx264",
+      "--disable-libx265",
+      "--disable-libfdk-aac"
+    ],
+    "requiredLicensePhrases": [
+      "GNU Lesser General Public License",
+      "either version 3 of the License"
+    ],
+    "files": [
+      {
+        "path": "src-tauri/resources/licenses/ffmpeg/COPYING.LGPLv3.txt",
+        "sizeBytes": 7651,
+        "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+      },
+      {
+        "path": "src-tauri/resources/licenses/ffmpeg/COPYING.GPLv3.txt",
+        "sizeBytes": 35147,
+        "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+      },
+      {
+        "path": "src-tauri/resources/licenses/ffmpeg/BUILD-INFO.json"
+      },
+      {
+        "path": "src-tauri/resources/licenses/ffmpeg/SOURCE-OFFER.md"
+      }
+    ]
+  },
+  "runtimeContract": {
+    "requiredCapabilities": {
+      "protocols": [
+        "file"
+      ],
+      "demuxers": [
+        "mov"
+      ],
+      "decoders": [
+        "h264"
+      ],
+      "filters": [
+        "scale"
+      ],
+      "encoders": [
+        "mjpeg"
+      ],
+      "muxers": [
+        "image2"
+      ]
+    },
+    "thumbnailArguments": [
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-ss",
+      "0.5",
+      "-i",
+      "{input}",
+      "-frames:v",
+      "1",
+      "-vf",
+      "scale=480:-2:force_original_aspect_ratio=decrease",
+      "-q:v",
+      "5",
+      "{output}"
+    ],
+    "maximumOutputBytes": 4194304,
+    "processTimeoutSeconds": 30,
+    "smokeFixture": {
+      "description": "Synthetic 96x54, four-frame MPEG-4 Part 2 video in an MP4 container; contains no user media or metadata.",
+      "encoding": "base64",
+      "sizeBytes": 1029,
+      "sha256": "31d48fff62204bb7c4255124fedc99bbb3b8c2129195cfbfc6ec5e00c42f226c",
+      "base64": "AAAAHGZ0eXBpc29tAAACAGlzb21pc28ybXA0MQAAAy9tb292AAAAbG12aGQAAAAAAAAAAAAAAAAAAAPoAAAH0AABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAACfnRyYWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAEAAAAAAAAH0AAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAYAAAADYAAAAAACRlZHRzAAAAHGVsc3QAAAAAAAAAAQAAB9AAAAAAAAEAAAAAAfZtZGlhAAAAIG1kaGQAAAAAAAAAAAAAAAAAAEAAAACAAFXEAAAAAAAtaGRscgAAAAAAAAAAdmlkZQAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAGhbWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAABYXN0YmwAAADZc3RzZAAAAAAAAAABAAAAyW1wNHYAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAYAA2AEgAAABIAAAAAAAAAAEKTGF2YyBtcGVnNAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY//8AAABPZXNkcwAAAAADgICAPgABAASAgIAwIBEAAAAAAw1AAAACqAWAgIAeAAABsAEAAAG1iRMAAAEAAAABIADEjYgAFQMEBtRDBoCAgAECAAAAEHBhc3AAAAABAAAAAQAAABRidHJ0AAAAAAADDUAAAAKoAAAAGHN0dHMAAAAAAAAAAQAAAAQAACAAAAAAFHN0c3MAAAAAAAAAAQAAAAEAAAAcc3RzYwAAAAAAAAABAAAAAQAAAAQAAAABAAAAJHN0c3oAAAAAAAAAAAAAAAQAAABlAAAAFwAAABcAAAAXAAAAFHN0Y28AAAAAAAAAAQAAA1sAAAA9dWR0YQAAADVtZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAAAhpbHN0AAAACGZyZWUAAACybWRhdAAAAbMAEAcAAAG2FgsYRW2MERtt/G238bbfxtt/G237AACYqMIrbGCI22/jbb+Ntv422/jbb98AALCowitsYIjbb+Ntv422/jbb+Ntv3wAAyKjCK2xgiNtv422/jbb+Ntv422/fAAABtl8FP78AAJiv3wAAsK/fAADIr98AAAG2awKf3wAAmK/fAACwr98AAMiv3wAAAbZfBT+/AACYr98AALCv3wAAyK/f"
+    }
+  },
+  "sourceCompliance": {
+    "redistributionReady": false,
+    "status": "blocked-pending-corresponding-source-mirror-and-third-party-license-review",
+    "binaryMirrorUrl": null,
+    "correspondingSourceBundle": {
+      "url": null,
+      "sizeBytes": null,
+      "sha256": null
+    },
+    "upstreamSource": {
+      "commit": "ce3c09c101c83add623774d414a9f9498caf5c25",
+      "referenceUrl": "https://github.com/FFmpeg/FFmpeg/archive/ce3c09c101c83add623774d414a9f9498caf5c25.tar.gz"
+    },
+    "buildScriptsSource": {
+      "commit": "7a83528ea3431e9eca982a712bc3a7cd0789d5d0",
+      "referenceUrl": "https://github.com/BtbN/FFmpeg-Builds/archive/7a83528ea3431e9eca982a712bc3a7cd0789d5d0.tar.gz"
+    },
+    "thirdPartyLicenseAuditComplete": false,
+    "ijgAttributionIncluded": false,
+    "patentReviewStatus": "not-reviewed",
+    "legalApprovalReference": null,
+    "requiredBeforeRedistribution": [
+      "Mirror the exact FFmpeg source, BtbN build scripts, patches, and every statically linked dependency source beside the application download.",
+      "Publish an audited third-party notice and license inventory for every library enabled in the BtbN build.",
+      "Include the required IJG attribution for the JPEG implementation.",
+      "Complete target-market codec patent review and record legal approval."
+    ]
+  }
+}
