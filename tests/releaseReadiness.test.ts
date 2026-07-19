@@ -294,6 +294,11 @@ test("minimal FFmpeg candidate is narrow, self-built, and cannot self-promote", 
   assert.match(minimalFfmpegVerifyScript, /Get-PeImportedDlls/);
   assert.match(minimalFfmpegVerifyScript, /SHA256SUMS\.txt/);
   assert.match(minimalFfmpegVerifyScript, /objdump imports do not match the Windows PE parser/);
+  assert.doesNotMatch(
+    minimalFfmpegVerifyScript,
+    /^\s*\$outputPath\s*=/im,
+    "PowerShell variables are case-insensitive; a local $outputPath must not overwrite the -OutputPath parameter",
+  );
   assert.match(minimalFfmpegWorkflow, /ffmpeg-corresponding-source\.tar\.xz/);
   assert.match(minimalFfmpegWorkflow, /mingw-w64 nasm xz-utils/);
   assert.match(minimalFfmpegWorkflow, /verify-minimal-ffmpeg-candidate\.ps1/);

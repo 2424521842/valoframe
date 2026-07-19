@@ -381,7 +381,7 @@ $smokeRoot = Join-Path $tempParent ('vhm-minimal-ffmpeg-' + [Guid]::NewGuid().To
 [void] [System.IO.Directory]::CreateDirectory($smokeRoot)
 try {
     $fixturePath = Join-Path $smokeRoot 'fixture.mp4'
-    $outputPath = Join-Path $smokeRoot 'thumbnail.jpg'
+    $thumbnailPath = Join-Path $smokeRoot 'thumbnail.jpg'
     $fixtureBytes = [Convert]::FromBase64String([string] $manifest.runtimeContract.smokeFixture.base64)
     Assert-Condition -Condition ($fixtureBytes.Length -eq [long] $manifest.runtimeContract.smokeFixture.sizeBytes) -Message 'Smoke fixture size mismatch.'
     [System.IO.File]::WriteAllBytes($fixturePath, $fixtureBytes)
@@ -389,18 +389,18 @@ try {
     Assert-Condition -Condition ($fixtureHash -ceq [string] $manifest.runtimeContract.smokeFixture.sha256) -Message 'Smoke fixture SHA-256 mismatch.'
     $arguments = @($manifest.runtimeContract.thumbnailArguments | ForEach-Object {
             if ([string] $_ -ceq '{input}') { $fixturePath }
-            elseif ([string] $_ -ceq '{output}') { $outputPath }
+            elseif ([string] $_ -ceq '{output}') { $thumbnailPath }
             else { [string] $_ }
         })
     [void] (Invoke-CheckedProcess -Executable $ffmpeg -Arguments $arguments -TimeoutSeconds ([int] $manifest.runtimeContract.processTimeoutSeconds) -Description 'minimal FFmpeg thumbnail smoke')
-    $output = Get-Item -LiteralPath $outputPath -Force -ErrorAction Stop
+    $output = Get-Item -LiteralPath $thumbnailPath -Force -ErrorAction Stop
     Assert-Condition -Condition ($output.Length -gt 4 -and $output.Length -le [long] $manifest.runtimeContract.maximumOutputBytes) -Message 'Thumbnail output size is invalid.'
-    $bytes = [System.IO.File]::ReadAllBytes($outputPath)
+    $bytes = [System.IO.File]::ReadAllBytes($thumbnailPath)
     Assert-Condition -Condition ($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xD8 -and $bytes[-2] -eq 0xFF -and $bytes[-1] -eq 0xD9) -Message 'Thumbnail output is not a complete JPEG.'
     $smoke = [ordered]@{
         fixtureSha256 = $fixtureHash
         outputSizeBytes = $output.Length
-        outputSha256 = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        outputSha256 = (Get-FileHash -LiteralPath $thumbnailPath -Algorithm SHA256).Hash.ToLowerInvariant()
     }
 }
 finally {
