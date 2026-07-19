@@ -1,6 +1,6 @@
 # 开发收敛路线图
 
-> 更新于 2026-07-18。本文以当前工作区实现为准，记录已经落地的能力和发布前仍需完成的工作。任务级状态见 [TASKS.md](./TASKS.md)。
+> 更新于 2026-07-19。本文以当前工作区实现为准，记录已经落地的能力和发布前仍需完成的工作。任务级状态见 [TASKS.md](./TASKS.md)。
 
 ## 1. 当前状态
 
@@ -25,7 +25,7 @@
 | CI | ✅ 已完成 | GitHub Actions 在 Ubuntu 验证前端，在 Windows 验证 fmt、严格 Clippy 与完整 Rust 测试；Rust 固定为 1.96.1 |
 | 发布安全基线 | ✅ 已完成 | 最小 CSP/capability、单实例聚焦、数据库与删除恢复、schema v13/单实例 smoke 和内部 RC JSON 证据门禁已落地 |
 | 发布实机回归 | ⏳ 未完成 | 仍需在 release build 验证目录选择、扫描事件、封面、视频、远程图片及安装/升级 |
-| Windows 内部 RC | 🟡 部分完成 | 固定 FFmpeg、NSIS 禁止降级、静态检查和隔离启动脚本已落地；公开许可/签名/updater 与 VM 验收仍未完成 |
+| Windows 内部 RC | 🟡 部分完成 | 固定 FFmpeg、SPDX/许可材料、manifest 驱动 NSIS 检查、整体公开预检和隔离启动脚本已落地；公开许可/签名/updater 与 VM 验收仍未完成 |
 
 ## 2. 已落地的关键契约
 

@@ -18,6 +18,7 @@
     "preview": "vite preview",
     "release:ffmpeg:prepare:internal": "pwsh -NoLogo -NoProfile -File ./scripts/release/prepare-ffmpeg.ps1 -ValidationOnly",
     "release:ffmpeg:verify:internal": "pwsh -NoLogo -NoProfile -File ./scripts/release/verify-ffmpeg.ps1 -ValidationOnly",
+    "release:compliance:generate": "node ./scripts/release/generate-compliance-evidence.mjs --output src-tauri/resources/licenses/third-party --offline",
     "release:bundle:windows:internal": "tauri build --bundles nsis --ci --no-sign",
     "tauri": "tauri"
   },

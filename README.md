@@ -66,11 +66,11 @@ GitHub Actions 使用同一组门槛：Ubuntu 上执行 `npm ci`、`npm test` �
 - 本地预览：自定义媒体协议提供最大 1 MiB 的有界 Range 响应；无 Range 时也不会把整个大视频读入内存。
 - 缩略图：源目录封面优先；存在受控 FFmpeg 时，缺失封面由单 worker 持久队列生成到应用缓存，按视频指纹失效，并在 512 MiB 高水位时清理到 450 MiB；否则稳定回退。
 - 文件安全：扫描、预览和常规整理只读原始目录；只有回收站中经过不可撤销确认的“永久删除视频”会删除所选原视频。
-- 自动化验证：Node/React 测试、Rust 单元与集成测试、npm 构建和 GitHub Actions CI；Windows 另有固定 FFmpeg、未签名 NSIS 内部 RC、静态 bundle 检查和 marker 隔离启动烟测。
+- 自动化验证：Node/React 测试、Rust 单元与集成测试、npm 构建和 GitHub Actions CI；Windows 另有固定 FFmpeg、npm/Cargo SPDX 与许可证据、未签名 NSIS 内部 RC、manifest 驱动静态 bundle 检查和 marker 隔离启动烟测。
 
 ## 尚未完成
 
-- 固定 FFmpeg 已可进入本地内部 RC，但对应源码镜像、完整第三方许可证/SBOM、IJG attribution、专利与法律审批尚未闭合，因此不能对外分发。
+- 锁定依赖的 SPDX/第三方材料生成器和最小自建 FFmpeg 候选链已经落地，但缺失许可证文本的受审 override、最小候选真实视频回归/长期源码镜像，以及项目许可、专利与法律审批尚未闭合，因此不能对外分发。
 - 正式 publisher/identifier/项目许可和品牌资产、Authenticode 签名、一次性 VM 的安装升级卸载、公开分发与自动更新。
 
 ## 明确不做

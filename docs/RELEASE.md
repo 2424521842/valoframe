@@ -55,6 +55,10 @@
 
 不要仅凭“FFmpeg”名称推断许可证。许可证义务取决于实际构建及其启用组件；无法追溯的二进制不得进入公开安装包。
 
+当前固定的 BtbN `win64-lgpl` 二进制继续只用于内部 RC。它实际启用了大量本应用不需要的外部组件，因此仓库另设手工 `FFmpeg minimal Windows x64 candidate` workflow：从固定 FFmpeg commit 交叉编译只保留 `file/mov/h264/scale/mjpeg/image2` 的最小候选，同时生成精确源码包、构建参数、工具链和 Windows 合成视频烟测证据。Windows 门禁会复核 `SHA256SUMS.txt`、`BUILD-METADATA.json`、12 位固定 commit 标识，并直接解析 PE import table；实际导入必须与交叉工具链 `objdump` 结果一致且仅命中固定的 Windows 系统 DLL allowlist。候选报告固定为 `passed-candidate-not-promoted` 且 `promotionAuthorized = false`；真实高光视频回归、源码长期镜像、许可/专利/法律审批全部完成前，不得替换现有固定二进制或对外分发。
+
+`scripts/release/generate-compliance-evidence.mjs` 从 `package-lock.json`、Windows x64 Cargo 解析图和 FFmpeg manifest 生成两份 npm SPDX 2.3、Windows Cargo SPDX 2.3、FFmpeg 组件快照、第三方声明、去重后的许可证全文、索引、阻断摘要和逐文件 SHA-256 manifest。可在不存在输出目录时运行 `npm run release:compliance:generate`。生成器拒绝复用已有输出目录、缺许可证声明的第三方组件和发生变化的锁文件输入；bundle 门禁还固定生成器路径、Windows target 和全部输入哈希。缺少许可证文本、项目许可或审批只会形成稳定 blocker，不能被自动写成“已批准”。
+
 ## 内部 RC 构建
 
 在干净工作区中使用仓库锁文件安装依赖，并把 Rust/Tauri 输出指向隔离目录，避免污染或复用默认的 `src-tauri/target`：
@@ -72,20 +76,26 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-fea
 npm run release:ffmpeg:prepare:internal
 npm run release:ffmpeg:verify:internal
 
+node .\scripts\release\generate-compliance-evidence.mjs `
+  --output src-tauri\resources\licenses\third-party `
+  --offline
+
 npm run release:bundle:windows:internal
 ```
 
 构建前必须由发布静态检查确认 `src-tauri/resources/bin/ffmpeg.exe` 已 staged，且与本次发布记录/manifest 的哈希一致。隔离构建的安装器位于 `$env:CARGO_TARGET_DIR\release\bundle\nsis\`。`--no-sign` 只适用于内部 RC；公开发布不得沿用该参数。
 
-`scripts/release/check-bundle.ps1` 还必须同时接收本次 Tauri 构建生成的 `release\nsis\...\installer.nsi` 和完整 7-Zip 的 `7z.exe`。门禁会先校验 PE overlay 上的 NSIS first header，再把 `installer.nsi` 的 `Section Install` 静态绑定到本次主程序、`bin\ffmpeg.exe`、LGPL/GPL 文本、`BUILD-INFO.json` 与 `SOURCE-OFFER.md`；随后只把这六个目标从最终安装器受控解包到一次性目录。五个资源必须逐字节匹配；Tauri 会在打包期间把主程序中唯一的 `__TAURI_BUNDLE_TYPE_VAR_UNK` 改为同偏移的 `..._NSS`。内部未签名模式使用 `strict-unsigned` 比较，整文件除这三个 marker 字节外不得有任何差异。公开模式使用 `authenticode-aware` 比较：外部 UNK staging 文件必须 `NotSigned` 且无证书表；内嵌 NSS 文件的证书表必须从 `Align8(staging file length)` 开始、只允许 0–7 个零 padding、以合法 WIN_CERTIFICATE 项精确覆盖到 EOF。只在 NSS→UNK 后同时归零 PE checksum 和 security-directory entry，再比较 staging 文件长度内包括合法 overlay 在内的全部字节；内嵌 NSS 主程序和安装器的 Authenticode 状态都必须为 `Valid`。报告明确区分两种比较模式并留存 raw/canonical 哈希及证书表边界。
+`scripts/release/check-bundle.ps1` 还必须同时接收本次 Tauri 构建生成的 `release\nsis\...\installer.nsi` 和完整 7-Zip 的 `7z.exe`。门禁会先校验 PE overlay 上的 NSIS first header，再把 `installer.nsi` 的 `Section Install` 静态绑定到本次主程序、`bin\ffmpeg.exe`、FFmpeg 许可文件以及 `COMPLIANCE-MANIFEST.json` 声明的全部第三方材料；随后只把这些目标从最终安装器受控解包到一次性目录。当前快照为 15 个文件，但数量由 manifest 驱动，不再硬编码为六个。所有资源必须逐字节匹配；Tauri 会在打包期间把主程序中唯一的 `__TAURI_BUNDLE_TYPE_VAR_UNK` 改为同偏移的 `..._NSS`。内部未签名模式使用 `strict-unsigned` 比较，整文件除这三个 marker 字节外不得有任何差异。公开模式使用 `authenticode-aware` 比较：外部 UNK staging 文件必须 `NotSigned` 且无证书表；内嵌 NSS 文件的证书表必须从 `Align8(staging file length)` 开始、只允许 0–7 个零 padding、以合法 WIN_CERTIFICATE 项精确覆盖到 EOF。只在 NSS→UNK 后同时归零 PE checksum 和 security-directory entry，再比较 staging 文件长度内包括合法 overlay 在内的全部字节。内嵌 NSS 主程序和安装器不仅必须为 `Valid`，还必须与公开 policy 中获批的 publisher subject 和证书 thumbprint 精确一致、存在时间戳证书，并额外通过微软签名的 `signtool verify /pa /all /v`。报告明确区分两种比较模式并留存 raw/canonical 哈希、证书表边界、签名者、时间戳和 signtool 证据。
 
-CI 将已通过检查的六个 NSIS 载荷保留到 `RUNNER_TEMP` 下的预先为空目录。移动前后都重新验证临时根目录、父链和输出目录没有 reparse point，移动后再按最终报告重新枚举并复核恰好六个文件。启动烟测重新读取该 JSON 报告，逐项核对路径、大小和 SHA-256，并只使用报告中的 `rawEmbeddedSha256` 授权真实 NSS 主程序；不得现场计算一个新哈希再自授权。未显式请求输出时，静态检查仍会删除一次性解包目录。
+CI 将已通过检查的全部 NSIS 载荷保留到 `RUNNER_TEMP` 下的预先为空目录。移动前后都重新验证临时根目录、父链和输出目录没有 reparse point，移动后再按最终报告重新枚举并复核文件数量及每项哈希。启动烟测重新读取该 JSON 报告，逐项核对路径、大小和 SHA-256，并只使用报告中的 `rawEmbeddedSha256` 授权真实 NSS 主程序；不得现场计算一个新哈希再自授权。未显式请求输出时，静态检查仍会删除一次性解包目录。
 
-手工 `Windows internal release readiness` workflow 还会生成一个保留 30 天的 `vhm-internal-rc-evidence-<run id>-<attempt>` 证据 artifact。它只上传 JSON 元数据，不上传未签名安装器或六个解包载荷，内容包括：bundle gate 原始报告、重新核对后的六文件 SHA-256 清单、安装器与 staging 主程序的大小/SHA-256/`NotSigned` 状态、GitHub run 与 Node/npm/Python/Rust/Cargo/Tauri/PowerShell 工具链元数据、公开发布反向门禁结果，以及通过后的启动烟测报告。workflow 失败时仍尝试上传已经生成的证据；缺失的后续报告表示门禁尚未走到该阶段，不能解释为通过。
+手工 `Windows internal release readiness` workflow 还会生成一个保留 30 天的 `vhm-internal-rc-evidence-<run id>-<attempt>` 证据 artifact。它不上传未签名安装器、staging 主程序或受控解包载荷；除原有 JSON 报告外，还上传生成的 SPDX、第三方声明和许可证文本。内容包括：bundle gate 原始报告、重新核对后的动态载荷 SHA-256 清单、安装器与 staging 主程序的大小/SHA-256/`NotSigned` 状态、工具链元数据、`public-release-preflight.json`、公开 bundle 反向门禁结果，以及通过后的启动烟测报告。workflow 失败时仍尝试上传已经生成的证据；缺失的后续报告表示门禁尚未走到该阶段，不能解释为通过。
 
-该 workflow 的输入契约固定为 `--no-sign` 内部 RC，并在进入公开反向门禁前再次要求 staging 主程序和安装器均为 `NotSigned`。公开模式调用不会传递 `-AllowUnsignedInternalRc`：它必须因为尚未关闭的 FFmpeg redistribution 阻断或未签名 Authenticode 阻断而失败；意外通过或任何非预期错误都会使 workflow 失败。证据 artifact 的存在和内部 RC 门禁通过都不构成公开发布批准。
+该 workflow 的输入契约固定为 `--no-sign` 内部 RC，并在进入公开反向门禁前再次要求 staging 主程序和安装器均为 `NotSigned`。公开模式调用不会传递 `-AllowUnsignedInternalRc`：它必须因为尚未关闭的 FFmpeg、第三方合规、公开签名 policy 或未签名 Authenticode 阻断而失败；这些预期域使用稳定前缀进入白名单，意外通过或任何其他错误都会使 workflow 失败。证据 artifact 的存在和内部 RC 门禁通过都不构成公开发布批准。
 
-该检查不会运行安装器，只证明最终压缩包中存在与本次输入一致的六个关键文件；它不证明安装、升级、卸载、WebView2 引导或应用运行行为。下面的干净虚拟机矩阵仍是发布必需证据，不能由静态解包替代。
+该检查不会运行安装器，只证明最终压缩包中存在与本次输入一致的主程序、FFmpeg 和全部声明的合规文件；它不证明安装、升级、卸载、WebView2 引导或应用运行行为。下面的干净虚拟机矩阵仍是发布必需证据，不能由静态解包替代。
+
+`release/public-release-policy.json` 与 `scripts/release/public-release-preflight.ps1` 是整体公开发布预检。它覆盖项目许可/EULA、第三方材料、品牌和图标分发范围、publisher/identifier、Riot/腾讯声明、FFmpeg、代码签名/时间戳、干净 VM、updater 决策和数据安全证据，并输出稳定 blocker code。审批字段必须是真正的 JSON Boolean。干净 VM 与数据安全 evidence manifest 必须使用 schema v1、绑定本次 40 位 release commit、完整覆盖固定场景/检查集合，并让每项证据文件通过 SHA-256 复核。内部 workflow 要求该预检保持 `blocked`；bundle gate 通过本身永远不是整体公开发布批准。
 
 若既有代码尚未达到严格 Clippy 零告警，应记录实际告警并先修复，不能把跳过检查变成公开发布惯例。
 

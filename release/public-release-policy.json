@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "releaseMode": "public",
+  "projectLicense": {
+    "approved": false,
+    "spdxExpression": null,
+    "file": null,
+    "approvalReference": null
+  },
+  "eula": {
+    "approved": false,
+    "file": null,
+    "approvalReference": null
+  },
+  "thirdPartyCompliance": {
+    "approved": false,
+    "root": "src-tauri/resources/licenses/third-party",
+    "manifest": "COMPLIANCE-MANIFEST.json",
+    "summary": "COMPLIANCE-SUMMARY.json",
+    "notices": "THIRD-PARTY-NOTICES.md",
+    "licenseTexts": "THIRD-PARTY-LICENSES.txt",
+    "npmRuntimeSbom": "npm-runtime.spdx.json",
+    "cargoWindowsX64Sbom": "cargo-windows-x64.spdx.json",
+    "approvalReference": null
+  },
+  "identity": {
+    "productName": "瓦刻",
+    "brandApproved": false,
+    "brandApprovalReference": null,
+    "publisherSubject": null,
+    "publisherApproved": false,
+    "publisherApprovalReference": null,
+    "identifier": "com.valorant.highlight.manager",
+    "identifierApproved": false,
+    "identifierApprovalReference": null
+  },
+  "iconRights": {
+    "approved": false,
+    "confirmedScopes": [
+      "public-source-repository"
+    ],
+    "requiredScopes": [
+      "windows-installer",
+      "public-download"
+    ],
+    "approvalReference": null
+  },
+  "riotTencentDisclaimer": {
+    "approved": false,
+    "materialPath": null,
+    "approvalReference": null
+  },
+  "ffmpeg": {
+    "manifest": "third_party/ffmpeg/windows-x64.json"
+  },
+  "authenticode": {
+    "certificateProvisioned": false,
+    "expectedPublisherSubject": null,
+    "expectedCertificateThumbprint": null,
+    "trustedTimestampRequired": true,
+    "timestampUrl": null,
+    "signtoolVerificationRequired": true,
+    "approvalReference": null
+  },
+  "cleanVmValidation": {
+    "approved": false,
+    "evidenceManifest": null,
+    "sourceCommit": null,
+    "requiredScenarios": [
+      "fresh-install-webview2-present",
+      "fresh-install-webview2-missing-online",
+      "fresh-install-webview2-missing-offline",
+      "same-version-reinstall",
+      "supported-upgrade",
+      "downgrade-rejected",
+      "uninstall-user-data-preserved",
+      "packaged-ffmpeg-only"
+    ],
+    "approvalReference": null
+  },
+  "updater": {
+    "decision": "pending",
+    "approvalReference": null,
+    "endpoint": null,
+    "publicKeyReference": null
+  },
+  "dataSafety": {
+    "approved": false,
+    "evidenceManifest": null,
+    "sourceCommit": null,
+    "requiredChecks": [
+      "source-media-readonly-default",
+      "permanent-delete-explicit-confirmation",
+      "application-data-boundary",
+      "uninstall-user-data-preserved"
+    ],
+    "approvalReference": null
+  }
+}

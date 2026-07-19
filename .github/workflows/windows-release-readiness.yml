@@ -75,6 +75,13 @@ jobs:
         shell: pwsh
         run: ./scripts/release/verify-ffmpeg.ps1 -ValidationOnly
 
+      - name: Generate locked SBOM and third-party compliance evidence
+        shell: pwsh
+        run: |
+          node ./scripts/release/generate-compliance-evidence.mjs `
+            --output src-tauri/resources/licenses/third-party `
+            --offline
+
       - name: Build unsigned NSIS internal RC
         run: npm run release:bundle:windows:internal
 
@@ -126,8 +133,27 @@ jobs:
           $payloadRoot = [System.IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'vhm-verified-installer-payload'))
           $payloadFiles = @(Get-ChildItem -LiteralPath $payloadRoot -File -Recurse | Sort-Object FullName)
           $reportedEntries = @($report.nsisPayload.entries)
-          if ($payloadFiles.Count -ne 6 -or $reportedEntries.Count -ne 6) {
-            throw 'Expected exactly six verified payload files and six matching report entries.'
+          if ($reportedEntries.Count -le 0 -or $payloadFiles.Count -ne $reportedEntries.Count) {
+            throw "Verified payload file count $($payloadFiles.Count) does not match report entry count $($reportedEntries.Count)."
+          }
+          $requiredPayloads = @(
+            'valorant-highlight-manager.exe',
+            'bin\ffmpeg.exe',
+            'licenses\ffmpeg\COPYING.LGPLv3.txt',
+            'licenses\ffmpeg\COPYING.GPLv3.txt',
+            'licenses\ffmpeg\BUILD-INFO.json',
+            'licenses\ffmpeg\SOURCE-OFFER.md',
+            'licenses\third-party\npm-runtime.spdx.json',
+            'licenses\third-party\cargo-windows-x64.spdx.json',
+            'licenses\third-party\THIRD-PARTY-LICENSES.txt',
+            'licenses\third-party\THIRD-PARTY-NOTICES.md',
+            'licenses\third-party\COMPLIANCE-SUMMARY.json',
+            'licenses\third-party\COMPLIANCE-MANIFEST.json'
+          )
+          foreach ($requiredPayload in $requiredPayloads) {
+            if (@($reportedEntries | Where-Object { [string] $_.destination -ceq $requiredPayload }).Count -ne 1) {
+              throw "Verified payload report is missing required entry '$requiredPayload'."
+            }
           }
           $payloadHashes = foreach ($file in $payloadFiles) {
             $destination = [System.IO.Path]::GetRelativePath($payloadRoot, $file.FullName)
@@ -215,6 +241,15 @@ jobs:
       - name: Assert public redistribution remains fail-closed
         shell: pwsh
         run: |
+          $preflightPath = Join-Path $env:RC_EVIDENCE_DIR 'public-release-preflight.json'
+          $preflightJson = & ./scripts/release/public-release-preflight.ps1 `
+            -ExpectBlocked `
+            -OutputPath $preflightPath
+          $preflight = ($preflightJson -join "`n") | ConvertFrom-Json -Depth 20
+          if ($preflight.status -cne 'blocked' -or [int] $preflight.blockerCount -le 0) {
+            throw 'Public release policy preflight did not remain fail-closed.'
+          }
+
           $main = Join-Path $env:CARGO_TARGET_DIR 'release\valorant-highlight-manager.exe'
           $installers = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release\bundle\nsis') -Filter '*.exe')
           if ($installers.Count -ne 1) {
@@ -257,6 +292,8 @@ jobs:
 
           $knownPolicyBlockers = @(
             'sourceCompliance\.redistributionReady is false',
+            'PUBLIC_COMPLIANCE_BLOCKED:',
+            'PUBLIC_SIGNING_POLICY_BLOCKED:',
             "NSIS embedded main executable Authenticode status must be Valid; got 'NotSigned'",
             "NSIS installer Authenticode status must be Valid; got 'NotSigned'"
           )
@@ -281,10 +318,11 @@ jobs:
         run: |
           $reportPath = Join-Path $env:RUNNER_TEMP 'vhm-internal-rc-report.json'
           $report = Get-Content -Raw -LiteralPath $reportPath -Encoding UTF8 | ConvertFrom-Json -Depth 20
+          $reportedPayloadCount = @($report.nsisPayload.entries).Count
           if ($report.status -cne 'passed' -or
               $report.nsisPayload.verifiedPayloadOutputVerification.entriesMatchedReport -ne $true -or
-              [int] $report.nsisPayload.verifiedPayloadOutputVerification.fileCount -ne 6) {
-            throw 'Bundle gate report does not authorize a six-file verified startup payload.'
+              [int] $report.nsisPayload.verifiedPayloadOutputVerification.fileCount -ne $reportedPayloadCount) {
+            throw 'Bundle gate report does not authorize the verified startup payload.'
           }
 
           $expectedPayloadRoot = [System.IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'vhm-verified-installer-payload'))
@@ -298,8 +336,8 @@ jobs:
           }
 
           $entries = @($report.nsisPayload.entries)
-          if ($entries.Count -ne 6) {
-            throw "Bundle gate report must contain exactly six payload entries; found $($entries.Count)."
+          if ($entries.Count -le 0) {
+            throw 'Bundle gate report must contain payload entries.'
           }
           $reportedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
           foreach ($entry in $entries) {
@@ -334,9 +372,9 @@ jobs:
             }
           }
           $actualFiles = @($actualItems | Where-Object { -not $_.PSIsContainer })
-          if ($actualFiles.Count -ne 6 -or
+          if ($actualFiles.Count -ne $entries.Count -or
               @($actualFiles | Where-Object { -not $reportedPaths.Contains([System.IO.Path]::GetFullPath($_.FullName)) }).Count -ne 0) {
-            throw 'Verified startup payload files do not exactly match the six bundle-gate report entries.'
+            throw 'Verified startup payload files do not exactly match the bundle-gate report entries.'
           }
 
           $mainEntries = @($entries | Where-Object { $_.destination -ceq 'valorant-highlight-manager.exe' })
@@ -392,8 +430,10 @@ jobs:
             ${{ runner.temp }}\vhm-internal-rc-evidence\verified-payload-sha256.json
             ${{ runner.temp }}\vhm-internal-rc-evidence\installer-sha256.json
             ${{ runner.temp }}\vhm-internal-rc-evidence\toolchain-metadata.json
+            ${{ runner.temp }}\vhm-internal-rc-evidence\public-release-preflight.json
             ${{ runner.temp }}\vhm-internal-rc-evidence\public-release-gate.json
             ${{ runner.temp }}\vhm-internal-rc-evidence\vhm-release-smoke-report.json
+            src-tauri\resources\licenses\third-party\**
           if-no-files-found: warn
           retention-days: 30
           compression-level: 9

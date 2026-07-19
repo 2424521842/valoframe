@@ -1,0 +1,138 @@
+name: FFmpeg minimal Windows x64 candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ffmpeg-minimal-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build unpromoted minimal candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      FFMPEG_COMMIT: ce3c09c101c83add623774d414a9f9498caf5c25
+    steps:
+      - name: Check out VALOFRAME
+        uses: actions/checkout@v6
+
+      - name: Install MinGW-w64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends mingw-w64 nasm xz-utils
+
+      - name: Check out exact FFmpeg source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/ffmpeg-source"
+          git -C "$RUNNER_TEMP/ffmpeg-source" init
+          git -C "$RUNNER_TEMP/ffmpeg-source" remote add origin https://github.com/FFmpeg/FFmpeg.git
+          git -C "$RUNNER_TEMP/ffmpeg-source" fetch --depth 1 origin "$FFMPEG_COMMIT"
+          git -C "$RUNNER_TEMP/ffmpeg-source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/ffmpeg-source" rev-parse HEAD)" = "$FFMPEG_COMMIT"
+
+      - name: Build minimal LGPL candidate
+        shell: bash
+        run: |
+          bash ./scripts/release/build-minimal-ffmpeg.sh \
+            "$RUNNER_TEMP/ffmpeg-source" \
+            ./third_party/ffmpeg/minimal-windows-x64-candidate.json \
+            "$RUNNER_TEMP/candidate-output"
+
+      - name: Package exact corresponding source and build evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_epoch="$(git -C "$RUNNER_TEMP/ffmpeg-source" show -s --format=%ct HEAD)"
+          package_root="$RUNNER_TEMP/corresponding-source-root"
+          artifact_root="$RUNNER_TEMP/minimal-candidate-artifact"
+          mkdir -p "$package_root/ffmpeg" "$package_root/valoframe-build" "$artifact_root"
+          git -C "$RUNNER_TEMP/ffmpeg-source" archive --format=tar "$FFMPEG_COMMIT" | tar -xf - -C "$package_root/ffmpeg"
+          cp ./scripts/release/build-minimal-ffmpeg.sh "$package_root/valoframe-build/"
+          cp ./third_party/ffmpeg/minimal-windows-x64-candidate.json "$package_root/valoframe-build/"
+          cp "$RUNNER_TEMP/candidate-output/BUILD-METADATA.json" "$package_root/valoframe-build/"
+          tar \
+            --sort=name \
+            --mtime="@$source_epoch" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            --pax-option=delete=atime,delete=ctime \
+            -cJf "$artifact_root/ffmpeg-corresponding-source.tar.xz" \
+            -C "$package_root" .
+
+          cp "$RUNNER_TEMP/candidate-output/ffmpeg.exe" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/BUILD-METADATA.json" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/configure-flags.txt" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/compiler-version.txt" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/pe-imports.txt" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/config.h" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/config.mak" "$artifact_root/"
+          (
+            cd "$artifact_root"
+            sha256sum \
+              BUILD-METADATA.json \
+              compiler-version.txt \
+              config.h \
+              config.mak \
+              configure-flags.txt \
+              ffmpeg-corresponding-source.tar.xz \
+              ffmpeg.exe \
+              pe-imports.txt \
+              > SHA256SUMS.txt
+          )
+
+      - name: Upload unpromoted candidate
+        uses: actions/upload-artifact@v6
+        with:
+          name: ffmpeg-minimal-windows-x64-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/minimal-candidate-artifact
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  verify-windows:
+    name: Verify candidate on Windows x64
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Check out VALOFRAME
+        uses: actions/checkout@v6
+
+      - name: Download unpromoted candidate
+        uses: actions/download-artifact@v6
+        with:
+          name: ffmpeg-minimal-windows-x64-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\ffmpeg-minimal-candidate
+
+      - name: Verify runtime contract and synthetic thumbnail
+        shell: pwsh
+        run: |
+          $candidateRoot = Join-Path $env:RUNNER_TEMP 'ffmpeg-minimal-candidate'
+          $metadata = Get-Content -Raw -LiteralPath (Join-Path $candidateRoot 'BUILD-METADATA.json') -Encoding UTF8 | ConvertFrom-Json -Depth 20
+          $reportPath = Join-Path $candidateRoot 'WINDOWS-VERIFICATION.json'
+          $report = & ./scripts/release/verify-minimal-ffmpeg-candidate.ps1 `
+            -FfmpegPath (Join-Path $candidateRoot 'ffmpeg.exe') `
+            -ExpectedSha256 ([string] $metadata.executable.sha256) `
+            -OutputPath $reportPath
+          $verified = ($report -join "`n") | ConvertFrom-Json -Depth 20
+          if ($verified.status -cne 'passed-candidate-not-promoted' -or $verified.promotionAuthorized -ne $false) {
+            throw 'Minimal FFmpeg candidate verification returned an unsafe status.'
+          }
+          $report | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+
+      - name: Upload Windows verification evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: ffmpeg-minimal-windows-x64-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\ffmpeg-minimal-candidate\WINDOWS-VERIFICATION.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9

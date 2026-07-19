@@ -11,6 +11,7 @@ src-tauri/gen/schemas/
 
 # Reproducible release staging (generated from tracked manifests)
 /src-tauri/resources/bin/ffmpeg.exe
+/src-tauri/resources/licenses/third-party/
 /third_party/ffmpeg/cache/
 /release-secrets/
 *.pfx

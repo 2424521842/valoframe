@@ -28,12 +28,12 @@ and resource files.
 
 .PARAMETER NsisExtractorPath
 Path to a full 7-Zip 7z.exe with the NSIS archive handler. The installer is
-listed and only the six expected application payload files are extracted into a
+listed and only the expected application/compliance payload files are extracted into a
 fresh temporary directory for hash comparison; the installer is never run.
 
 .PARAMETER VerifiedPayloadOutputDirectory
 Optional pre-created empty directory below the caller's temporary directory.
-After every payload check passes, the six controlled-extraction files are moved
+After every payload check passes, the controlled-extraction files are moved
 there for a subsequent startup smoke. Without this parameter no payload remains.
 
 .PARAMETER ResourceDirectory
@@ -103,6 +103,14 @@ param(
         'licenses\ffmpeg\BUILD-INFO.json',
         'licenses\ffmpeg\SOURCE-OFFER.md'
     ),
+
+    [ValidateNotNullOrEmpty()]
+    [string] $ThirdPartyComplianceRelativeRoot = 'licenses\third-party',
+
+    [ValidateNotNullOrEmpty()]
+    [string] $PublicReleasePolicyPath = (Join-Path $PSScriptRoot '..\..\release\public-release-policy.json'),
+
+    [string] $SigntoolPath,
 
     [string] $ExpectedMainExecutableSha256,
 
@@ -222,6 +230,27 @@ function Get-ResourceFile {
     }
 
     $resolved = Get-CanonicalExistingPath -LiteralPath $candidate -RequireDirectory $false -Description $Description
+    Assert-NoReparsePoint -Root $Root -Target $resolved -Description $Description
+    return $resolved
+}
+
+function Get-ResourceDirectory {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Root,
+        [Parameter(Mandatory = $true)] [string] $RelativePath,
+        [Parameter(Mandatory = $true)] [string] $Description
+    )
+
+    if ([System.IO.Path]::IsPathRooted($RelativePath)) {
+        throw "$Description must be relative to the resource directory: '$RelativePath'."
+    }
+
+    $candidate = [System.IO.Path]::GetFullPath((Join-Path $Root $RelativePath))
+    if (-not (Test-PathWithinRoot -Root $Root -Candidate $candidate)) {
+        throw "$Description escapes the resource directory: '$RelativePath'."
+    }
+
+    $resolved = Get-CanonicalExistingPath -LiteralPath $candidate -RequireDirectory $true -Description $Description
     Assert-NoReparsePoint -Root $Root -Target $resolved -Description $Description
     return $resolved
 }
@@ -530,6 +559,7 @@ function Get-SignatureReport {
         [Parameter(Mandatory = $true)] [string] $Description,
         [Parameter(Mandatory = $true)] [bool] $PermitUnsigned,
         [AllowEmptyString()] [string] $UnsignedAcceptanceReason,
+        [AllowNull()] [object] $SigningRequirements,
         [switch] $HashPinnedOnly
     )
 
@@ -555,12 +585,44 @@ function Get-SignatureReport {
     }
 
     $certificate = $signature.SignerCertificate
+    $timestampCertificate = $signature.TimeStamperCertificate
+    $signtoolReport = $null
+    if ($null -ne $SigningRequirements) {
+        if ($status -cne 'Valid' -or $null -eq $certificate) {
+            throw "$Description must have a valid signer certificate before publisher binding is checked."
+        }
+        if (-not [string]::Equals([string] $certificate.Subject, [string] $SigningRequirements.expectedPublisherSubject, [System.StringComparison]::Ordinal)) {
+            throw "$Description signer subject does not match the approved publisher subject."
+        }
+        if (-not [string]::Equals(([string] $certificate.Thumbprint).Replace(' ', ''), [string] $SigningRequirements.expectedCertificateThumbprint, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "$Description signer thumbprint does not match the approved certificate."
+        }
+        if ($null -eq $timestampCertificate) {
+            throw "$Description does not contain a trusted Authenticode timestamp certificate."
+        }
+        $signtoolResult = Invoke-CheckedExternalProcess `
+            -Executable ([string] $SigningRequirements.signtoolPath) `
+            -Arguments @('verify', '/pa', '/all', '/v', $LiteralPath) `
+            -TimeoutSeconds 60 `
+            -Description "$Description signtool chain verification"
+        $signtoolReport = [ordered]@{
+            path = [string] $SigningRequirements.signtoolPath
+            sha256 = [string] $SigningRequirements.signtoolSha256
+            exitCode = [long] $signtoolResult.exitCode
+            verification = 'signtool verify /pa /all /v'
+            output = [string] $signtoolResult.combined
+        }
+    }
     return [ordered]@{
         status = $status
         statusMessage = [string] $signature.StatusMessage
         signerSubject = if ($null -eq $certificate) { $null } else { $certificate.Subject }
         signerThumbprint = if ($null -eq $certificate) { $null } else { $certificate.Thumbprint }
         signerNotAfterUtc = if ($null -eq $certificate) { $null } else { $certificate.NotAfter.ToUniversalTime().ToString('o') }
+        timestampSubject = if ($null -eq $timestampCertificate) { $null } else { $timestampCertificate.Subject }
+        timestampThumbprint = if ($null -eq $timestampCertificate) { $null } else { $timestampCertificate.Thumbprint }
+        timestampNotAfterUtc = if ($null -eq $timestampCertificate) { $null } else { $timestampCertificate.NotAfter.ToUniversalTime().ToString('o') }
+        signtool = $signtoolReport
     }
 }
 
@@ -604,6 +666,7 @@ function Invoke-CheckedExternalProcess {
             throw "$Description failed with exit code $($process.ExitCode).`nSTDOUT:`n$stdout`nSTDERR:`n$stderr"
         }
         return [ordered]@{
+            exitCode = 0
             stdout = $stdout
             stderr = $stderr
             combined = $stdout + "`n" + $stderr
@@ -630,6 +693,96 @@ function Resolve-NsisExtractor {
         return Get-CanonicalExistingPath -LiteralPath $fallback -RequireDirectory $false -Description 'NSIS extractor'
     }
     throw 'A full 7-Zip 7z.exe with the NSIS handler is required. Pass -NsisExtractorPath explicitly.'
+}
+
+function Resolve-Signtool {
+    param([AllowEmptyString()] [string] $ConfiguredPath)
+
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPath)) {
+        $resolved = Get-CanonicalExistingPath -LiteralPath $ConfiguredPath -RequireDirectory $false -Description 'signtool'
+    }
+    else {
+        $commands = @(Get-Command signtool.exe -CommandType Application -All -ErrorAction SilentlyContinue)
+        if ($commands.Count -ne 1) {
+            throw "Public release verification requires exactly one signtool.exe on PATH, or an explicit -SigntoolPath; found $($commands.Count)."
+        }
+        $resolved = Get-CanonicalExistingPath -LiteralPath $commands[0].Source -RequireDirectory $false -Description 'signtool'
+    }
+    if ([System.IO.Path]::GetFileName($resolved) -cne 'signtool.exe') {
+        throw "Public release verification requires Microsoft's signtool.exe: '$resolved'."
+    }
+    $item = Get-Item -LiteralPath $resolved -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "signtool.exe must not be a reparse point: '$resolved'."
+    }
+    Assert-PeFile -LiteralPath $resolved -Description 'signtool'
+    $signature = Get-AuthenticodeSignature -LiteralPath $resolved -ErrorAction Stop
+    if ([string] $signature.Status -cne 'Valid' -or $null -eq $signature.SignerCertificate -or
+        [string] $signature.SignerCertificate.Subject -notmatch '(?i)(^|,\s*)CN=Microsoft (Corporation|Windows)($|,)') {
+        throw 'signtool.exe must have a valid Microsoft Authenticode signature.'
+    }
+    return [ordered]@{
+        path = $resolved
+        sha256 = Get-Sha256 -LiteralPath $resolved
+        signerSubject = [string] $signature.SignerCertificate.Subject
+        signerThumbprint = [string] $signature.SignerCertificate.Thumbprint
+    }
+}
+
+function Get-PublicSigningRequirements {
+    param(
+        [Parameter(Mandatory = $true)] [string] $RepositoryRoot,
+        [Parameter(Mandatory = $true)] [string] $PolicyPath,
+        [AllowEmptyString()] [string] $ConfiguredSigntoolPath
+    )
+
+    $policyFile = Get-CanonicalExistingPath -LiteralPath $PolicyPath -RequireDirectory $false -Description 'public release policy'
+    if (-not (Test-PathWithinRoot -Root $RepositoryRoot -Candidate $policyFile)) {
+        throw "Public release policy must be inside the repository root: '$policyFile'."
+    }
+    $policy = Get-Content -Raw -LiteralPath $policyFile -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    if ([long] (Get-RequiredJsonProperty -Object $policy -Name 'schemaVersion' -Context 'public release policy') -ne 1 -or
+        [string] (Get-RequiredJsonProperty -Object $policy -Name 'releaseMode' -Context 'public release policy') -cne 'public') {
+        throw 'Unsupported public release policy schema or mode.'
+    }
+    $identity = Get-RequiredJsonProperty -Object $policy -Name 'identity' -Context 'public release policy'
+    $signing = Get-RequiredJsonProperty -Object $policy -Name 'authenticode' -Context 'public release policy'
+    foreach ($requirement in @(
+            [ordered]@{ object = $identity; name = 'publisherApproved' },
+            [ordered]@{ object = $signing; name = 'certificateProvisioned' },
+            [ordered]@{ object = $signing; name = 'trustedTimestampRequired' },
+            [ordered]@{ object = $signing; name = 'signtoolVerificationRequired' }
+        )) {
+        $value = Get-RequiredJsonProperty -Object $requirement.object -Name $requirement.name -Context 'public signing policy'
+        if ($value -isnot [bool] -or -not [bool] $value) {
+            throw "Public signing policy '$($requirement.name)' must be the Boolean true."
+        }
+    }
+    $publisherSubject = Get-RequiredJsonString -Object $identity -Name 'publisherSubject' -Context 'public release identity'
+    $expectedSubject = Get-RequiredJsonString -Object $signing -Name 'expectedPublisherSubject' -Context 'public signing policy'
+    if (-not [string]::Equals($publisherSubject, $expectedSubject, [System.StringComparison]::Ordinal)) {
+        throw 'Public signing policy expectedPublisherSubject must exactly match identity.publisherSubject.'
+    }
+    [void] (Get-RequiredJsonString -Object $identity -Name 'publisherApprovalReference' -Context 'public release identity')
+    [void] (Get-RequiredJsonString -Object $signing -Name 'approvalReference' -Context 'public signing policy')
+    $thumbprint = (Get-RequiredJsonString -Object $signing -Name 'expectedCertificateThumbprint' -Context 'public signing policy').Replace(' ', '')
+    if ($thumbprint -cnotmatch '^[0-9A-Fa-f]{40}$') {
+        throw 'Public signing policy expectedCertificateThumbprint must be a 40-character certificate thumbprint.'
+    }
+    $timestampUrl = Get-RequiredJsonString -Object $signing -Name 'timestampUrl' -Context 'public signing policy'
+    Assert-HttpsUrl -Value $timestampUrl -Description 'public signing timestampUrl'
+    $signtool = Resolve-Signtool -ConfiguredPath $ConfiguredSigntoolPath
+    return [ordered]@{
+        policyPath = $policyFile
+        policySha256 = Get-Sha256 -LiteralPath $policyFile
+        expectedPublisherSubject = $expectedSubject
+        expectedCertificateThumbprint = $thumbprint.ToUpperInvariant()
+        timestampUrl = $timestampUrl
+        signtoolPath = [string] $signtool.path
+        signtoolSha256 = [string] $signtool.sha256
+        signtoolSignerSubject = [string] $signtool.signerSubject
+        signtoolSignerThumbprint = [string] $signtool.signerThumbprint
+    }
 }
 
 function Resolve-VerifiedPayloadOutput {
@@ -718,8 +871,8 @@ function Assert-VerifiedPayloadMatchesReport {
         }
     }
     $files = @($allItems | Where-Object { -not $_.PSIsContainer })
-    if ($files.Count -ne $EntryReports.Count -or $EntryReports.Count -ne 6) {
-        throw "Retained verified payload must contain exactly six reported files; found $($files.Count)."
+    if ($EntryReports.Count -le 0 -or $files.Count -ne $EntryReports.Count) {
+        throw "Retained verified payload file count does not match the report; found $($files.Count), expected $($EntryReports.Count)."
     }
 
     $expectedFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1144,6 +1297,7 @@ function Assert-NsisArchivePayload {
         [Parameter(Mandatory = $true)] [object] $NsisHeader,
         [Parameter(Mandatory = $true)] [object[]] $ExpectedPayload,
         [Parameter(Mandatory = $true)] [bool] $PermitUnsignedApplicationArtifacts,
+        [AllowNull()] [object] $SigningRequirements,
         [AllowNull()] [object] $VerifiedOutputConfiguration
     )
 
@@ -1263,7 +1417,8 @@ function Assert-NsisArchivePayload {
                 $embeddedMainSignature = Get-SignatureReport `
                     -LiteralPath $candidate `
                     -Description 'NSIS embedded main executable' `
-                    -PermitUnsigned $PermitUnsignedApplicationArtifacts
+                    -PermitUnsigned $PermitUnsignedApplicationArtifacts `
+                    -SigningRequirements $SigningRequirements
             }
             elseif ($comparison -ceq 'exact') {
                 if ($item.Length -ne [long] $expected.sizeBytes -or
@@ -1313,6 +1468,196 @@ function Assert-NsisArchivePayload {
     }
 }
 
+function Get-CompliancePayloadReports {
+    param(
+        [Parameter(Mandatory = $true)] [string] $ResourceRoot,
+        [Parameter(Mandatory = $true)] [string] $RelativeRoot,
+        [Parameter(Mandatory = $true)] [string] $RepositoryRoot,
+        [Parameter(Mandatory = $true)] [bool] $RequirePublicReady
+    )
+
+    $complianceRoot = Get-ResourceDirectory `
+        -Root $ResourceRoot `
+        -RelativePath $RelativeRoot `
+        -Description 'third-party compliance directory'
+    $manifestPath = Get-ResourceFile `
+        -Root $complianceRoot `
+        -RelativePath 'COMPLIANCE-MANIFEST.json' `
+        -Description 'third-party compliance manifest'
+    $manifest = Get-Content -Raw -LiteralPath $manifestPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    if ([long] (Get-RequiredJsonProperty -Object $manifest -Name 'schemaVersion' -Context 'compliance manifest') -ne 1) {
+        throw 'Unsupported compliance manifest schemaVersion.'
+    }
+    if ([string] (Get-RequiredJsonProperty -Object $manifest -Name 'target' -Context 'compliance manifest') -cne 'x86_64-pc-windows-msvc') {
+        throw 'Compliance manifest target must be x86_64-pc-windows-msvc.'
+    }
+
+    $declaredFiles = @(Get-RequiredJsonProperty -Object $manifest -Name 'files' -Context 'compliance manifest')
+    $declaredFileCount = [long] (Get-RequiredJsonProperty -Object $manifest -Name 'fileCount' -Context 'compliance manifest')
+    if ($declaredFiles.Count -le 0 -or $declaredFileCount -ne $declaredFiles.Count) {
+        throw 'Compliance manifest fileCount must match a non-empty files array.'
+    }
+
+    $requiredFiles = @(
+        'npm-runtime.spdx.json',
+        'npm-build.spdx.json',
+        'cargo-windows-x64.spdx.json',
+        'ffmpeg-component.json',
+        'LICENSE-TEXTS-INDEX.json',
+        'THIRD-PARTY-LICENSES.txt',
+        'THIRD-PARTY-NOTICES.md',
+        'COMPLIANCE-SUMMARY.json'
+    )
+    $declaredPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $reports = [System.Collections.Generic.List[object]]::new()
+    foreach ($declaration in $declaredFiles) {
+        $relativePath = Get-RequiredJsonString -Object $declaration -Name 'path' -Context 'compliance manifest file'
+        if ([System.IO.Path]::IsPathRooted($relativePath) -or $relativePath.Contains('\') -or
+            $relativePath.Contains(':') -or $relativePath.IndexOf([char] 0) -ge 0) {
+            throw "Compliance manifest contains an unsafe file path: '$relativePath'."
+        }
+        $segments = $relativePath.Split('/')
+        if (@($segments | Where-Object { [string]::IsNullOrWhiteSpace($_) -or $_ -in @('.', '..') }).Count -ne 0 -or
+            -not $declaredPaths.Add($relativePath)) {
+            throw "Compliance manifest contains an unsafe or duplicate file path: '$relativePath'."
+        }
+
+        $filePath = Get-ResourceFile `
+            -Root $complianceRoot `
+            -RelativePath ($segments -join [System.IO.Path]::DirectorySeparatorChar) `
+            -Description "compliance file '$relativePath'"
+        $item = Get-Item -LiteralPath $filePath -Force
+        $expectedSize = [long] (Get-RequiredJsonProperty -Object $declaration -Name 'sizeBytes' -Context "compliance file '$relativePath'")
+        $expectedHash = Get-RequiredJsonString -Object $declaration -Name 'sha256' -Context "compliance file '$relativePath'"
+        Assert-Sha256Text -Value $expectedHash -Description "compliance file '$relativePath' hash"
+        $actualHash = Get-Sha256 -LiteralPath $filePath
+        if ($expectedSize -ne $item.Length -or
+            -not [string]::Equals($expectedHash, $actualHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Compliance file '$relativePath' does not match COMPLIANCE-MANIFEST.json."
+        }
+        $reports.Add([ordered]@{
+                destination = (Join-Path $RelativeRoot ($segments -join '\'))
+                sourcePath = $filePath
+                sizeBytes = $item.Length
+                sha256 = $actualHash
+            })
+    }
+    foreach ($requiredFile in $requiredFiles) {
+        if (-not $declaredPaths.Contains($requiredFile)) {
+            throw "Compliance manifest is missing required file '$requiredFile'."
+        }
+    }
+
+    $manifestItem = Get-Item -LiteralPath $manifestPath -Force
+    $reports.Add([ordered]@{
+            destination = (Join-Path $RelativeRoot 'COMPLIANCE-MANIFEST.json')
+            sourcePath = $manifestPath
+            sizeBytes = $manifestItem.Length
+            sha256 = Get-Sha256 -LiteralPath $manifestPath
+        })
+
+    $actualItems = @(Get-ChildItem -LiteralPath $complianceRoot -Recurse -Force)
+    foreach ($item in $actualItems) {
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Compliance directory contains a reparse point: '$($item.FullName)'."
+        }
+    }
+    $actualFiles = @($actualItems | Where-Object { -not $_.PSIsContainer })
+    if ($actualFiles.Count -ne ($declaredFiles.Count + 1)) {
+        throw 'Compliance directory contains files not covered by COMPLIANCE-MANIFEST.json.'
+    }
+
+    $generator = Get-RequiredJsonProperty -Object $manifest -Name 'generator' -Context 'compliance manifest'
+    $generatorRelativePath = Get-RequiredJsonString -Object $generator -Name 'path' -Context 'compliance generator'
+    if ($generatorRelativePath -cne 'scripts/release/generate-compliance-evidence.mjs') {
+        throw 'Compliance manifest generator path is not the approved release generator.'
+    }
+    $generatorPath = Get-ResourceFile -Root $RepositoryRoot -RelativePath $generatorRelativePath -Description 'compliance generator source'
+    $generatorHash = Get-RequiredJsonString -Object $generator -Name 'sha256' -Context 'compliance generator'
+    Assert-Sha256Text -Value $generatorHash -Description 'compliance generator hash'
+    if (-not [string]::Equals($generatorHash, (Get-Sha256 -LiteralPath $generatorPath), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Compliance evidence was generated by a different generator revision.'
+    }
+
+    $requiredInputs = @(
+        'package.json',
+        'package-lock.json',
+        'src-tauri/Cargo.toml',
+        'src-tauri/Cargo.lock',
+        'third_party/ffmpeg/windows-x64.json'
+    )
+    $inputDeclarations = @(Get-RequiredJsonProperty -Object $manifest -Name 'inputs' -Context 'compliance manifest')
+    $inputPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($input in $inputDeclarations) {
+        $inputRelativePath = Get-RequiredJsonString -Object $input -Name 'path' -Context 'compliance input'
+        if (-not $inputPaths.Add($inputRelativePath)) {
+            throw "Compliance manifest contains duplicate input '$inputRelativePath'."
+        }
+        $inputPath = Get-ResourceFile -Root $RepositoryRoot -RelativePath $inputRelativePath -Description "compliance input '$inputRelativePath'"
+        $inputItem = Get-Item -LiteralPath $inputPath -Force
+        $inputSize = [long] (Get-RequiredJsonProperty -Object $input -Name 'sizeBytes' -Context "compliance input '$inputRelativePath'")
+        $inputHash = Get-RequiredJsonString -Object $input -Name 'sha256' -Context "compliance input '$inputRelativePath'"
+        Assert-Sha256Text -Value $inputHash -Description "compliance input '$inputRelativePath' hash"
+        if ($inputItem.Length -ne $inputSize -or
+            -not [string]::Equals((Get-Sha256 -LiteralPath $inputPath), $inputHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Compliance evidence is stale for input '$inputRelativePath'."
+        }
+    }
+    if ($inputPaths.Count -ne $requiredInputs.Count -or
+        @($requiredInputs | Where-Object { -not $inputPaths.Contains($_) }).Count -ne 0) {
+        throw 'Compliance manifest inputs do not exactly match the required release inputs.'
+    }
+
+    $summaryPath = Get-ResourceFile -Root $complianceRoot -RelativePath 'COMPLIANCE-SUMMARY.json' -Description 'compliance summary'
+    $summary = Get-Content -Raw -LiteralPath $summaryPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    if ([long] (Get-RequiredJsonProperty -Object $summary -Name 'schemaVersion' -Context 'compliance summary') -ne 1) {
+        throw 'Unsupported compliance summary schemaVersion.'
+    }
+    $publicReady = Get-RequiredJsonProperty -Object $summary -Name 'publicRedistributionReady' -Context 'compliance summary'
+    if ($publicReady -isnot [bool]) {
+        throw 'Compliance summary publicRedistributionReady must be a Boolean.'
+    }
+    $blockers = @(Get-RequiredJsonProperty -Object $summary -Name 'blockers' -Context 'compliance summary')
+    $expectedReady = $blockers.Count -eq 0
+    if ([bool] $publicReady -ne $expectedReady -or
+        ([bool] $publicReady -and [string] $summary.status -cne 'ready-for-approval') -or
+        (-not [bool] $publicReady -and [string] $summary.status -cne 'generated-with-blockers')) {
+        throw 'Compliance summary readiness state is internally inconsistent.'
+    }
+
+    foreach ($spdxFile in @('npm-runtime.spdx.json', 'npm-build.spdx.json', 'cargo-windows-x64.spdx.json')) {
+        $spdxPath = Get-ResourceFile -Root $complianceRoot -RelativePath $spdxFile -Description "SPDX document '$spdxFile'"
+        $spdx = Get-Content -Raw -LiteralPath $spdxPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
+        if ([string] $spdx.spdxVersion -cne 'SPDX-2.3' -or
+            [string] $spdx.dataLicense -cne 'CC0-1.0' -or
+            @(Get-RequiredJsonProperty -Object $spdx -Name 'packages' -Context "SPDX document '$spdxFile'").Count -lt 2 -or
+            @(Get-RequiredJsonProperty -Object $spdx -Name 'relationships' -Context "SPDX document '$spdxFile'").Count -eq 0) {
+            throw "SPDX document '$spdxFile' is incomplete or uses an unsupported format."
+        }
+    }
+
+    $ffmpegComponentPath = Get-ResourceFile -Root $complianceRoot -RelativePath 'ffmpeg-component.json' -Description 'FFmpeg component evidence'
+    $ffmpegComponent = Get-Content -Raw -LiteralPath $ffmpegComponentPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    $recordedFfmpegManifestHash = Get-RequiredJsonString -Object $ffmpegComponent -Name 'manifestSha256' -Context 'FFmpeg component evidence'
+    Assert-Sha256Text -Value $recordedFfmpegManifestHash -Description 'FFmpeg component manifest hash'
+    $currentFfmpegManifestPath = Get-ResourceFile -Root $RepositoryRoot -RelativePath 'third_party/ffmpeg/windows-x64.json' -Description 'FFmpeg provenance manifest'
+    if (-not [string]::Equals($recordedFfmpegManifestHash, (Get-Sha256 -LiteralPath $currentFfmpegManifestPath), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'FFmpeg component evidence does not match the current FFmpeg provenance manifest.'
+    }
+    if ($RequirePublicReady -and (-not [bool] $publicReady -or [string] $summary.status -cne 'ready-for-approval')) {
+        throw 'PUBLIC_COMPLIANCE_BLOCKED: third-party compliance summary is not ready for approval.'
+    }
+
+    return [ordered]@{
+        root = $complianceRoot
+        manifestPath = $manifestPath
+        manifestSha256 = Get-Sha256 -LiteralPath $manifestPath
+        publicRedistributionReady = [bool] $publicReady
+        fileCount = $reports.Count
+        entries = $reports.ToArray()
+    }
+}
+
 if (-not (Test-IsWindows)) {
     throw 'check-bundle.ps1 must run on Windows because it validates Windows PE and Authenticode artifacts.'
 }
@@ -1322,6 +1667,7 @@ $nsisBundle = Get-CanonicalExistingPath -LiteralPath $NsisBundlePath -RequireDir
 $nsisScript = Get-CanonicalExistingPath -LiteralPath $NsisScriptPath -RequireDirectory $false -Description 'generated installer.nsi'
 $resourceRoot = Get-CanonicalExistingPath -LiteralPath $ResourceDirectory -RequireDirectory $true -Description 'resource directory'
 $manifestPath = Get-CanonicalExistingPath -LiteralPath $FfmpegManifestPath -RequireDirectory $false -Description 'FFmpeg manifest'
+$repositoryRoot = Get-CanonicalExistingPath -LiteralPath (Join-Path $PSScriptRoot '..\..') -RequireDirectory $true -Description 'repository root'
 $verifiedPayloadOutput = Resolve-VerifiedPayloadOutput -ConfiguredPath $VerifiedPayloadOutputDirectory
 
 $resourceRootItem = Get-Item -LiteralPath $resourceRoot -Force
@@ -1591,6 +1937,12 @@ if ($sourceOfferText -notmatch 'https://[^\s)>]+') {
     throw 'Bundled SOURCE-OFFER.md must contain at least one HTTPS source URL.'
 }
 
+$complianceReport = Get-CompliancePayloadReports `
+    -ResourceRoot $resourceRoot `
+    -RelativeRoot $ThirdPartyComplianceRelativeRoot `
+    -RepositoryRoot $repositoryRoot `
+    -RequirePublicReady (-not [bool] $AllowUnsignedInternalRc)
+
 $mainHash = Get-Sha256 -LiteralPath $mainExecutable
 $nsisHash = Get-Sha256 -LiteralPath $nsisBundle
 Assert-ExpectedHash -Actual $mainHash -Expected $ExpectedMainExecutableSha256 -Description 'main executable'
@@ -1611,19 +1963,22 @@ $expectedPayload.Add([ordered]@{
         sizeBytes = $ffmpegItem.Length
         sha256 = $ffmpegHash
     })
-foreach ($relativePath in @(
-        'licenses\ffmpeg\COPYING.LGPLv3.txt',
-        'licenses\ffmpeg\COPYING.GPLv3.txt',
-        'licenses\ffmpeg\BUILD-INFO.json',
-        'licenses\ffmpeg\SOURCE-OFFER.md'
-    )) {
-    $payloadSource = Get-ResourceFile -Root $resourceRoot -RelativePath $relativePath -Description "required NSIS compliance payload '$relativePath'"
-    $payloadItem = Get-Item -LiteralPath $payloadSource -Force
+foreach ($licenseReport in $licenseReports) {
+    $relativePath = ([string] $licenseReport.relativePath).Replace('/', '\')
+    $payloadSource = Get-ResourceFile -Root $resourceRoot -RelativePath $relativePath -Description "required FFmpeg compliance payload '$relativePath'"
     $expectedPayload.Add([ordered]@{
             destination = $relativePath
             sourcePath = $payloadSource
-            sizeBytes = $payloadItem.Length
-            sha256 = Get-Sha256 -LiteralPath $payloadSource
+            sizeBytes = [long] $licenseReport.sizeBytes
+            sha256 = [string] $licenseReport.sha256
+        })
+}
+foreach ($complianceEntry in @($complianceReport.entries)) {
+    $expectedPayload.Add([ordered]@{
+            destination = [string] $complianceEntry.destination
+            sourcePath = [string] $complianceEntry.sourcePath
+            sizeBytes = [long] $complianceEntry.sizeBytes
+            sha256 = [string] $complianceEntry.sha256
         })
 }
 
@@ -1637,12 +1992,27 @@ if (($extractorItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -
     throw "NSIS extractor must not be a reparse point: '$nsisExtractor'."
 }
 $permitUnsigned = [bool] $AllowUnsignedInternalRc
+$signingRequirements = if ($permitUnsigned) {
+    $null
+}
+else {
+    try {
+        Get-PublicSigningRequirements `
+            -RepositoryRoot $repositoryRoot `
+            -PolicyPath $PublicReleasePolicyPath `
+            -ConfiguredSigntoolPath $SigntoolPath
+    }
+    catch {
+        throw "PUBLIC_SIGNING_POLICY_BLOCKED: $($_.Exception.Message)"
+    }
+}
 $nsisArchivePayload = Assert-NsisArchivePayload `
     -ExtractorPath $nsisExtractor `
     -InstallerPath $nsisBundle `
     -NsisHeader $nsisHeader `
     -ExpectedPayload $expectedPayload.ToArray() `
     -PermitUnsignedApplicationArtifacts $permitUnsigned `
+    -SigningRequirements $signingRequirements `
     -VerifiedOutputConfiguration $verifiedPayloadOutput
 
 $mainSignature = Get-SignatureReport `
@@ -1658,13 +2028,31 @@ $mainSignature = Get-SignatureReport `
 if (-not $AllowUnsignedInternalRc -and $mainSignature.status -cne 'NotSigned') {
     throw "Public release external UNK staging main executable must be NotSigned; got '$($mainSignature.status)'."
 }
-$nsisSignature = Get-SignatureReport -LiteralPath $nsisBundle -Description 'NSIS installer' -PermitUnsigned $permitUnsigned
+$nsisSignature = Get-SignatureReport `
+    -LiteralPath $nsisBundle `
+    -Description 'NSIS installer' `
+    -PermitUnsigned $permitUnsigned `
+    -SigningRequirements $signingRequirements
 $ffmpegSignature = Get-SignatureReport -LiteralPath $ffmpegPath -Description 'bundled FFmpeg executable' -PermitUnsigned $true -HashPinnedOnly
 
 $report = [ordered]@{
     status = 'passed'
     releaseMode = if ($AllowUnsignedInternalRc) { 'internal-rc' } else { 'public-redistribution' }
     checkedAtUtc = [DateTime]::UtcNow.ToString('o')
+    publicSigningPolicy = if ($null -eq $signingRequirements) {
+        $null
+    }
+    else {
+        [ordered]@{
+            path = [string] $signingRequirements.policyPath
+            sha256 = [string] $signingRequirements.policySha256
+            expectedPublisherSubject = [string] $signingRequirements.expectedPublisherSubject
+            expectedCertificateThumbprint = [string] $signingRequirements.expectedCertificateThumbprint
+            timestampUrl = [string] $signingRequirements.timestampUrl
+            signtoolPath = [string] $signingRequirements.signtoolPath
+            signtoolSha256 = [string] $signingRequirements.signtoolSha256
+        }
+    }
     artifacts = [ordered]@{
         mainExecutable = [ordered]@{
             path = $mainExecutable
@@ -1719,6 +2107,7 @@ $report = [ordered]@{
         entries = $nsisArchivePayload.entries
     }
     licenses = $licenseReports.ToArray()
+    thirdPartyCompliance = $complianceReport
 }
 
 $report | ConvertTo-Json -Depth 12

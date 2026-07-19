@@ -1,6 +1,6 @@
 # Tasks
 
-> 更新于 2026-07-18。状态以当前工作区实现为准；路线优先级见 [ROADMAP.md](./ROADMAP.md)。
+> 更新于 2026-07-19。状态以当前工作区实现为准；路线优先级见 [ROADMAP.md](./ROADMAP.md)。
 
 状态说明：
 
@@ -166,13 +166,16 @@
 - [x] FFmpeg 只从打包资源或绝对路径环境变量解析，不搜索 `PATH`；不可用时全局稳定降级。
 - [x] 前端按页面批量 ensure，ready 事件局部更新列表、详情与 poster，不刷新分页或重载视频。
 - [x] 固定 Windows x64 LGPL FFmpeg 的 archive/exe SHA、构建来源和运行能力，并在未签名 NSIS 内部 RC 中验证资源清单。
-- [ ] 完成 FFmpeg 对应源码镜像、完整第三方许可证/SBOM、IJG attribution、专利与法律审批后才允许主体外分发。
+- [x] 自动生成 npm/Cargo SPDX、FFmpeg 组件快照、第三方声明、去重许可证全文和哈希 manifest，并把全部材料纳入 NSIS 逐字节门禁。
+- [x] 建立最小自建 FFmpeg 候选构建、精确源码包与 Windows 合成视频验证链；候选默认不可自我晋升。
+- [ ] 发布前晋升最小自建 FFmpeg（或为现有 BtbN 构建补齐对应源码、外部库许可证及 IJG attribution），并完成专利与法律审批；此前禁止主体外分发。
 
 ### 4.5 效率与发布
 
 - [ ] 批量备注及失败恢复交互。
 - [x] 配置 NSIS current-user 内部 RC、禁止降级、显式 WebView2 策略和简中/英文安装语言。
 - [x] 增加 FFmpeg 准备/验证、bundle 静态检查、安全启动烟测和手工 release-readiness workflow；公开模式默认 fail closed。
+- [x] 增加整体公开发布 policy/preflight，覆盖许可、品牌、publisher、签名/时间戳、VM、updater 和数据安全，并输出稳定 blocker code。
 - [x] 加入 Tauri 单实例保护，第二次启动只恢复/显示/聚焦原窗口；发布烟测保留 PID、窗口和 Job 交接证据。
 - [ ] 使用正式 publisher、品牌、项目许可和 Authenticode 在一次性 Windows VM 完成安装/升级/卸载。
 - [ ] 实现自动更新端点、签名密钥、最小权限 UI 和失败/回滚策略。

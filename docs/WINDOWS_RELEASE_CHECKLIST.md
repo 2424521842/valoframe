@@ -20,9 +20,9 @@
 - [ ] NSIS 语言包含 `SimpChinese` 和 `English`。
 - [ ] 资源目录映射把 `resources/` 安装到 `$RESOURCE/`，从而把 staged 的 `resources/bin/ffmpeg.exe` 安装到 `$RESOURCE/bin/ffmpeg.exe`。
 - [ ] 日常 Rust 门禁只依赖受版本控制的资源根/元数据；发布静态检查会另外拒绝未 staged 的 FFmpeg。
-- [ ] `check-bundle.ps1` 接收本次构建生成的唯一 `installer.nsi`，并把 `Section Install` 精确绑定到主程序、FFmpeg 和四个合规文件。
-- [ ] 完整 `7z.exe` 把最终安装器识别为 NSIS 3 Unicode；五个资源与输入逐字节一致。内部 `strict-unsigned` 主程序只允许唯一 Tauri marker 从 UNK 变为 NSS；公开 `authenticode-aware` 主程序还只允许 checksum、security-directory、Align8 零 padding 和 EOF WIN_CERTIFICATE 表发生合法签名变化。
-- [ ] 公开模式要求外部 UNK staging 主程序为 `NotSigned`、内嵌 NSS 主程序和安装器均为 `Valid`；证书表边界、大小、条目和 EOF 覆盖有效。报告包含 embedded main 的 raw/canonical SHA-256、比较模式和签名状态。
+- [ ] `check-bundle.ps1` 接收本次构建生成的唯一 `installer.nsi`，并把 `Section Install` 精确绑定到主程序、FFmpeg、FFmpeg 许可文件和 `COMPLIANCE-MANIFEST.json` 声明的全部第三方材料。
+- [ ] 完整 `7z.exe` 把最终安装器识别为 NSIS 3 Unicode；manifest 驱动的全部资源与输入逐字节一致。内部 `strict-unsigned` 主程序只允许唯一 Tauri marker 从 UNK 变为 NSS；公开 `authenticode-aware` 主程序还只允许 checksum、security-directory、Align8 零 padding 和 EOF WIN_CERTIFICATE 表发生合法签名变化。
+- [ ] 公开模式要求外部 UNK staging 主程序为 `NotSigned`、内嵌 NSS 主程序和安装器均为 `Valid`；证书表边界、大小、条目和 EOF 覆盖有效。两项签名均与获批 publisher subject/证书 thumbprint 一致、存在时间戳证书并通过 `signtool verify /pa /all /v`。报告包含 embedded main 的 raw/canonical SHA-256、比较模式、签名者、时间戳和 signtool 结果。
 - [ ] 配置中没有占位 publisher、伪造许可证、测试证书、虚构更新公钥或更新端点。
 - [ ] 本地 Tauri schema 校验通过。
 
@@ -44,6 +44,8 @@
 - [ ] 已记录原始下载 URL、下载时间、版本和构建参数。
 - [ ] 已根据实际启用组件完成许可证审核，没有根据项目名猜测 LGPL/GPL 状态。
 - [ ] SBOM 或等价组件清单已生成并归档。
+- [ ] npm/Cargo SPDX、FFmpeg 组件快照、第三方声明、许可证全文和 SHA-256 manifest 均由锁文件重新生成；缺文本 override 和人工审核已闭合。
+- [ ] 最小自建 FFmpeg 候选的 checksum/build metadata、12 位 commit、PE 实际 imports 与 objdump 结果已一致，imports 只命中 Windows 系统 DLL allowlist；Windows 合成视频和代表性真实高光视频均通过，且对应源码包与最终二进制同址长期提供。通过前仍使用内部 RC 固定版本。
 - [ ] 对应源代码镜像或书面提供方式可长期访问并匹配该二进制。
 - [ ] 项目许可证/EULA（若需要）和第三方声明已获批准并纳入发布材料。
 
@@ -51,12 +53,12 @@
 
 - [ ] 使用 `npm run tauri -- build --bundles nsis --ci --no-sign` 生成隔离产物。
 - [ ] 安装器文件名、大小和 SHA-256 已记录。
-- [ ] 已归档 bundle gate 报告，其中包含 `installer.nsi`、7-Zip 及六个受控解包载荷的 SHA-256；报告边界明确写明没有执行安装器。
-- [ ] GitHub run 已保留 30 天的 `vhm-internal-rc-evidence-<run id>-<attempt>` 证据 artifact；其中包含 `vhm-internal-rc-report.json`、`verified-payload-sha256.json`、`installer-sha256.json`、`toolchain-metadata.json`、`public-release-gate.json` 和通过后的 `vhm-release-smoke-report.json`。
-- [ ] 证据 artifact 只含 JSON 元数据，不含未签名安装器、staging 主程序或六个解包载荷；run URL、run attempt 和 artifact 到期日已写入 RC 记录。
+- [ ] 已归档 bundle gate 报告，其中包含 `installer.nsi`、7-Zip 及 manifest 驱动受控解包载荷的 SHA-256；报告边界明确写明没有执行安装器。
+- [ ] GitHub run 已保留 30 天的 `vhm-internal-rc-evidence-<run id>-<attempt>` 证据 artifact；其中包含 bundle/payload/installer/toolchain、`public-release-preflight.json`、`public-release-gate.json`、启动烟测以及 SPDX/第三方许可材料。
+- [ ] 证据 artifact 不含未签名安装器、staging 主程序或受控解包载荷；仅包含报告和许可/SBOM 文本，run URL、run attempt 和 artifact 到期日已写入 RC 记录。
 - [ ] `installer-sha256.json` 明确记录 `internal-only`、`unsigned`、安装器与 staging 主程序的 `NotSigned` 状态和 SHA-256；`toolchain-metadata.json` 的 commit/run 和工具版本与本次构建一致。
 - [ ] `public-release-gate.json` 为 `blocked-as-required`，公开模式没有传入 `-AllowUnsignedInternalRc`；意外通过、已签名输入或非预期错误均使 workflow 失败，不能把内部证据 artifact 当作公开发布批准。
-- [ ] 输出目录移动前后均复核临时根目录/父链无 reparse，移动后恰好六个文件再次匹配最终报告；自动启动烟测读取该 JSON 逐项复核，并以报告的 `rawEmbeddedSha256` 授权 NSS 主程序，不现场自算哈希。
+- [ ] 输出目录移动前后均复核临时根目录/父链无 reparse，移动后文件数量和每项哈希再次匹配最终报告；自动启动烟测读取该 JSON 逐项复核，并以报告的 `rawEmbeddedSha256` 授权 NSS 主程序，不现场自算哈希。
 - [ ] 分发说明醒目标注“内部、未签名、可能触发 SmartScreen”。
 - [ ] 仅在仓库负责人或同一法律主体控制的设备上测试；FFmpeg/项目许可未闭合时没有向主体外测试者分发，也没有公开上传或接入自动更新。
 - [ ] 在标准用户干净虚拟机完成安装、启动、缩略图生成和卸载。
@@ -94,7 +96,7 @@
 - [ ] 安装器、应用商店或商业分发所需的设计源文件、合同或许可证已另行归档并通过法律与品牌审核。
 - [ ] Riot Games、腾讯及《无畏契约》相关商标归属和非官方/非赞助/非认可声明已经批准，并纳入 README、About/许可页和公开发布材料。
 - [ ] FFmpeg provenance、SHA-256、许可证结论、SBOM 和源代码镜像/提供方式齐全。
-- [ ] Authenticode 证书和可信时间戳服务已配置；最终安装器签名验证成功。
+- [ ] Authenticode 证书和可信时间戳服务已配置；policy 固定 publisher subject 和证书 thumbprint，最终安装器与内嵌主程序的链、时间戳和 `signtool` 验证成功。
 - [ ] 发布流程不会输出或上传未签名的公开安装器。
 - [ ] updater 插件、最小权限、公钥、HTTPS endpoint 和 `latest.json` 契约已实现；若本版本不提供自动更新，则所有公开材料明确写明不支持。
 - [ ] updater 私钥已安全备份并仅通过发布机密注入；篡改包和错误签名会被拒绝。
@@ -122,7 +124,7 @@
 ## 8. 最终产物与发布后检查
 
 - [ ] 最终 NSIS 安装器的 SHA-256、大小和签名状态已二次核对。
-- [ ] Authenticode 链和时间戳在干净机器上验证通过。
+- [ ] Authenticode 链和时间戳在干净机器上验证通过，签名者 subject/thumbprint 与批准 policy 精确一致。
 - [ ] 发布说明列出系统要求、WebView2 联网行为、数据迁移和已知问题。
 - [ ] 安装器、符号/调试材料、SBOM、源代码材料、第三方声明和测试证据已归档。
 - [ ] 下载页和更新元数据指向同一已验证文件及版本。

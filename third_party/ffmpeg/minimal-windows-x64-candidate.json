@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "status": "candidate-not-promoted",
+  "purpose": "Minimal self-built Windows x64 FFmpeg candidate for VALOFRAME thumbnail generation",
+  "platform": "windows",
+  "architecture": "x86_64",
+  "source": {
+    "repository": "https://github.com/FFmpeg/FFmpeg",
+    "commit": "ce3c09c101c83add623774d414a9f9498caf5c25",
+    "commitUrl": "https://github.com/FFmpeg/FFmpeg/commit/ce3c09c101c83add623774d414a9f9498caf5c25",
+    "referenceArchive": "https://github.com/FFmpeg/FFmpeg/archive/ce3c09c101c83add623774d414a9f9498caf5c25.tar.gz"
+  },
+  "build": {
+    "script": "scripts/release/build-minimal-ffmpeg.sh",
+    "targetTriple": "x86_64-w64-mingw32",
+    "licenseExpression": "LGPL-3.0-or-later",
+    "configureFlags": [
+      "--arch=x86_64",
+      "--target-os=mingw32",
+      "--cross-prefix=x86_64-w64-mingw32-",
+      "--pkg-config=false",
+      "--disable-autodetect",
+      "--disable-everything",
+      "--disable-doc",
+      "--disable-debug",
+      "--disable-network",
+      "--disable-ffplay",
+      "--disable-ffprobe",
+      "--enable-ffmpeg",
+      "--enable-avcodec",
+      "--enable-avformat",
+      "--enable-avutil",
+      "--enable-swscale",
+      "--enable-w32threads",
+      "--enable-protocol=file",
+      "--enable-demuxer=mov",
+      "--enable-parser=h264",
+      "--enable-decoder=h264",
+      "--enable-filter=scale",
+      "--enable-encoder=mjpeg",
+      "--enable-muxer=image2",
+      "--enable-version3",
+      "--enable-static",
+      "--disable-shared",
+      "--enable-small",
+      "--extra-cflags=-Os",
+      "--extra-ldflags=-static",
+      "--extra-version=valoframe-minimal-20260719-gce3c09c101c8"
+    ],
+    "forbiddenFlags": [
+      "--enable-gpl",
+      "--enable-nonfree",
+      "--enable-libx264",
+      "--enable-libx265",
+      "--enable-libfdk-aac"
+    ],
+    "externalLibraries": []
+  },
+  "runtimeContract": {
+    "requiredCapabilities": {
+      "protocols": [
+        "file"
+      ],
+      "demuxers": [
+        "mov"
+      ],
+      "decoders": [
+        "h264"
+      ],
+      "filters": [
+        "scale"
+      ],
+      "encoders": [
+        "mjpeg"
+      ],
+      "muxers": [
+        "image2"
+      ]
+    },
+    "thumbnailArguments": [
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-ss",
+      "0.5",
+      "-i",
+      "{input}",
+      "-frames:v",
+      "1",
+      "-vf",
+      "scale=480:-2:force_original_aspect_ratio=decrease",
+      "-q:v",
+      "5",
+      "{output}"
+    ],
+    "maximumOutputBytes": 4194304,
+    "processTimeoutSeconds": 30,
+    "allowedSystemDllImports": [
+      "ADVAPI32.dll",
+      "BCRYPT.dll",
+      "COMDLG32.dll",
+      "GDI32.dll",
+      "KERNEL32.dll",
+      "MSVCRT.dll",
+      "OLE32.dll",
+      "SHELL32.dll",
+      "USER32.dll",
+      "WINMM.dll",
+      "WS2_32.dll"
+    ],
+    "smokeFixture": {
+      "encoding": "base64",
+      "sizeBytes": 877,
+      "sha256": "2f8700175679feb0cc970fc39d72a4df632618ed90c4357cf4c90ef7643c7dea",
+      "base64": "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAMFbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAi90cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAEAAAABAAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAPoAAAAAAABAAAAAAGnbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAAQABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABUm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAARJzdGJsAAAArnN0c2QAAAAAAAAAAQAAAJ5hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAEAAQABIAAAASAAAAAAAAAABGUxhdmM2Mi4yOC4xMDIgbGlib3BlbmgyNjQAAAAAAAAAGP//AAAAJGF2Y0MBQsAU/+EADWdCwBSMaEJMBAeEQjUBAARozjyAAAAAEHBhc3AAAAABAAAAAQAAABRidHJ0AAAAAAAAAcAAAAHAAAAAGHN0dHMAAAAAAAAAAQAAAAIAACAAAAAAHHN0c2MAAAAAAAAAAQAAAAEAAAACAAAAAQAAABRzdHN6AAAAAAAAABwAAAACAAAAFHN0Y28AAAAAAAAAAQAAAzUAAABidWR0YQAAAFptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAAC1pbHN0AAAAJal0b28AAAAdZGF0YQAAAAEAAAAATGF2ZjYyLjEyLjEwMgAAAAhmcmVlAAAAQG1kYXQAAAAYZbgABAnkxQABGfk5OTrrrrrrrrqSuuvAAAAAGGW4AAYJ5MUAARn5OTk666666666krrrwA=="
+    }
+  },
+  "promotionRequirements": [
+    "Build and verify on pinned CI source commit and record the compiler/toolchain inventory.",
+    "Pass the synthetic runtime contract on Windows x64.",
+    "Pass representative real VALORANT highlight video regression without replacing the current internal RC first.",
+    "Publish the exact corresponding-source archive beside the promoted binary and installer.",
+    "Complete license, target-market codec patent, and legal approval records.",
+    "Pin the promoted executable size and SHA-256 in windows-x64.json only after all checks pass."
+  ]
+}
