@@ -1197,6 +1197,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+    static NEXT_TEMP_DIR_ID: AtomicUsize = AtomicUsize::new(0);
+
     #[test]
     fn ffmpeg_resolution_never_accepts_path_search_or_relative_override() {
         let root = unique_temp_dir();
@@ -1427,7 +1429,10 @@ mod tests {
         )
         .unwrap();
         wait_until(Duration::from_secs(8), || {
-            queue.status().is_ok_and(|status| status.ready_count == 3)
+            queue.status().is_ok_and(|status| {
+                status.ready_count == 3
+                    && status.last_error_code.as_deref() == Some("ffmpeg-unavailable")
+            })
         });
 
         queue.maintain_cache_with_limits(16, 8).unwrap();
@@ -1461,7 +1466,10 @@ mod tests {
         )
         .unwrap();
         wait_until(Duration::from_secs(8), || {
-            queue.status().is_ok_and(|status| status.ready_count == 3)
+            queue.status().is_ok_and(|status| {
+                status.ready_count == 3
+                    && status.last_error_code.as_deref() == Some("ffmpeg-unavailable")
+            })
         });
         let connection = db::open_database(&fixture.database_path).unwrap();
         let oldest = db::list_ready_thumbnail_cache_refs(&connection)
@@ -1885,6 +1893,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("vhm-thumbnail-test-{nonce}"))
+        let sequence = NEXT_TEMP_DIR_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "vhm-thumbnail-test-{}-{nonce}-{sequence}",
+            std::process::id()
+        ))
     }
 }
