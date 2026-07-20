@@ -124,7 +124,7 @@ Windows 上 Tauri 通过 Known Folder API 解析应用数据目录；仅在子�
 - 根目录与真实应用 data/cache 目录互不等同、互不为父子目录；
 - 配置窗口使用 `create: false`，只有完成上述验证后才手动创建；烟测 WebView2 profile 明确写入 `<root>/webview2`；
 - 数据库写入 `<root>/data`，缩略图缓存写入 `<root>/cache/thumbnails`；`TEMP`/`TMP`、进程输出日志和禁止真实扫描的哨兵路径位于 root 外、由脚本 marker-gated 的 sibling；
-- 不覆盖 `APPDATA`、`LOCALAPPDATA`、`USERPROFILE`、`HOME`、`HOMEDRIVE` 或 `HOMEPATH`：这些值不是 Windows Known Folder 的可靠隔离边界，伪造后还可能令 `SHGetKnownFolderPath` 返回 `PATH_NOT_FOUND`；也不设置 `WEBVIEW2_USER_DATA_FOLDER`，避免它覆盖 Rust builder 的显式 `<root>/webview2`；
+- 不覆盖 `APPDATA`、`LOCALAPPDATA`、`USERPROFILE`、`HOME`、`HOMEDRIVE` 或 `HOMEPATH`：这些值不是 Windows Known Folder 的可靠隔离边界，伪造后还可能令 `SHGetKnownFolderPath` 返回 `PATH_NOT_FOUND`；启动前拒绝继承非空的 `WEBVIEW2_USER_DATA_FOLDER`，避免它覆盖 Rust builder 的显式 `<root>/webview2`；
 - 主进程必须先以 suspended 状态创建、加入启用 `KILL_ON_JOB_CLOSE` 的 Windows Job，再恢复执行；只向子进程继承受限的 stdin/stdout/stderr 句柄，失败报告保留有界输出；
 - CI 启动烟测的可执行文件和资源必须来自 bundle gate 已验证并保留的 NSIS payload，不得回退到构建目录中的 UNK staging 主程序；
 - 新数据库必须是 schema v13、`requiredTableCount = 16`，包含空的 `clip_trash_snapshots` 回收身份目录和 `clip_delete_intents` 删除意图日志，并在 JSON 报告中记录 `database.trashSnapshotCount = 0` 与 `database.deleteIntentCount = 0`；

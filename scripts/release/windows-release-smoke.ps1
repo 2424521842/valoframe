@@ -1890,6 +1890,9 @@ function Assert-DatabaseInspection {
 if (-not (Test-IsWindows)) {
     throw 'windows-release-smoke.ps1 must run on Windows.'
 }
+if (-not [string]::IsNullOrEmpty($env:WEBVIEW2_USER_DATA_FOLDER)) {
+    throw 'Refusing to inherit WEBVIEW2_USER_DATA_FOLDER during a release smoke test.'
+}
 if (-not [string]::IsNullOrWhiteSpace($env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS)) {
     throw 'Refusing to inherit WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS during a release smoke test.'
 }

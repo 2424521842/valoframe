@@ -650,6 +650,14 @@ test("bundle gate proves NSIS format and all shipped compliance payload files", 
 });
 
 test("Windows startup smoke proves schema v13 and single-instance handoff", () => {
+  assert.match(
+    releaseSmokeScript,
+    /IsNullOrEmpty\(\$env:WEBVIEW2_USER_DATA_FOLDER\)[\s\S]*Refusing to inherit WEBVIEW2_USER_DATA_FOLDER[\s\S]*\$realDataBefore\s*=\s*Get-TreeFingerprint/,
+  );
+  assert.match(
+    releaseSmokeScript,
+    /IsNullOrWhiteSpace\(\$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS\)[\s\S]*Refusing to inherit WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS/,
+  );
   assert.match(releaseSmokeScript, /\$ExpectedSchemaVersion\s*=\s*13/);
   assert.match(releaseSmokeScript, /clip_trash_snapshots/);
   assert.match(releaseSmokeScript, /trashSnapshotCount/);
