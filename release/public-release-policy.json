@@ -38,6 +38,30 @@
     "identifierApproved": false,
     "identifierApprovalReference": null
   },
+  "gameContentRights": {
+    "approved": false,
+    "confirmedScopes": [],
+    "operationalAssumptionScopes": [
+      "public-source-repository",
+      "in-app-display",
+      "internal-controlled-testing",
+      "windows-internal-test-build",
+      "github-project-marketing"
+    ],
+    "requiredScopes": [
+      "public-source-repository",
+      "in-app-display",
+      "public-windows-installer",
+      "public-release-artifact-download",
+      "github-project-marketing"
+    ],
+    "manifest": "src/data/valorantAssets.json",
+    "manifestSha256": "f647a04eb7879d9cb191136026220a26addc09e789f60ee21665b7512dfa8e8e",
+    "assetRoot": "public/valorant-assets",
+    "verifier": "scripts/assets/verify-valorant-assets.mjs",
+    "approvalReference": "release/approvals/game-content-rights.json",
+    "approvalSha256": "8f63fb80000070044d95828010c81a01af17d0c241434dcbcedf1c1b295ec99a"
+  },
   "iconRights": {
     "approved": false,
     "confirmedScopes": [

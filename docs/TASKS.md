@@ -1,6 +1,6 @@
 # Tasks
 
-> 更新于 2026-07-19。状态以当前工作区实现为准；路线优先级见 [ROADMAP.md](./ROADMAP.md)。
+> 更新于 2026-07-20。状态以当前工作区实现为准；路线优先级见 [ROADMAP.md](./ROADMAP.md)。
 
 状态说明：
 
@@ -30,7 +30,7 @@
 | Rust 模块收敛 | ✅ 已完成 | library repository、scan-run persistence、library commands、migrations、media protocol 与 scan service 已拆分；兼容 facade 仅保留聚合入口与本域实现 |
 | 旧 UI/CSS/大资源清理 | ✅ 已完成 | 旧生产组件和 App.css 覆盖层已删除；workspace 已懒加载；大型参考图已移除；主 JS 约 388 kB |
 | 缩略图队列 | ✅ 已完成 | 源封面优先；持久队列、单 worker、指纹失效、缓存预算、局部前端更新和生成器不可用降级已接入 |
-| CI | ✅ 已完成 | `.github/workflows/ci.yml` 已覆盖 npm 与 Rust 门禁，Rust toolchain 固定为 1.96.1 |
+| CI | ✅ 已完成 | `.github/workflows/ci.yml` 已覆盖 npm 与 Rust 门禁，Rust toolchain 固定为 1.96.1；Draft PR #1 的 CI run 11 已通过 |
 | CSP 与权限最小化 | 🟡 部分完成 | CSP、依赖和 capability 已收敛；仍需 release build 实机回归目录选择、事件与媒体 |
 | 批量备注 | ⏳ 待执行 | 仍需补充批量备注和更完整的失败恢复交互 |
 | 安装包与自动更新 | 🟡 部分完成 | 可复现 FFmpeg 与未签名 NSIS 内部 RC 已自动化；公开签名、许可闭环、VM 升级和 updater 仍被明确阻断 |
@@ -138,7 +138,7 @@
 - [x] 执行 TypeScript/Vite 生产构建。
 - [x] 执行 Rust fmt、严格 Clippy 和完整测试。
 - [x] workflow 不读取或上传真实 ACLOS 数据、本地数据库或用户素材。
-- [ ] 首次提交/推送后确认 GitHub 托管 runner 的完整工作流通过。
+- [x] Draft PR #1 的 GitHub 托管 CI run 11 已完整通过；后续提交仍需重新通过。
 
 ### 4.2 CSP、权限和依赖（代码完成，待实机回归）
 
@@ -166,6 +166,7 @@
 - [x] FFmpeg 只从打包资源或绝对路径环境变量解析，不搜索 `PATH`；不可用时全局稳定降级。
 - [x] 前端按页面批量 ensure，ready 事件局部更新列表、详情与 poster，不刷新分页或重载视频。
 - [x] 固定 Windows x64 LGPL FFmpeg 的 archive/exe SHA、构建来源和运行能力，并在未签名 NSIS 内部 RC 中验证资源清单。
+- [x] 将 29 张英雄图和 13 张地图图固化为逐文件来源/尺寸/大小/SHA-256 清单，记录负责人“已取得授权”的声明、保守操作假设和待人工核对项，并以完整 PNG verifier 接入测试与构建；发布源码/宣传图及所有公开安装器/Release 二进制下载继续 fail closed。
 - [x] 自动生成 npm/Cargo SPDX、FFmpeg 组件快照、第三方声明、去重许可证全文和哈希 manifest，并把全部材料纳入 NSIS 逐字节门禁。
 - [x] 建立最小自建 FFmpeg 候选构建、精确源码包与 Windows 合成视频验证链；候选默认不可自我晋升。
 - [ ] 发布前晋升最小自建 FFmpeg（或为现有 BtbN 构建补齐对应源码、外部库许可证及 IJG attribution），并完成专利与法律审批；此前禁止主体外分发。
@@ -175,7 +176,7 @@
 - [ ] 批量备注及失败恢复交互。
 - [x] 配置 NSIS current-user 内部 RC、禁止降级、显式 WebView2 策略和简中/英文安装语言。
 - [x] 增加 FFmpeg 准备/验证、bundle 静态检查、安全启动烟测和手工 release-readiness workflow；公开模式默认 fail closed。
-- [x] 增加整体公开发布 policy/preflight，覆盖许可、品牌、publisher、签名/时间戳、VM、updater 和数据安全，并输出稳定 blocker code。
+- [x] 增加整体公开发布 policy/preflight，覆盖许可、游戏素材范围与字节证据、品牌、publisher、签名/时间戳、VM、updater 和数据安全，并输出稳定 blocker code。
 - [x] 项目自有代码选择 MIT，npm/Cargo/根许可文本一致，并记录不另设重复 EULA。
 - [x] 为发布归档漏带正文的 1 个 npm 和 11 个 Cargo 组件增加版本/checksum/VCS/SHA-256 固定的离线 override 证据。
 - [ ] 负责人/法律审核并批准第三方许可证 override，单独确认 `selectors` 的 MPL 2.0 源代码形式义务。
@@ -205,7 +206,7 @@ git diff --check
 ## 6. 发布验收
 
 - [x] CI workflow、固定 toolchain 和严格 Clippy 门禁已配置，本地等价命令无告警。
-- [ ] 首次推送后确认 GitHub 托管 CI 完整通过。
+- [x] Draft PR #1 的 GitHub 托管 CI run 11 已通过；新的测试候选必须以对应 commit 的绿色 CI 为准。
 - [x] CSP、opener 依赖和 capability 已完成代码层最小化。
 - [ ] production release build 完成 CSP、目录选择、事件和媒体协议实机回归。
 - [ ] 默认、自定义、多来源和固定磁盘扫描在 Windows 验证。

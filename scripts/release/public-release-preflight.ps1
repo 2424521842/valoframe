@@ -114,6 +114,15 @@ function Test-BooleanTrue {
     return $null -ne $property -and $property.Value -is [bool] -and $property.Value -eq $true
 }
 
+function Test-BooleanFalse {
+    param(
+        [Parameter(Mandatory)] [object] $Section,
+        [Parameter(Mandatory)] [string] $PropertyName
+    )
+    $property = $Section.PSObject.Properties[$PropertyName]
+    return $null -ne $property -and $property.Value -is [bool] -and $property.Value -eq $false
+}
+
 function Get-RequiredEvidenceString {
     param(
         [Parameter(Mandatory)] [object] $Object,
@@ -359,6 +368,127 @@ if (-not (Test-BooleanTrue -Section $policy.identity -PropertyName 'identifierAp
 }
 if ([string] $policy.identity.identifier -cne [string] $tauriConfig.identifier) {
     Add-Blocker -Code 'IDENTIFIER_MISMATCH' -PolicyField 'identity.identifier' -Message 'Approved identifier does not match tauri.conf.json.'
+}
+
+$gameContent = $policy.gameContentRights
+$requiredPublicGameContentScopes = @(
+    'public-source-repository',
+    'in-app-display',
+    'public-windows-installer',
+    'public-release-artifact-download',
+    'github-project-marketing'
+)
+$requiredOperationalAssumptionScopes = @(
+    'public-source-repository',
+    'in-app-display',
+    'internal-controlled-testing',
+    'windows-internal-test-build',
+    'github-project-marketing'
+)
+$confirmedGameContentScopes = @($gameContent.confirmedScopes)
+$operationalGameContentScopes = @($gameContent.operationalAssumptionScopes)
+$missingGameContentScopes = @($requiredPublicGameContentScopes | Where-Object { $_ -cnotin $confirmedGameContentScopes })
+if (-not (Test-ApprovedReference -Section $gameContent) -or $missingGameContentScopes.Count -ne 0) {
+    Add-Blocker `
+        -Code 'GAME_CONTENT_DISTRIBUTION_RIGHTS_MISSING' `
+        -PolicyField 'gameContentRights' `
+        -Message "Reviewed game-content evidence does not confirm public release scopes: $($missingGameContentScopes -join ', ')."
+}
+
+try {
+    $gameContentManifestPath = Resolve-RepositoryFile `
+        -Root $root `
+        -RelativePath ([string] $gameContent.manifest) `
+        -Description 'game-content asset manifest'
+    $gameContentApprovalPath = Resolve-RepositoryFile `
+        -Root $root `
+        -RelativePath ([string] $gameContent.approvalReference) `
+        -Description 'game-content authorization record'
+    $gameContentVerifierPath = Resolve-RepositoryFile `
+        -Root $root `
+        -RelativePath ([string] $gameContent.verifier) `
+        -Description 'game-content verifier'
+
+    $policyRequiredScopeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($scope in @($gameContent.requiredScopes)) {
+        if ($scope -isnot [string] -or [string]::IsNullOrWhiteSpace([string] $scope) -or
+            -not $policyRequiredScopeSet.Add([string] $scope)) {
+            throw 'Game-content policy contains an invalid or duplicate required scope.'
+        }
+    }
+    if ($policyRequiredScopeSet.Count -ne $requiredPublicGameContentScopes.Count -or
+        @($requiredPublicGameContentScopes | Where-Object { -not $policyRequiredScopeSet.Contains($_) }).Count -ne 0) {
+        throw 'Game-content policy does not contain the exact public release scope set.'
+    }
+
+    if (-not (Test-BooleanFalse -Section $gameContent -PropertyName 'approved') -or
+        $confirmedGameContentScopes.Count -ne 0) {
+        throw 'Pending owner attestation must not be represented as reviewed approval or confirmed scope.'
+    }
+    $policyOperationalScopeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($scope in $operationalGameContentScopes) {
+        if ($scope -isnot [string] -or [string]::IsNullOrWhiteSpace([string] $scope) -or
+            -not $policyOperationalScopeSet.Add([string] $scope)) {
+            throw 'Game-content policy contains an invalid or duplicate operational-assumption scope.'
+        }
+    }
+    if ($policyOperationalScopeSet.Count -ne $requiredOperationalAssumptionScopes.Count -or
+        @($requiredOperationalAssumptionScopes | Where-Object { -not $policyOperationalScopeSet.Contains($_) }).Count -ne 0) {
+        throw 'Game-content policy does not contain the exact operational-assumption scope set.'
+    }
+
+    $manifestHash = (Get-FileHash -LiteralPath $gameContentManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ([string] $gameContent.manifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $manifestHash -cne [string] $gameContent.manifestSha256) {
+        throw 'Game-content asset manifest does not match the policy SHA-256.'
+    }
+    $approvalHash = (Get-FileHash -LiteralPath $gameContentApprovalPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ([string] $gameContent.approvalSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $approvalHash -cne [string] $gameContent.approvalSha256) {
+        throw 'Game-content authorization record does not match the policy SHA-256.'
+    }
+
+    $gameContentManifest = Get-Content -Raw -LiteralPath $gameContentManifestPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    if ([string] $gameContentManifest.authorizationReference -cne [string] $gameContent.approvalReference) {
+        throw 'Policy and asset manifest do not reference the same game-content authorization record.'
+    }
+    $approval = Get-Content -Raw -LiteralPath $gameContentApprovalPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    if ($null -ne $approval.PSObject.Properties['approved'] -or
+        [string] $approval.status -cne 'owner-attested-pending-source-evidence-review' -or
+        -not (Test-BooleanTrue -Section $approval -PropertyName 'ownerAttestationReceived') -or
+        -not (Test-BooleanFalse -Section $approval -PropertyName 'sourceDocumentReviewed') -or
+        -not (Test-BooleanFalse -Section $approval -PropertyName 'legalReviewApproved') -or
+        -not (Test-BooleanTrue -Section $approval -PropertyName 'manualReviewRequired')) {
+        throw 'Game-content rights record must remain an owner attestation pending source-evidence and legal review.'
+    }
+    $approvalScopeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($scope in @($approval.repositoryOperationalAssumptionScopes)) {
+        if ($scope -isnot [string] -or [string]::IsNullOrWhiteSpace([string] $scope) -or
+            -not $approvalScopeSet.Add([string] $scope)) {
+            throw 'Game-content rights record contains an invalid or duplicate operational-assumption scope.'
+        }
+    }
+    if ($approvalScopeSet.Count -ne $policyOperationalScopeSet.Count -or
+        @($operationalGameContentScopes | Where-Object { -not $approvalScopeSet.Contains([string] $_) }).Count -ne 0) {
+        throw 'Policy operationalAssumptionScopes do not exactly match the game-content rights record.'
+    }
+
+    $node = Get-Command node -CommandType Application -ErrorAction Stop
+    $verificationOutput = @(& $node.Source `
+            $gameContentVerifierPath `
+            --repository-root $root `
+            --manifest ([string] $gameContent.manifest) `
+            --asset-root ([string] $gameContent.assetRoot) `
+            --quiet 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Game-content asset verification failed: $($verificationOutput -join ' ')"
+    }
+}
+catch {
+    Add-Blocker `
+        -Code 'GAME_CONTENT_EVIDENCE_INVALID' `
+        -PolicyField 'gameContentRights' `
+        -Message $_.Exception.Message
 }
 
 $confirmedScopes = @($policy.iconRights.confirmedScopes)

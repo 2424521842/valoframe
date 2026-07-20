@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "images": [
+    {
+      "path": "docs/images/valoframe-library.png",
+      "sha256": "68347ef11d874c262960148cdce46b2682abc4b59cba5191ee24f465ed584da0",
+      "byteLength": 344224,
+      "width": 1440,
+      "height": 900,
+      "capturedOn": "2026-07-20",
+      "sourceBaseCommit": "1c107360b85acbb962567da2e1d8d57bfe56b3d7",
+      "sourceWorkingTreeDirty": true,
+      "capture": {
+        "browser": "Microsoft Edge headless",
+        "url": "http://127.0.0.1:1420",
+        "viewport": "1440x900@1x",
+        "command": "msedge --headless=new --window-size=1440,900 --force-device-scale-factor=1 --virtual-time-budget=6000 --screenshot=docs/images/valoframe-library.png http://127.0.0.1:1420"
+      },
+      "dataClassification": "repository-synthetic-fixtures-only",
+      "fixtureIdentity": "FixtureAlpha#0001",
+      "gameAssetManifest": "src/data/valorantAssets.json",
+      "gameAssetManifestSha256": "f647a04eb7879d9cb191136026220a26addc09e789f60ee21665b7512dfa8e8e",
+      "gameAssetCollectionFingerprint": "26c4c77a5a13d3ca1a84f4616b0cba1f251462882a0e86f9592d5fc8ef2e1c13",
+      "authorizationReference": "release/approvals/game-content-rights.json",
+      "operationalAssumptionScope": "github-project-marketing",
+      "publicationApproved": false,
+      "manualScopeReviewRequired": true,
+      "renderingOperations": [
+        "display-scaling",
+        "css-cropping-and-masking",
+        "interface-composition"
+      ],
+      "renderedGameAssets": [
+        "agents/a3bfb853-43b2-7238-a4f1-ad90e9e46bcc.png",
+        "agents/8e253930-4c05-31dd-1b6c-968525494517.png",
+        "maps/756da597-416b-c0f2-f47b-afbdf28670bc.png",
+        "maps/7eaecc1b-4337-bbf6-6ab9-04b8f06b3319.png"
+      ],
+      "publicationNote": "Prepared local preview only. Do not publish this screenshot until a reviewer compares the source authorization with the github-project-marketing scope and rendering operations. The image bytes are fixed by SHA-256; re-capture if the rendered UI or included asset bytes change."
+    }
+  ]
+}

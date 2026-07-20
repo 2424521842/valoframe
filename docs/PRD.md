@@ -28,7 +28,7 @@
 ### 3.2 WonderfulDb
 
 - 只读枚举 `%APPDATA%\ACLOS\WonderfulDb` 的账号文件。
-- AES 解密和完整 JSON 文档解析只在进程内存中进行；不回写密文，也不在 WonderfulDb 或素材目录生成独立明文副本。
+- AES 解密和完整文档解析在进程内存中进行；不回写密文，也不在 WonderfulDb 或素材目录生成独立解密副本。归一化索引和部分 snapshot/event 原始记录会以明文 `raw_json` 保存到应用 SQLite，并按本地敏感数据处理。
 - 应用 SQLite 会保存归一化后的字段及必要的事件、快照 JSON，用于本地索引和详情展示。
 - 单个账号文件读取、解密或解析失败只产生警告，不阻断其他账号和 MP4 入库。
 

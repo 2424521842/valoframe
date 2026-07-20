@@ -28,6 +28,10 @@ import { motionProfile, type MotionProfile } from "../lib/motionProfile";
 import type { ClipSelectionGesture } from "../lib/clipSelection";
 import { cn } from "../lib/classNames";
 import { expectsOfficialRoundScore } from "../lib/videoTypes";
+import {
+  valorantAgentDisplayIconUrl,
+  valorantMapListViewIconUrl,
+} from "../lib/valorantAssets";
 import type { ClipMatchGroup, ClipSummary, LibraryViewMode, Tag } from "../types";
 import { ThumbnailImage } from "./ThumbnailImage";
 import { UiCheckbox } from "./ui/checkbox";
@@ -284,7 +288,7 @@ export const MatchLibrary = memo(function MatchLibrary({
                     <small>地图</small>
                     <strong>{matchGroup.mapName || "未知地图"}</strong>
                   </span>
-                  <span className="match-board-map-art" aria-hidden="true" />
+                  <MapSlice name={matchGroup.mapName} />
                   <span className="match-board-count">{matchGroup.clips.length} 条片段</span>
                   <CaretUp className={isCollapsed ? "match-board-caret match-board-caret--collapsed" : "match-board-caret"} weight="bold" />
                 </button>
@@ -778,9 +782,45 @@ const VirtualizedMatchClips = memo(function VirtualizedMatchClips({
 });
 
 function AgentPortrait({ name }: { name: string }) {
+  const url = valorantAgentDisplayIconUrl(name);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => setFailed(false), [url]);
+
   return (
-    <span className="match-board-agent" title={name || "未知英雄"}>
-      {agentInitial(name)}
+    <span
+      className={url && !failed ? "match-board-agent" : "match-board-agent match-board-agent--fallback"}
+      title={name || "未知英雄"}
+    >
+      {url && !failed ? (
+        <img
+          alt=""
+          decoding="async"
+          src={url}
+          onError={() => setFailed(true)}
+        />
+      ) : agentInitial(name)}
+    </span>
+  );
+}
+
+function MapSlice({ name }: { name: string }) {
+  const url = valorantMapListViewIconUrl(name);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => setFailed(false), [url]);
+
+  return (
+    <span className="match-board-map-art" aria-hidden="true">
+      {url && !failed ? (
+        <img
+          alt=""
+          decoding="async"
+          loading="lazy"
+          src={url}
+          onError={() => setFailed(true)}
+        />
+      ) : null}
     </span>
   );
 }

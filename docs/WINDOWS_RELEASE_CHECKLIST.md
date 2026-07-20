@@ -29,6 +29,7 @@
 ## 3. 代码质量门禁
 
 - [ ] `npm ci` 成功且只使用 `package-lock.json`。
+- [ ] `npm run assets:verify` 通过，42 张 PNG 的完整结构、大小、SHA-256、精确文件集合及负责人声明记录绑定均与清单一致。
 - [ ] `npm test` 全部通过。
 - [ ] `npm run build` 通过。
 - [ ] `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过。
@@ -59,6 +60,7 @@
 - [ ] 证据 artifact 不含未签名安装器、staging 主程序或受控解包载荷；仅包含报告和许可/SBOM 文本，run URL、run attempt 和 artifact 到期日已写入 RC 记录。
 - [ ] `installer-sha256.json` 明确记录 `internal-only`、`unsigned`、安装器与 staging 主程序的 `NotSigned` 状态和 SHA-256；`toolchain-metadata.json` 的 commit/run 和工具版本与本次构建一致。
 - [ ] `public-release-gate.json` 为 `blocked-as-required`，公开模式没有传入 `-AllowUnsignedInternalRc`；意外通过、已签名输入或非预期错误均使 workflow 失败，不能把内部证据 artifact 当作公开发布批准。
+- [ ] RC 中的游戏素材集合指纹为 `26c4c77a5a13d3ca1a84f4616b0cba1f251462882a0e86f9592d5fc8ef2e1c13`，并记录负责人声明 ID `game-content-rights-owner-attestation-2026-07-20`；人工确认本次测试通道与参与主体符合授权原件，且记录不把操作假设当成批准。
 - [ ] 输出目录移动前后均复核临时根目录/父链无 reparse，移动后文件数量和每项哈希再次匹配最终报告；自动启动烟测读取该 JSON 逐项复核，并以报告的 `rawEmbeddedSha256` 授权 NSS 主程序，不现场自算哈希。
 - [ ] 分发说明醒目标注“内部、未签名、可能触发 SmartScreen”。
 - [ ] 仅在仓库负责人或同一法律主体控制的设备上测试；FFmpeg/第三方许可未闭合时没有向主体外测试者分发，也没有公开上传或接入自动更新。
@@ -96,6 +98,8 @@
 - [ ] “瓦刻 / VALOFRAME”名称的商标检索、可用性与分发区域已由负责人/法律确认；应用、安装器、网站和商店文案使用同一批准名称。
 - [x] 仓库负责人已确认有权将 `VALOFRAME_正规图标格式包.zip` 及其派生资产复制、修改并发布到公开 GitHub 仓库；确认日期与 SHA-256 见 `src-tauri/icons/README.md`。
 - [ ] 安装器、应用商店或商业分发所需的设计源文件、合同或许可证已另行归档并通过法律与品牌审核。
+- [x] 仓库负责人已声明清单锁定的 42 张游戏图片取得授权；逐文件哈希、集合指纹、待审字段与 verifier 已纳入 policy，但没有把具体渠道写成已核实事实。
+- [ ] 人工取得并核对可验证的授权原始证据，确认权利链、被授权主体、地域、期限、公开源码、应用内展示、GitHub 宣传、内部测试包、`public-windows-installer` 和 `public-release-artifact-download` 等实际渠道，并把审阅结论、manifest 和哈希重新固定到 policy；完成前不得发布本轮源码/宣传图或任何外发包。
 - [ ] Riot Games、腾讯及《无畏契约》相关商标归属和非官方/非赞助/非认可声明已经批准，并纳入 README、About/许可页和公开发布材料。
 - [ ] FFmpeg provenance、SHA-256、许可证结论、SBOM 和源代码镜像/提供方式齐全。
 - [ ] Authenticode 证书和可信时间戳服务已配置；policy 固定 publisher subject 和证书 thumbprint，最终安装器与内嵌主程序的链、时间戳和 `signtool` 验证成功。
@@ -128,7 +132,7 @@
 - [ ] 最终 NSIS 安装器的 SHA-256、大小和签名状态已二次核对。
 - [ ] Authenticode 链和时间戳在干净机器上验证通过，签名者 subject/thumbprint 与批准 policy 精确一致。
 - [ ] 发布说明列出系统要求、WebView2 联网行为、数据迁移和已知问题。
-- [ ] 安装器、符号/调试材料、SBOM、源代码材料、第三方声明和测试证据已归档。
+- [ ] 安装器、符号/调试材料、SBOM、源代码材料、第三方声明、游戏素材 manifest、可核验的人工范围审阅记录和测试证据已归档；授权原件如含敏感信息，只留在受控法律档案。
 - [ ] 下载页和更新元数据指向同一已验证文件及版本。
 - [ ] 发布后从公开入口重新下载并校验哈希、签名、安装和首次启动。
 - [ ] 已准备撤回发布、关闭更新端点和发布更高补丁版本的响应流程。

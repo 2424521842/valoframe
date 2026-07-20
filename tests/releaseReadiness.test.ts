@@ -54,6 +54,18 @@ const complianceGenerator = readFileSync(
   "utf8",
 );
 const publicReleasePolicy = readJson("../release/public-release-policy.json");
+const gameContentAuthorization = readJson(
+  "../release/approvals/game-content-rights.json",
+);
+const valorantAssetManifestBytes = readFileSync(
+  new URL("../src/data/valorantAssets.json", import.meta.url),
+);
+const gameContentAuthorizationBytes = readFileSync(
+  new URL(
+    "../release/approvals/game-content-rights.json",
+    import.meta.url,
+  ),
+);
 const publicReleasePreflight = readFileSync(
   new URL(
     "../scripts/release/public-release-preflight.ps1",
@@ -404,6 +416,8 @@ test("public release preflight covers every non-bundle approval domain", () => {
     "BRAND_APPROVAL_MISSING",
     "PUBLISHER_APPROVAL_MISSING",
     "IDENTIFIER_APPROVAL_MISSING",
+    "GAME_CONTENT_DISTRIBUTION_RIGHTS_MISSING",
+    "GAME_CONTENT_EVIDENCE_INVALID",
     "ICON_DISTRIBUTION_RIGHTS_MISSING",
     "DISCLAIMER_APPROVAL_MISSING",
     "FFMPEG_REDISTRIBUTION_BLOCKED",
@@ -424,6 +438,60 @@ test("public release preflight covers every non-bundle approval domain", () => {
   assert.match(publicReleasePreflight, /evidence artifact.*does not match its SHA-256/);
   assert.match(publicReleasePreflight, /sourceCommit does not match the release commit/);
   assert.match(publicReleasePreflight, /separate-EULA requirement must be an explicit JSON Boolean decision/);
+  assert.match(publicReleasePreflight, /gameContent\.verifier/);
+  assert.match(publicReleasePreflight, /requiredPublicGameContentScopes/);
+  assert.match(
+    publicReleasePreflight,
+    /Policy and asset manifest do not reference the same game-content authorization record/,
+  );
+
+  const gameContent = objectAt(publicReleasePolicy, "gameContentRights");
+  assert.equal(gameContent.approved, false);
+  assert.deepEqual(gameContent.confirmedScopes, []);
+  assert.equal(
+    gameContentAuthorization.status,
+    "owner-attested-pending-source-evidence-review",
+  );
+  assert.equal(gameContentAuthorization.ownerAttestationReceived, true);
+  assert.equal(gameContentAuthorization.sourceDocumentReviewed, false);
+  assert.equal(gameContentAuthorization.legalReviewApproved, false);
+  assert.equal(gameContentAuthorization.manualReviewRequired, true);
+  assert.equal(
+    gameContent.verifier,
+    "scripts/assets/verify-valorant-assets.mjs",
+  );
+  assert.equal(
+    createHash("sha256").update(valorantAssetManifestBytes).digest("hex"),
+    gameContent.manifestSha256,
+  );
+  assert.equal(
+    createHash("sha256")
+      .update(gameContentAuthorizationBytes)
+      .digest("hex"),
+    gameContent.approvalSha256,
+  );
+  assert.deepEqual(
+    gameContent.operationalAssumptionScopes,
+    gameContentAuthorization.repositoryOperationalAssumptionScopes,
+  );
+  assert.equal(
+    (gameContent.requiredScopes as string[]).includes(
+      "public-windows-installer",
+    ),
+    true,
+  );
+  assert.equal(
+    (gameContent.operationalAssumptionScopes as string[]).includes(
+      "public-windows-installer",
+    ),
+    false,
+  );
+  assert.equal(
+    (gameContent.requiredScopes as string[]).includes(
+      "public-release-artifact-download",
+    ),
+    true,
+  );
   assert.equal(
     objectAt(publicReleasePolicy, "authenticode").signtoolVerificationRequired,
     true,

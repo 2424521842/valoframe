@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "recordId": "game-content-rights-owner-attestation-2026-07-20",
+  "status": "owner-attested-pending-source-evidence-review",
+  "ownerAttestationReceived": true,
+  "ownerStatementReceivedOn": "2026-07-20",
+  "sourceDocumentReviewed": false,
+  "legalReviewApproved": false,
+  "manualReviewRequired": true,
+  "evidenceReference": "The repository owner stated that authorization has been obtained. No source authorization document, verifiable external evidence identifier, document hash, rights-holder identity, licensee identity, territory, term, or exact permitted-use clauses were provided to repository automation.",
+  "evidenceDocumentSha256": null,
+  "rightsHolderIdentity": "not-provided",
+  "licensee": "not-provided",
+  "repositoryOperationalAssumptionScopes": [
+    "public-source-repository",
+    "in-app-display",
+    "internal-controlled-testing",
+    "windows-internal-test-build",
+    "github-project-marketing"
+  ],
+  "repositoryOperationalRestrictions": {
+    "nonCommercialOnly": true,
+    "sourceAssetBytesMustRemainManifestExact": true,
+    "noSublicensing": true,
+    "noStandaloneDerivativeAssetFiles": true,
+    "renderingOperationsUsedByCurrentUi": [
+      "display-scaling",
+      "css-cropping-and-masking",
+      "interface-composition"
+    ],
+    "publicationOrDistributionBeforeManualScopeReview": false
+  },
+  "notAttestedOrApprovedForRepositoryUse": [
+    "public-release-artifact-download",
+    "public-windows-installer",
+    "commercial-distribution",
+    "third-party-reuse",
+    "official-affiliation",
+    "official-sponsorship",
+    "official-endorsement"
+  ],
+  "manualReviewRequirements": [
+    "source-authorization-document-or-verifiable-evidence-reference",
+    "rights-holder-and-authority-chain",
+    "licensee-legal-identity",
+    "effective-date-expiration-and-revocation",
+    "territory-and-language",
+    "repository-source-and-github-marketing",
+    "in-app-display-and-rendering-operations",
+    "internal-test-build-and-participant-scope",
+    "attribution-and-disclaimer-obligations"
+  ],
+  "assetSet": {
+    "manifest": "src/data/valorantAssets.json",
+    "manifestSha256": "f647a04eb7879d9cb191136026220a26addc09e789f60ee21665b7512dfa8e8e",
+    "assetRoot": "public/valorant-assets",
+    "assetCount": 42,
+    "totalBytes": 2354318,
+    "collectionFingerprint": "26c4c77a5a13d3ca1a84f4616b0cba1f251462882a0e86f9592d5fc8ef2e1c13",
+    "sourceService": "https://valorant-api.com/",
+    "retrievedAt": "2026-07-20",
+    "technicalVerificationStatus": "manifest-bytes-verified",
+    "legalScopeStatus": "pending-manual-source-evidence-review",
+    "transformation": "Observed source bytes match the manifest. The current UI uses display scaling, CSS cropping/masking, and interface composition; legal permission for those operations remains pending manual comparison with the source authorization."
+  },
+  "requiredPublicStatements": [
+    "not-official",
+    "not-affiliated",
+    "not-sponsored",
+    "not-endorsed",
+    "game-content-not-covered-by-mit"
+  ],
+  "revalidationTriggers": [
+    "source-authorization-evidence-provided-or-reviewed",
+    "any-asset-byte-or-manifest-change",
+    "scope-or-channel-change",
+    "commercial-use",
+    "public-release-artifact-download-or-installer",
+    "authorization-expiration-or-revocation-notice"
+  ]
+}

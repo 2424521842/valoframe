@@ -150,6 +150,18 @@ describe("backend batch mutation APIs", () => {
     });
   });
 
+  it("loads synthetic string ids in the browser preview detail view", async () => {
+    Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+    mocks.invoke.mockClear();
+
+    await expect(getClipDetail("clip-1")).resolves.toMatchObject({
+      id: "clip-1",
+      accountDisplayName: "FixtureAlpha#0001",
+      officialVideoName: "三杀时刻",
+    });
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
   it("exposes whole-library facets through a parameter-free command", async () => {
     mocks.invoke.mockResolvedValueOnce({
       totalCount: 0,

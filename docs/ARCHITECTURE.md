@@ -37,7 +37,7 @@ flowchart LR
 - ACLOS 视频、封面和元数据目录在扫描、预览和常规整理中只读；只有回收站的显式永久删除命令会删除所选视频。
 - 自动生成的 JPEG 只写应用缩略图缓存；生成状态和安全 basename 写入 SQLite，不复用或覆盖源 `cover_path`。
 - 用户的收藏、标签、备注、回收状态和索引只写入应用 SQLite。
-- WonderfulDb 账号文件只读，以 openid 派生密钥在内存中完成 AES-256-CBC 解密；不写出完整明文副本。
+- WonderfulDb 账号文件只读，以 openid 派生密钥在内存中完成 AES-256-CBC 解密；不会写出一个解密后的 WonderfulDb 文件，但归一化字段和部分 snapshot/event 原始记录会以 `raw_json` 明文保存到应用 SQLite，详见[本地数据与隐私](./PRIVACY.md)。
 - 稳定账号身份来自 WonderfulDb/openid、match account ID 或来源账号 ID；玩家名仅用于展示和搜索。
 - 单个来源或元数据文件失败应形成有界扫描错误摘要并继续处理其他来源。
 

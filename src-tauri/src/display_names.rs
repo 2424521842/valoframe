@@ -323,6 +323,7 @@ const AGENT_NAME_ALIASES: &[(&str, &str)] = &[
     ("KAY/O", "KAY/O"),
     ("Kayo", "KAY/O"),
     ("Killjoy", "Killjoy"),
+    ("Miks", "Miks"),
     ("Neon", "Neon"),
     ("Omen", "Omen"),
     ("Phoenix", "Phoenix"),
@@ -369,6 +370,7 @@ const LOCALIZED_AGENT_NAME_ALIASES: &[(&str, &str)] = &[
     ("Clove", "暮蝶"),
     ("Vyse", "维斯"),
     ("Tejo", "钛狐"),
+    ("Miks", "迷核"),
     ("Waylay", "幻棱"),
     ("Veto", "禁灭"),
 ];
@@ -437,6 +439,7 @@ const LOCALIZED_AGENT_NAMES: &[&str] = &[
     "暮蝶",
     "维斯",
     "钛狐",
+    "迷核",
     "幻棱",
     "禁灭",
 ];
@@ -491,6 +494,10 @@ mod tests {
         assert_eq!(
             localized_agent_name_for_display("K/O").as_deref(),
             Some("K/O")
+        );
+        assert_eq!(
+            localized_agent_name_for_display("Miks").as_deref(),
+            Some("迷核")
         );
         assert!(localized_agent_name_for_display("unknown-agent").is_none());
 

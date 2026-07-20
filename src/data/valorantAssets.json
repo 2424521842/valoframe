@@ -1,0 +1,629 @@
+{
+  "schemaVersion": 2,
+  "sourceService": "https://valorant-api.com/",
+  "sourceBase": "https://media.valorant-api.com",
+  "retrievedAt": "2026-07-20",
+  "assetRoot": "public/valorant-assets",
+  "authorizationReference": "release/approvals/game-content-rights.json",
+  "collectionFingerprintAlgorithm": "sha256(sorted(relativePath + TAB + byteLength + TAB + sha256 + LF))",
+  "collectionFingerprint": "26c4c77a5a13d3ca1a84f4616b0cba1f251462882a0e86f9592d5fc8ef2e1c13",
+  "agents": [
+    {
+      "displayName": "盖可",
+      "uuid": "e370fa57-4757-3604-3648-499e1f642d3f",
+      "aliases": [
+        "Gekko"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/e370fa57-4757-3604-3648-499e1f642d3f/displayicon.png",
+      "relativePath": "agents/e370fa57-4757-3604-3648-499e1f642d3f.png",
+      "mimeType": "image/png",
+      "byteLength": 43199,
+      "width": 256,
+      "height": 256,
+      "sha256": "0281d479fd3064c306270b29f25a76b8fe96b2826442465bf04e4baf3c2cb329"
+    },
+    {
+      "displayName": "黑梦",
+      "uuid": "dade69b4-4f5a-8528-247b-219e5a1facd6",
+      "aliases": [
+        "Fade"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/dade69b4-4f5a-8528-247b-219e5a1facd6/displayicon.png",
+      "relativePath": "agents/dade69b4-4f5a-8528-247b-219e5a1facd6.png",
+      "mimeType": "image/png",
+      "byteLength": 57708,
+      "width": 256,
+      "height": 256,
+      "sha256": "148d5d9f9645989e765517375a8bc5bbcf0c76f2c329d47d8ee3fb082b3593c2"
+    },
+    {
+      "displayName": "铁臂",
+      "uuid": "5f8d3a7f-467b-97f3-062c-13acf203c006",
+      "aliases": [
+        "Breach"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/5f8d3a7f-467b-97f3-062c-13acf203c006/displayicon.png",
+      "relativePath": "agents/5f8d3a7f-467b-97f3-062c-13acf203c006.png",
+      "mimeType": "image/png",
+      "byteLength": 58985,
+      "width": 256,
+      "height": 256,
+      "sha256": "b06c906a5801d43a3b12799c308fc05b5077c5ee66ee7eb6c036f9347e26a98e"
+    },
+    {
+      "displayName": "钢锁",
+      "uuid": "cc8b64c8-4b25-4ff9-6e7f-37b4da43d235",
+      "aliases": [
+        "Deadlock"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/cc8b64c8-4b25-4ff9-6e7f-37b4da43d235/displayicon.png",
+      "relativePath": "agents/cc8b64c8-4b25-4ff9-6e7f-37b4da43d235.png",
+      "mimeType": "image/png",
+      "byteLength": 60920,
+      "width": 256,
+      "height": 256,
+      "sha256": "487ba50c27eb67183d89aa5b479192770185046c30b1200f7e69b8493db7d1ed"
+    },
+    {
+      "displayName": "钛狐",
+      "uuid": "b444168c-4e35-8076-db47-ef9bf368f384",
+      "aliases": [
+        "Tejo"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/b444168c-4e35-8076-db47-ef9bf368f384/displayicon.png",
+      "relativePath": "agents/b444168c-4e35-8076-db47-ef9bf368f384.png",
+      "mimeType": "image/png",
+      "byteLength": 47789,
+      "width": 256,
+      "height": 256,
+      "sha256": "d42fb72ec933584138b3ea078302fb52f34c953536ac5b4ad01c9f2c71b64662"
+    },
+    {
+      "displayName": "雷兹",
+      "uuid": "f94c3b30-42be-e959-889c-5aa313dba261",
+      "aliases": [
+        "Raze"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/f94c3b30-42be-e959-889c-5aa313dba261/displayicon.png",
+      "relativePath": "agents/f94c3b30-42be-e959-889c-5aa313dba261.png",
+      "mimeType": "image/png",
+      "byteLength": 55616,
+      "width": 256,
+      "height": 256,
+      "sha256": "5dfbfb8da96a4078cd7c5df887d5b254f28063be64b99cd7cc848114f9cf866d"
+    },
+    {
+      "displayName": "尚勃勒",
+      "uuid": "22697a3d-45bf-8dd7-4fec-84a9e28c69d7",
+      "aliases": [
+        "Chamber",
+        "尚勒"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/22697a3d-45bf-8dd7-4fec-84a9e28c69d7/displayicon.png",
+      "relativePath": "agents/22697a3d-45bf-8dd7-4fec-84a9e28c69d7.png",
+      "mimeType": "image/png",
+      "byteLength": 46617,
+      "width": 256,
+      "height": 256,
+      "sha256": "1005a895b0009558823f89f24f949ddc030a24adffc4268b2a6aa440060f920d"
+    },
+    {
+      "displayName": "K/O",
+      "uuid": "601dbbe7-43ce-be57-2a40-4abd24953621",
+      "aliases": [
+        "KAY/O",
+        "Kayo"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/601dbbe7-43ce-be57-2a40-4abd24953621/displayicon.png",
+      "relativePath": "agents/601dbbe7-43ce-be57-2a40-4abd24953621.png",
+      "mimeType": "image/png",
+      "byteLength": 54339,
+      "width": 256,
+      "height": 256,
+      "sha256": "ce97d12169c8091a7d4b7ca8d7299e91bc06f2a1009c1ebf80edd65d868dc225"
+    },
+    {
+      "displayName": "斯凯",
+      "uuid": "6f2a04ca-43e0-be17-7f36-b3908627744d",
+      "aliases": [
+        "Skye"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/6f2a04ca-43e0-be17-7f36-b3908627744d/displayicon.png",
+      "relativePath": "agents/6f2a04ca-43e0-be17-7f36-b3908627744d.png",
+      "mimeType": "image/png",
+      "byteLength": 50521,
+      "width": 256,
+      "height": 256,
+      "sha256": "3bef06898f625532db558d9c712dd4c944e474befc9a291c7cc1dcacdeb30d27"
+    },
+    {
+      "displayName": "零",
+      "uuid": "117ed9e3-49f3-6512-3ccf-0cada7e3823b",
+      "aliases": [
+        "Cypher"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/117ed9e3-49f3-6512-3ccf-0cada7e3823b/displayicon.png",
+      "relativePath": "agents/117ed9e3-49f3-6512-3ccf-0cada7e3823b.png",
+      "mimeType": "image/png",
+      "byteLength": 53154,
+      "width": 256,
+      "height": 256,
+      "sha256": "93b0452adc17975ddea264f172c6485bb1d11a4d7bc8145ce47e7120554044ca"
+    },
+    {
+      "displayName": "猎枭",
+      "uuid": "320b2a48-4d9b-a075-30f1-1f93a9b638fa",
+      "aliases": [
+        "Sova"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/320b2a48-4d9b-a075-30f1-1f93a9b638fa/displayicon.png",
+      "relativePath": "agents/320b2a48-4d9b-a075-30f1-1f93a9b638fa.png",
+      "mimeType": "image/png",
+      "byteLength": 54746,
+      "width": 256,
+      "height": 256,
+      "sha256": "44e935efb75a5158df8bb7050eed4cd1df664991e4c9cf0c87f2351c52072c04"
+    },
+    {
+      "displayName": "迷核",
+      "uuid": "7c8a4701-4de6-9355-b254-e09bc2a34b72",
+      "aliases": [
+        "Miks"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/7c8a4701-4de6-9355-b254-e09bc2a34b72/displayicon.png",
+      "relativePath": "agents/7c8a4701-4de6-9355-b254-e09bc2a34b72.png",
+      "mimeType": "image/png",
+      "byteLength": 44133,
+      "width": 256,
+      "height": 256,
+      "sha256": "02dacb8343cb94f6bd18669dcbaa34a49b3e230d717f3f8e375e303e0cbf7580"
+    },
+    {
+      "displayName": "奇乐",
+      "uuid": "1e58de9c-4950-5125-93e9-a0aee9f98746",
+      "aliases": [
+        "Killjoy"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/1e58de9c-4950-5125-93e9-a0aee9f98746/displayicon.png",
+      "relativePath": "agents/1e58de9c-4950-5125-93e9-a0aee9f98746.png",
+      "mimeType": "image/png",
+      "byteLength": 50611,
+      "width": 256,
+      "height": 256,
+      "sha256": "d3afaff260b57da44250452c961de0f06ca4fc5edddde0625970ec436fada483"
+    },
+    {
+      "displayName": "海神",
+      "uuid": "95b78ed7-4637-86d9-7e41-71ba8c293152",
+      "aliases": [
+        "Harbor"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/95b78ed7-4637-86d9-7e41-71ba8c293152/displayicon.png",
+      "relativePath": "agents/95b78ed7-4637-86d9-7e41-71ba8c293152.png",
+      "mimeType": "image/png",
+      "byteLength": 53060,
+      "width": 256,
+      "height": 256,
+      "sha256": "923252b3b437b03531494748a5958230a79c1ef4f5e5dacc58ba5ce844af6307"
+    },
+    {
+      "displayName": "维斯",
+      "uuid": "efba5359-4016-a1e5-7626-b1ae76895940",
+      "aliases": [
+        "Vyse",
+        "Nox"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/efba5359-4016-a1e5-7626-b1ae76895940/displayicon.png",
+      "relativePath": "agents/efba5359-4016-a1e5-7626-b1ae76895940.png",
+      "mimeType": "image/png",
+      "byteLength": 48892,
+      "width": 256,
+      "height": 256,
+      "sha256": "8d87b0e19cc2e52ff5d03b1649390a5c058876bdcb2a82ec9f3ef5842e8c80f6"
+    },
+    {
+      "displayName": "蝰蛇",
+      "uuid": "707eab51-4836-f488-046a-cda6bf494859",
+      "aliases": [
+        "Viper"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/707eab51-4836-f488-046a-cda6bf494859/displayicon.png",
+      "relativePath": "agents/707eab51-4836-f488-046a-cda6bf494859.png",
+      "mimeType": "image/png",
+      "byteLength": 53831,
+      "width": 256,
+      "height": 256,
+      "sha256": "c936379439416ff0b5d3ece245e807185a03070b8baa224590364d6e14e223b3"
+    },
+    {
+      "displayName": "不死鸟",
+      "uuid": "eb93336a-449b-9c1b-0a54-a891f7921d69",
+      "aliases": [
+        "Phoenix"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/eb93336a-449b-9c1b-0a54-a891f7921d69/displayicon.png",
+      "relativePath": "agents/eb93336a-449b-9c1b-0a54-a891f7921d69.png",
+      "mimeType": "image/png",
+      "byteLength": 50539,
+      "width": 256,
+      "height": 256,
+      "sha256": "38838d6ae84c4172ef41096a63aea04f3ac646bd6752f2d373931923a99a5263"
+    },
+    {
+      "displayName": "禁灭",
+      "uuid": "92eeef5d-43b5-1d4a-8d03-b3927a09034b",
+      "aliases": [
+        "Veto"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/92eeef5d-43b5-1d4a-8d03-b3927a09034b/displayicon.png",
+      "relativePath": "agents/92eeef5d-43b5-1d4a-8d03-b3927a09034b.png",
+      "mimeType": "image/png",
+      "byteLength": 39865,
+      "width": 256,
+      "height": 256,
+      "sha256": "2df5a45c6ac7a30863df7374cc3dbc1b0e2305e2b61711b884ff2cd4eeeb60d3"
+    },
+    {
+      "displayName": "星礈",
+      "uuid": "41fb69c1-4189-7b37-f117-bcaf1e96f1bf",
+      "aliases": [
+        "Astra",
+        "星界"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/41fb69c1-4189-7b37-f117-bcaf1e96f1bf/displayicon.png",
+      "relativePath": "agents/41fb69c1-4189-7b37-f117-bcaf1e96f1bf.png",
+      "mimeType": "image/png",
+      "byteLength": 51281,
+      "width": 256,
+      "height": 256,
+      "sha256": "08c627c7a1d70a5c787584dc8b5dae894bcf1f35327eb136e93de6dbdb813598"
+    },
+    {
+      "displayName": "炼狱",
+      "uuid": "9f0d8ba9-4140-b941-57d3-a7ad57c6b417",
+      "aliases": [
+        "Brimstone"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/9f0d8ba9-4140-b941-57d3-a7ad57c6b417/displayicon.png",
+      "relativePath": "agents/9f0d8ba9-4140-b941-57d3-a7ad57c6b417.png",
+      "mimeType": "image/png",
+      "byteLength": 50228,
+      "width": 256,
+      "height": 256,
+      "sha256": "5cd6046d79da507fa93d4d00504808ac31bb95d9a8a55c5f5ab94236a496916a"
+    },
+    {
+      "displayName": "壹决",
+      "uuid": "0e38b510-41a8-5780-5e8f-568b2a4f2d6c",
+      "aliases": [
+        "Iso"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/0e38b510-41a8-5780-5e8f-568b2a4f2d6c/displayicon.png",
+      "relativePath": "agents/0e38b510-41a8-5780-5e8f-568b2a4f2d6c.png",
+      "mimeType": "image/png",
+      "byteLength": 45995,
+      "width": 256,
+      "height": 256,
+      "sha256": "1ba9520cab24ca51240c3d2ac3518055f3ac678473fe9151958a7d4894e890b6"
+    },
+    {
+      "displayName": "暮蝶",
+      "uuid": "1dbf2edd-4729-0984-3115-daa5eed44993",
+      "aliases": [
+        "Clove"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/1dbf2edd-4729-0984-3115-daa5eed44993/displayicon.png",
+      "relativePath": "agents/1dbf2edd-4729-0984-3115-daa5eed44993.png",
+      "mimeType": "image/png",
+      "byteLength": 52204,
+      "width": 256,
+      "height": 256,
+      "sha256": "f97833cda9e8b4ddb77c27face759b9e11184aecc3d5cb05a625bf1fa8c3cd73"
+    },
+    {
+      "displayName": "霓虹",
+      "uuid": "bb2a4828-46eb-8cd1-e765-15848195d751",
+      "aliases": [
+        "Neon"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/bb2a4828-46eb-8cd1-e765-15848195d751/displayicon.png",
+      "relativePath": "agents/bb2a4828-46eb-8cd1-e765-15848195d751.png",
+      "mimeType": "image/png",
+      "byteLength": 64202,
+      "width": 256,
+      "height": 256,
+      "sha256": "fc59292cb0aa1a70ee592435a9f0c4ab41811d14c78c2636dbbe9a8acd5e5e4a"
+    },
+    {
+      "displayName": "夜露",
+      "uuid": "7f94d92c-4234-0a36-9646-3a87eb8b5c89",
+      "aliases": [
+        "Yoru"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/7f94d92c-4234-0a36-9646-3a87eb8b5c89/displayicon.png",
+      "relativePath": "agents/7f94d92c-4234-0a36-9646-3a87eb8b5c89.png",
+      "mimeType": "image/png",
+      "byteLength": 57022,
+      "width": 256,
+      "height": 256,
+      "sha256": "7294bf37b37ebf44d0d3aa49f5a322e2c7a1368ff33853b6bcf5eed56e75d93d"
+    },
+    {
+      "displayName": "幻棱",
+      "uuid": "df1cb487-4902-002e-5c17-d28e83e78588",
+      "aliases": [
+        "Waylay"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/df1cb487-4902-002e-5c17-d28e83e78588/displayicon.png",
+      "relativePath": "agents/df1cb487-4902-002e-5c17-d28e83e78588.png",
+      "mimeType": "image/png",
+      "byteLength": 52096,
+      "width": 256,
+      "height": 256,
+      "sha256": "428cbd3f7aafd1bacbc4a7d0ef416e540122b5d9b4a17977645492a5dfd12032"
+    },
+    {
+      "displayName": "贤者",
+      "uuid": "569fdd95-4d10-43ab-ca70-79becc718b46",
+      "aliases": [
+        "Sage"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/569fdd95-4d10-43ab-ca70-79becc718b46/displayicon.png",
+      "relativePath": "agents/569fdd95-4d10-43ab-ca70-79becc718b46.png",
+      "mimeType": "image/png",
+      "byteLength": 48081,
+      "width": 256,
+      "height": 256,
+      "sha256": "c6746009ae519a6b30c3d60fb23dfde8bbadf9f1986268310d370a110d261ef0"
+    },
+    {
+      "displayName": "芮娜",
+      "uuid": "a3bfb853-43b2-7238-a4f1-ad90e9e46bcc",
+      "aliases": [
+        "Reyna",
+        "Vampire"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/a3bfb853-43b2-7238-a4f1-ad90e9e46bcc/displayicon.png",
+      "relativePath": "agents/a3bfb853-43b2-7238-a4f1-ad90e9e46bcc.png",
+      "mimeType": "image/png",
+      "byteLength": 47087,
+      "width": 256,
+      "height": 256,
+      "sha256": "df52305caac430feda3a17a127b879fa2aa48706ebbd02f4e9bce47b45e130fd"
+    },
+    {
+      "displayName": "幽影",
+      "uuid": "8e253930-4c05-31dd-1b6c-968525494517",
+      "aliases": [
+        "Omen"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/8e253930-4c05-31dd-1b6c-968525494517/displayicon.png",
+      "relativePath": "agents/8e253930-4c05-31dd-1b6c-968525494517.png",
+      "mimeType": "image/png",
+      "byteLength": 52732,
+      "width": 256,
+      "height": 256,
+      "sha256": "9df78ae8b4d3b97525db59f3be8ced2f94660fa530c349d749a2035ff62630b3"
+    },
+    {
+      "displayName": "捷风",
+      "uuid": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+      "aliases": [
+        "Jett"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/agents/add6443a-41bd-e414-f6ad-e58d267f4e95/displayicon.png",
+      "relativePath": "agents/add6443a-41bd-e414-f6ad-e58d267f4e95.png",
+      "mimeType": "image/png",
+      "byteLength": 50824,
+      "width": 256,
+      "height": 256,
+      "sha256": "92f8c4f8cf69bb2b7300496a6b688f31db9a580f32d39b5f59c0b0e29a7fe8b4"
+    }
+  ],
+  "maps": [
+    {
+      "displayName": "天枢云阙",
+      "uuid": "756da597-416b-c0f2-f47b-afbdf28670bc",
+      "aliases": [
+        "Summit",
+        "Plummet"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/756da597-416b-c0f2-f47b-afbdf28670bc/listviewicon.png",
+      "relativePath": "maps/756da597-416b-c0f2-f47b-afbdf28670bc.png",
+      "mimeType": "image/png",
+      "byteLength": 56037,
+      "width": 456,
+      "height": 100,
+      "sha256": "1d29befd0b2a8b5523d364efc08da74dee4877d3f2c18d37aa78f80f0dd3af28"
+    },
+    {
+      "displayName": "盐海矿镇",
+      "uuid": "1c18ab1f-420d-0d8b-71d0-77ad3c439115",
+      "aliases": [
+        "Corrode",
+        "Rook"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/1c18ab1f-420d-0d8b-71d0-77ad3c439115/listviewicon.png",
+      "relativePath": "maps/1c18ab1f-420d-0d8b-71d0-77ad3c439115.png",
+      "mimeType": "image/png",
+      "byteLength": 75005,
+      "width": 456,
+      "height": 100,
+      "sha256": "c8c351a33eaa54ec12d2e5e5a5ed2272b4c657582afb8d04bcf073be500edef6"
+    },
+    {
+      "displayName": "幽邃地窟",
+      "uuid": "224b0a95-48b9-f703-1bd8-67aca101a61f",
+      "aliases": [
+        "Abyss",
+        "Infinity",
+        "幽邃迷境",
+        "迷邃幽境"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/224b0a95-48b9-f703-1bd8-67aca101a61f/listviewicon.png",
+      "relativePath": "maps/224b0a95-48b9-f703-1bd8-67aca101a61f.png",
+      "mimeType": "image/png",
+      "byteLength": 57369,
+      "width": 456,
+      "height": 100,
+      "sha256": "c844af1a299d15131374f331759e6eb93b59f59296d9b6820bacd901b30ef1dd"
+    },
+    {
+      "displayName": "日落之城",
+      "uuid": "92584fbe-486a-b1b2-9faa-39b0f486b498",
+      "aliases": [
+        "Sunset",
+        "Juliett"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/92584fbe-486a-b1b2-9faa-39b0f486b498/listviewicon.png",
+      "relativePath": "maps/92584fbe-486a-b1b2-9faa-39b0f486b498.png",
+      "mimeType": "image/png",
+      "byteLength": 65259,
+      "width": 456,
+      "height": 100,
+      "sha256": "b426ed7bdbc5e3f4657ae47474349ec78af1dc238d0893de6d1d49fdd9037a80"
+    },
+    {
+      "displayName": "莲华古城",
+      "uuid": "2fe4ed3a-450a-948b-6d6b-e89a78e680a9",
+      "aliases": [
+        "Lotus",
+        "Jam"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/2fe4ed3a-450a-948b-6d6b-e89a78e680a9/listviewicon.png",
+      "relativePath": "maps/2fe4ed3a-450a-948b-6d6b-e89a78e680a9.png",
+      "mimeType": "image/png",
+      "byteLength": 62683,
+      "width": 456,
+      "height": 100,
+      "sha256": "11e899a062d299331fb1f0b6b19d6e82908bac5e81599b94dea61d83cdc074eb"
+    },
+    {
+      "displayName": "深海明珠",
+      "uuid": "fd267378-4d1d-484f-ff52-77821ed10dc2",
+      "aliases": [
+        "Pearl",
+        "Pitt",
+        "深海遗珠"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/fd267378-4d1d-484f-ff52-77821ed10dc2/listviewicon.png",
+      "relativePath": "maps/fd267378-4d1d-484f-ff52-77821ed10dc2.png",
+      "mimeType": "image/png",
+      "byteLength": 64660,
+      "width": 456,
+      "height": 100,
+      "sha256": "39ed6cfbb1289757f06d0aa5080fcc884df9e9685d6636f48f1fbb0cfaeed724"
+    },
+    {
+      "displayName": "裂变峡谷",
+      "uuid": "b529448b-4d60-346e-e89e-00a4c527a405",
+      "aliases": [
+        "Fracture",
+        "Canyon",
+        "天漠之峡"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/b529448b-4d60-346e-e89e-00a4c527a405/listviewicon.png",
+      "relativePath": "maps/b529448b-4d60-346e-e89e-00a4c527a405.png",
+      "mimeType": "image/png",
+      "byteLength": 65859,
+      "width": 456,
+      "height": 100,
+      "sha256": "ed0f6f8da39a203639e16362973c94127e71dadb4fb4a6bff3c242c336d76dfb"
+    },
+    {
+      "displayName": "微风岛屿",
+      "uuid": "2fb9a4fd-47b8-4e7d-a969-74b4046ebd53",
+      "aliases": [
+        "Breeze",
+        "Foxtrot",
+        "热带乐园"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/2fb9a4fd-47b8-4e7d-a969-74b4046ebd53/listviewicon.png",
+      "relativePath": "maps/2fb9a4fd-47b8-4e7d-a969-74b4046ebd53.png",
+      "mimeType": "image/png",
+      "byteLength": 58839,
+      "width": 456,
+      "height": 100,
+      "sha256": "c06572938a6b88f777e5708055007fc0a53a04ccef681dfab59f3bbeaa4463a9"
+    },
+    {
+      "displayName": "森寒冬港",
+      "uuid": "e2ad5c54-4114-a870-9641-8ea21279579a",
+      "aliases": [
+        "Icebox",
+        "Port",
+        "极地寒港"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/e2ad5c54-4114-a870-9641-8ea21279579a/listviewicon.png",
+      "relativePath": "maps/e2ad5c54-4114-a870-9641-8ea21279579a.png",
+      "mimeType": "image/png",
+      "byteLength": 70990,
+      "width": 456,
+      "height": 100,
+      "sha256": "9b70c517f0fcb01e4d4456f84ce1efe8c6c6160f5debcede4b8b503cc180e215"
+    },
+    {
+      "displayName": "亚海悬城",
+      "uuid": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+      "aliases": [
+        "Ascent",
+        "义境空岛"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/7eaecc1b-4337-bbf6-6ab9-04b8f06b3319/listviewicon.png",
+      "relativePath": "maps/7eaecc1b-4337-bbf6-6ab9-04b8f06b3319.png",
+      "mimeType": "image/png",
+      "byteLength": 65494,
+      "width": 456,
+      "height": 100,
+      "sha256": "ee69ab74e626e8ad9e19663b93d46fdf8bc0452231a63fe64d16f0f7458eabdf"
+    },
+    {
+      "displayName": "霓虹町",
+      "uuid": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+      "aliases": [
+        "Split",
+        "Bonsai",
+        "双塔迷城"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/d960549e-485c-e861-8d71-aa9d1aed12a2/listviewicon.png",
+      "relativePath": "maps/d960549e-485c-e861-8d71-aa9d1aed12a2.png",
+      "mimeType": "image/png",
+      "byteLength": 69578,
+      "width": 456,
+      "height": 100,
+      "sha256": "b7fdf3d4ff5e09a6fd74db0b397da202ca3d871b90b83afa47af6b70478efd11"
+    },
+    {
+      "displayName": "隐世修所",
+      "uuid": "2bee0dc9-4ffe-519b-1cbd-7fbe763a6047",
+      "aliases": [
+        "Haven",
+        "Triad",
+        "遗落境地"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/2bee0dc9-4ffe-519b-1cbd-7fbe763a6047/listviewicon.png",
+      "relativePath": "maps/2bee0dc9-4ffe-519b-1cbd-7fbe763a6047.png",
+      "mimeType": "image/png",
+      "byteLength": 82442,
+      "width": 456,
+      "height": 100,
+      "sha256": "bbb28211626778d57afb729de3a63c64f0f8ca1b389f63b26a6a80f7a454b8b7"
+    },
+    {
+      "displayName": "源工重镇",
+      "uuid": "2c9d57ec-4431-9c5e-2939-8f9ef6dd5cba",
+      "aliases": [
+        "Bind",
+        "Duality",
+        "劫境之地"
+      ],
+      "sourceUrl": "https://media.valorant-api.com/maps/2c9d57ec-4431-9c5e-2939-8f9ef6dd5cba/listviewicon.png",
+      "relativePath": "maps/2c9d57ec-4431-9c5e-2939-8f9ef6dd5cba.png",
+      "mimeType": "image/png",
+      "byteLength": 63826,
+      "width": 456,
+      "height": 100,
+      "sha256": "37f7359f4e75dee830b7328116e0a7c50e78601b9c834829f40f75a61f43881e"
+    }
+  ]
+}

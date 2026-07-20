@@ -76,6 +76,30 @@ function createLibraryProps(
 }
 
 describe("MatchLibrary card behavior", () => {
+  it("renders bundled agent and map artwork with resilient local fallbacks", () => {
+    const clip = {
+      ...mockClips[0],
+      agentName: "尚勃勒",
+      mapName: "源工重镇",
+      thumbnailUrl: null,
+    };
+    const { container } = render(
+      <MatchLibrary {...createLibraryProps(clip)} />,
+    );
+
+    const agentImage = container.querySelector<HTMLImageElement>(".match-board-agent img");
+    const mapImage = container.querySelector<HTMLImageElement>(".match-board-map-art img");
+    expect(agentImage?.getAttribute("src")).toMatch(/^\/valorant-assets\/agents\/.+\.png$/);
+    expect(mapImage?.getAttribute("src")).toMatch(/^\/valorant-assets\/maps\/.+\.png$/);
+
+    fireEvent.error(agentImage!);
+    fireEvent.error(mapImage!);
+    expect(container.querySelector(".match-board-agent img")).not.toBeInTheDocument();
+    expect(container.querySelector(".match-board-agent--fallback")).toHaveTextContent("尚勃");
+    expect(container.querySelector(".match-board-map-art img")).not.toBeInTheDocument();
+    expect(container.querySelector(".match-board-map-art")).toBeInTheDocument();
+  });
+
   it("keeps checkbox and favorite keyboard activation from opening preview", async () => {
     const user = userEvent.setup();
     const clip = { ...mockClips[0], id: "keyboard-clip", thumbnailUrl: null };

@@ -1,0 +1,89 @@
+name: Bug 报告
+description: 报告一个可复现、已脱敏的问题
+title: "[Bug] "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        数据丢失、越权文件操作、安全或隐私问题不要创建公开 Issue，请按 SECURITY.md 私下报告。附件不得包含原始视频、数据库、完整日志、真实路径、玩家名、OpenID、对局 ID、备注或未脱敏截图。
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 严重程度
+      options:
+        - P1 — 阻断启动或主要流程
+        - P2 — 功能错误但有绕行方式
+        - P3 — 轻微问题
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: 运行方式
+      options:
+        - 浏览器界面预览（合成 mock 数据）
+        - 桌面源码运行（受控设备）
+        - 未签名内部 RC（受控设备）
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Git commit
+      description: 请填写完整 40 位 SHA。
+    validations:
+      required: true
+  - type: input
+    id: artifact
+    attributes:
+      label: 构建或安装器身份
+      description: 源码运行填命令；内部 RC 填文件名、SHA-256 和签名状态。
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      placeholder: Windows 11 24H2 build ... / x64 / WebView2 ... / 100% 缩放
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 最小复现步骤
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 已脱敏证据
+      description: 只粘贴最小必要文本；上传前再次检查路径和身份数据。
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 提交确认
+      options:
+        - label: 这不是数据丢失、越权文件操作、安全或隐私问题；否则我会改用私密报告。
+          required: true
+        - label: 我已确认文本和附件不含用户素材、数据库、完整日志或敏感身份信息。
+          required: true
+        - label: 我已搜索现有 Issue，未发现相同问题。
+          required: true

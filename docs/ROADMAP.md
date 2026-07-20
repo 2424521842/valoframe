@@ -39,7 +39,7 @@
 
 ### 2.2 元数据与所有权
 
-- WonderfulDb 账号文件只读，使用 openid 派生密钥在进程内存中完成 AES-256-CBC 解密和解析，不生成明文副本。
+- WonderfulDb 账号文件只读，使用 openid 派生密钥在进程内存中完成 AES-256-CBC 解密和解析；不生成独立的解密数据库文件，但归一化字段和部分 snapshot/event 原始记录会以明文 `raw_json` 保存到应用 SQLite。
 - 官方 video、segment 和 event 写入 `clips` / `clip_metadata` / `clip_segments` / `clip_events`。
 - `matches` / `match_stats` / `match_events` 保存整场对局数据和回退事件。
 - 执行顺序为文件索引与导出 JSON、日志与 LevelDB 回退、WonderfulDb 权威覆盖；任一数据源损坏不得阻断 mp4 入库。

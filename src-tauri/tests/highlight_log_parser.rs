@@ -182,8 +182,19 @@ fn skips_player_like_values_when_finding_agent_name() {
 }
 
 #[test]
+fn parses_current_miks_agent_name() {
+    let content = r#"first request data is {"matchId":"match-miks-agent","agentName":"miks"}"#;
+
+    let result = parse_highlight_log_content(content).expect("content should parse");
+
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].agent_name.as_deref(), Some("Miks"));
+}
+
+#[test]
 fn skips_unknown_agent_names_when_finding_agent_name() {
-    let content = r#"first request data is {"matchId":"match-unknown-agent","agentName":"miks"}"#;
+    let content =
+        r#"first request data is {"matchId":"match-unknown-agent","agentName":"future-agent"}"#;
 
     let result = parse_highlight_log_content(content).expect("content should parse");
 

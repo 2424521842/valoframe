@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 小范围测试指南
+    url: https://github.com/2424521842/valoframe/blob/main/docs/INTERNAL_TESTING.md
+    about: 先确认测试边界、矩阵、停止条件和脱敏要求。
+  - name: 安全与隐私问题
+    url: https://github.com/2424521842/valoframe/blob/main/SECURITY.md
+    about: 不要在公开 Issue 中披露漏洞或用户数据。

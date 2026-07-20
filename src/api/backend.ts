@@ -92,6 +92,7 @@ const AGENT_DISPLAY_NAMES: Record<string, string> = {
   vyse: "维斯",
   tejo: "钛狐",
   waylay: "幻棱",
+  miks: "迷核",
   veto: "禁灭",
   vampire: "芮娜",
   nox: "维斯",
@@ -234,6 +235,18 @@ export async function getLibraryFacets(): Promise<LibraryFacets> {
 export async function getClipDetail(
   clipId: string,
 ): Promise<ClipDetail> {
+  if (isBrowserPreviewRuntime()) {
+    const clip = browserPreviewClipStore.get(clipId);
+    if (!clip) {
+      throw {
+        code: "clip-not-found",
+        message: `素材不存在：${clipId}`,
+        clipId,
+      };
+    }
+    return cloneClip(clip);
+  }
+
   try {
     const detail = await invoke<BackendClipDetail>("get_clip_detail", {
       clipId: numericClipId(clipId),

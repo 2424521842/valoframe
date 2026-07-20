@@ -1,51 +1,112 @@
-# 瓦刻（VALOFRAME）
+<p align="center">
+  <img src="public/valoframe-mark.png" width="112" alt="瓦刻 VALOFRAME 标识">
+</p>
 
-> **非官方社区项目。** 瓦刻是在遵循 Riot Games [“Legal Jibber Jabber”政策](https://www.riotgames.com/en/legal)的前提下创建的免费工具。Riot Games 不认可或赞助本项目；本项目也与 Riot Games、腾讯及其关联公司不存在隶属、赞助或认可关系。VALORANT、《无畏契约》及相关名称、商标和游戏内容归其各自权利人所有。
+<h1 align="center">瓦刻 · VALOFRAME</h1>
 
-> **许可状态。** 项目自有源代码和随附文档采用 [MIT License](LICENSE)。第三方依赖、FFmpeg、游戏内容及商标仍遵循各自条款和权利归属，详见[许可范围说明](docs/LICENSING.md)。
+<p align="center">把散落在本机的无畏契约高光，整理成可搜索、可预览、可标注的对局素材库。</p>
 
-`valorant-highlight-manager` 是“瓦刻（VALOFRAME）”的代码仓库。这是一款 Tauri 2 + React + TypeScript + Rust 桌面应用，用于在默认不改动原始文件的前提下索引和管理无畏契约国服高光素材；只有用户在应用回收站再次明确确认“永久删除”时，才会删除所选本地视频。
+<p align="center">
+  <a href="https://github.com/2424521842/valoframe/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/2424521842/valoframe/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2ea44f"></a>
+  <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4">
+  <img alt="Status: Development Preview" src="https://img.shields.io/badge/status-development%20preview-f59e0b">
+</p>
 
-当前核心链路已覆盖多来源扫描、四路元数据合并、稳定账号分组、分页与分层虚拟化浏览、按需详情、视频预览，以及收藏、标签、备注和批量整理。完整边界见 [PRD](docs/PRD.md)。
+> [!WARNING]
+> 瓦刻仍处于开发预览阶段，**目前没有可公开下载的安装包**。未签名内部 RC 只用于项目负责人或同一法律主体控制的设备，不得转发或上传到 GitHub Release。准备参与受控测试前，请先阅读[小范围测试指南](docs/INTERNAL_TESTING.md)。
 
-## 技术栈
+> [!NOTE]
+> 这是非官方社区项目，与 Riot Games、腾讯及其关联公司不存在隶属、赞助或认可关系。仓库负责人已声明相关游戏图片取得授权，但尚未向仓库自动化提供授权原件、可验证外部证据或具体许可条款。当前列出的用途只是准备测试的保守操作假设；发布源码改动、README 截图或任何外发包前，必须人工对照原始授权确认渠道、主体、地域、期限和展示方式。记录见[权利声明摘要](release/approvals/game-content-rights.json)。
 
-- Tauri 2
-- React 19
-- TypeScript
-- Rust
-- SQLite via `rusqlite`
-- Node.js/npm
+> 界面预览图已经在本地准备并完成脱敏/哈希记录；因其中包含游戏素材，在 `github-project-marketing` 范围完成人工核对前不嵌入公开 README。
 
-## 本地运行
+<!-- GitHub publication gate: only enable after manual source-authorization scope review.
+<p align="center">
+  <img src="docs/images/valoframe-library.png" width="1280" alt="瓦刻素材库界面，使用 FixtureAlpha 合成对局数据">
+</p>
+<p align="center"><sub>合成账号与对局数据 · 不含真实玩家信息或本地路径</sub></p>
+-->
 
-确保 Windows 环境已安装：
+## 它解决什么问题
 
-- Node.js 24 与 npm 11
-- Rust 1.96.1 MSVC toolchain（由 `rust-toolchain.toml` 固定）
-- Microsoft Visual Studio C++ Build Tools
-- Microsoft Edge WebView2 Runtime
+无畏契约高光往往散落在多个目录，文件名很难说明它属于哪个账号、对局或精彩时刻。瓦刻在本机完成索引，把素材按账号与对局自动归组，再提供搜索、筛选、预览和整理能力。
 
-项目只使用 npm，并以 `package-lock.json` 作为唯一前端锁文件。安装锁定依赖：
+`本地来源 → 只读扫描 → 元数据合并 → 账号/对局归组 → 搜索与预览 → 收藏、标签、备注和导出`
+
+- **自动归档**：发现默认、手动和固定磁盘来源，合并 WonderfulDb、导出 JSON、`highlight.log` 与 LevelDB 元数据；单路失败时仍可降级入库。
+- **快速找片**：按账号、英雄、地图、模式、日期、视频类型、自定义标签和文件状态筛选；大素材库使用后端分页与虚拟化。
+- **本地优先**：应用不提供云同步或遥测，素材、索引和用户整理数据留在本机。依赖安装与 WebView2 引导可能访问各自的官方服务。
+- **默认不改原片**：扫描、预览、收藏、标签、备注和普通回收操作不修改原始视频；只有在应用回收站再次明确确认“永久删除”时，才会尝试删除所选文件。
+
+## 当前状态
+
+| 通道 | 状态 | 适用范围 |
+| --- | --- | --- |
+| 浏览器界面预览 | 可用 | 使用合成 mock 数据体验素材库、扫描、标签和详情；不访问真实本地素材 |
+| 桌面源码运行 | 内部测试 | 可验证真实扫描与本地预览；必须从干净提交构建并记录 commit |
+| 未签名 Windows RC | 受控验证 | 仅限负责人或同一法律主体控制的设备，不得对外分发 |
+| 公开安装包 | 阻断 | 第三方许可、游戏素材的公开安装器/Release 二进制下载范围、品牌身份、签名、干净 VM 与数据安全证据尚未闭合 |
+
+本轮改动正在 Draft PR [#1](https://github.com/2424521842/valoframe/pull/1) 的后续候选中准备；在新 commit 推送且对应 CI 通过前，旧 PR run 不代表当前工作树。默认分支在合并前仍可能展示较早的仓库快照。
+
+## 快速体验
+
+### 1. 浏览器界面预览
+
+适合查看界面和交互，不会扫描真实目录，也不能验证视频播放、目录选择或导出：
 
 ```powershell
 npm ci
+npm run dev
 ```
 
-启动桌面开发环境：
+随后打开 `http://localhost:1420`。
+
+### 2. 桌面开发模式
+
+Windows 环境需要 Node.js 24、npm 11、Rust 1.96.1 MSVC、Visual Studio C++ Build Tools 和 Microsoft Edge WebView2 Runtime：
 
 ```powershell
+npm ci
 npm run tauri -- dev
 ```
 
-验证前端测试与构建：
+从源码运行时未提供受审 FFmpeg 资源会稳定降级为占位缩略图；请不要自行把来源不明的 FFmpeg 二进制加入仓库或测试包。
+
+## 小范围测试
+
+当前只接受两类测试：
+
+1. 使用合成数据的浏览器界面预览；
+2. 负责人或同一法律主体控制设备上的桌面源码/内部 RC 验证。
+
+每次测试都必须绑定唯一 commit、构建方式和 Windows 环境；永久删除只允许使用专门复制出的可丢弃素材。详细矩阵、停止条件和脱敏要求见[小范围测试指南](docs/INTERNAL_TESTING.md)。
+
+- [提交测试记录](https://github.com/2424521842/valoframe/issues/new?template=beta_feedback.yml)
+- [报告可复现问题](https://github.com/2424521842/valoframe/issues/new?template=bug_report.yml)
+- [阅读本地数据与隐私说明](docs/PRIVACY.md)
+- [报告安全问题](SECURITY.md)
+
+提交反馈时不要上传原始视频、应用数据库、完整日志、真实路径、玩家名、OpenID、对局 ID、备注或未经脱敏的截图。
+
+## 文件与数据安全
+
+- WonderfulDb 以只读方式打开并在内存中解密，但用于索引的部分原始 snapshot/event 记录会以明文 JSON 持久化到应用 SQLite；数据库未由应用额外加密。完整说明见[本地数据与隐私](docs/PRIVACY.md)。
+- “移入回收站”只改变索引状态，可恢复；“永久删除视频”是不可撤销的本地文件操作，并要求再次确认。
+- 数据库迁移前会创建经校验的备份；故障处理见[数据库恢复指南](docs/DATABASE_RECOVERY.md)。
+- 在干净 VM 和真实数据安全证据完成前，不应把唯一副本用于测试删除、升级或卸载流程。
+
+## 开发与验证
+
+前端：
 
 ```powershell
 npm test
 npm run build
 ```
 
-验证 Rust 后端：
+Rust 后端：
 
 ```powershell
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
@@ -53,47 +114,43 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-f
 cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features
 ```
 
-GitHub Actions 使用同一组门槛：Ubuntu 上执行 `npm ci`、`npm test` 和前端构建，Windows 上执行 Rust 格式检查、严格 Clippy 和完整测试，配置见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。
+GitHub Actions 使用同一组基础门槛，配置见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。Windows 内部 RC 还有独立的 FFmpeg、许可证据、bundle 静态检查和启动烟测；这些检查通过不代表公开分发获批。
 
-## 当前能力
+本地英雄/地图图必须与固定清单逐字节一致：
 
-- 来源与扫描：默认目录、手动目录和全电脑发现；`scan_roots` 统一处理多根目录、扫描互斥、进度、终态和取消。
-- 四路元数据：WonderfulDb、`videoExportTmp/config-*.json`、`highlight.log` 和 Local Storage LevelDB；单路失败只降级并记录警告。
-- 稳定账号：优先使用 `matchAccountId/openid` 识别账号，玩家名只用于展示和搜索。
-- 真实来源：`list_sources` 从 `source_dirs` 返回路径、名称、状态、错误和素材数量，包括零素材来源。
-- 大库浏览：后端分页摘要与全库 facets、详情按需加载、跨页分组，以及对局组与极端单组视觉行的分层虚拟化。
-- 素材管理：搜索、筛选、排序、收藏、标签、备注和回收状态；批量收藏、标签和回收由后端单命令、单事务执行。
-- 本地预览：自定义媒体协议提供最大 1 MiB 的有界 Range 响应；无 Range 时也不会把整个大视频读入内存。
-- 缩略图：源目录封面优先；存在受控 FFmpeg 时，缺失封面由单 worker 持久队列生成到应用缓存，按视频指纹失效，并在 512 MiB 高水位时清理到 450 MiB；否则稳定回退。
-- 文件安全：扫描、预览和常规整理只读原始目录；只有回收站中经过不可撤销确认的“永久删除视频”会删除所选原视频。
-- 自动化验证：Node/React 测试、Rust 单元与集成测试、npm 构建和 GitHub Actions CI；Windows 另有固定 FFmpeg、npm/Cargo SPDX 与许可证据、未签名 NSIS 内部 RC、manifest 驱动静态 bundle 检查和 marker 隔离启动烟测。
+```powershell
+npm run assets:verify
+```
 
-## 尚未完成
+## 技术栈
 
-- 锁定依赖的 SPDX/第三方材料生成器和最小自建 FFmpeg 候选链已经落地，但缺失许可证文本的受审 override、最小候选真实视频回归/长期源码镜像，以及第三方、专利与法律审批尚未闭合，因此不能对外分发。
-- 正式 publisher/identifier 和品牌资产、Authenticode 签名、一次性 VM 的安装升级卸载、公开分发与自动更新。
+- Tauri 2 + Rust
+- React 19 + TypeScript
+- SQLite via `rusqlite`
+- Vite + Vitest + Node.js test runner
 
-## 明确不做
+## 项目边界
 
-- 不实时录制。
-- 不读取游戏进程。
-- 不读取游戏内存。
-- 不绕过文件权限；WonderfulDb 仅只读读取并在内存中解密，不回写源文件或生成独立明文副本。
-- 除用户在回收站明确确认永久删除外，不修改、移动、重命名或删除原始素材。
-- 不上传素材或索引数据。
+瓦刻不实时录制，不读取游戏进程或内存，不绕过文件权限，也不上传素材或索引数据。当前功能边界见 [PRD](docs/PRD.md)，技术实现见[架构文档](docs/ARCHITECTURE.md)。
 
 ## 文档
 
-- [License](LICENSE)
-- [Licensing Scope](docs/LICENSING.md)
-- [Third-party License Review](docs/THIRD_PARTY_LICENSE_REVIEW.md)
+- [小范围测试](docs/INTERNAL_TESTING.md)
+- [本地数据与隐私](docs/PRIVACY.md)
 - [PRD](docs/PRD.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Data Model](docs/DATA_MODEL.md)
 - [Metadata Ingestion](docs/METADATA_INGESTION.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Tasks](docs/TASKS.md)
-- [Git Workflow](docs/GIT_WORKFLOW.md)
 - [Windows Release](docs/RELEASE.md)
 - [Windows Release Checklist](docs/WINDOWS_RELEASE_CHECKLIST.md)
-- [Database Recovery](docs/DATABASE_RECOVERY.md)
+- [Licensing Scope](docs/LICENSING.md)
+- [Third-party License Review](docs/THIRD_PARTY_LICENSE_REVIEW.md)
+- [GitHub Repository Setup](docs/GITHUB_REPOSITORY_SETUP.md)
+
+## 许可与权利声明
+
+项目自有源代码和随附文档采用 [MIT License](LICENSE)。第三方依赖、FFmpeg、游戏内容、名称、商标、品牌图标及其他非项目自有素材不因此获得 MIT 授权，详见[许可范围说明](LICENSE-SCOPE.txt)与[许可文档](docs/LICENSING.md)。
+
+本项目旨在作为免费、非商业的社区工具开展，并参考 Riot Games 的 [Legal Jibber Jabber](https://www.riotgames.com/en/legal)。该网页本身不构成授权；仓库只记录了负责人“已取得授权”的声明、42 张素材的技术证据及保守操作限制，尚未独立审阅具体许可范围。人工核对完成前，不发布本轮源码/宣传图，不制作公开安装器或 Release 二进制，也不用于商业分发或第三方复用。VALORANT、《无畏契约》及相关名称、商标和游戏内容归其各自权利人所有。

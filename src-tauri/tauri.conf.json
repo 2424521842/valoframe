@@ -14,6 +14,7 @@
       {
         "create": false,
         "title": "瓦刻",
+        "theme": "Dark",
         "width": 1280,
         "height": 820,
         "minWidth": 760,

@@ -356,10 +356,19 @@ test("keeps localized Chinese agent names from the backend", () => {
   assert.equal(clip.agentName, "贤者");
 });
 
-test("drops unknown agent names instead of showing raw backend values", () => {
+test("normalizes the current Miks agent name", () => {
   const clip = mapBackendClip({
     ...backendClip,
     agentName: "miks",
+  });
+
+  assert.equal(clip.agentName, "迷核");
+});
+
+test("drops unknown agent names instead of showing raw backend values", () => {
+  const clip = mapBackendClip({
+    ...backendClip,
+    agentName: "future-agent",
   });
 
   assert.equal(clip.agentName, "");
