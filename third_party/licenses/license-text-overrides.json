@@ -1,0 +1,390 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Version-locked license text evidence for dependency archives that omit their declared license files.",
+  "policy": {
+    "offlineOnly": true,
+    "exactComponentMatchRequired": true,
+    "unusedOverrideIsError": true,
+    "localPackageLicenseFilesTakePrecedence": true,
+    "reviewDoesNotConstituteLegalApproval": true
+  },
+  "texts": [
+    {
+      "id": "react-remove-scroll-bar-2.3.8-mit",
+      "path": "third_party/licenses/texts/react-remove-scroll-bar-2.3.8-MIT.txt",
+      "sizeBytes": 1093,
+      "sha256": "a79aae0c0f21990d9d963bb3c5a79cdcea9a46f8523ba55c58d7fe776b6ebc84",
+      "spdxLicenseId": "MIT",
+      "source": {
+        "kind": "upstream-repository-file",
+        "repository": "https://github.com/theKashey/react-remove-scroll-bar",
+        "revision": "8ca9ba5ea52de03308fe8ced94f7b159a44d28ff",
+        "path": "LICENSE",
+        "url": "https://raw.githubusercontent.com/theKashey/react-remove-scroll-bar/8ca9ba5ea52de03308fe8ced94f7b159a44d28ff/LICENSE",
+        "relationship": "post-release-upstream-license-clarification"
+      },
+      "equivalentSources": []
+    },
+    {
+      "id": "rust-alloc-no-stdlib-bsd-3-clause",
+      "path": "third_party/licenses/texts/rust-alloc-no-stdlib-BSD-3-Clause.txt",
+      "sizeBytes": 1483,
+      "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+      "spdxLicenseId": "BSD-3-Clause",
+      "source": {
+        "kind": "upstream-repository-file",
+        "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+        "revision": "ae42d22078b98549e987d2f03d12df7b984fde47",
+        "path": "LICENSE",
+        "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE",
+        "relationship": "exact-package-vcs-revision"
+      },
+      "equivalentSources": []
+    },
+    {
+      "id": "mozilla-mpl-2.0",
+      "path": "third_party/licenses/texts/MPL-2.0.txt",
+      "sizeBytes": 16726,
+      "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85",
+      "spdxLicenseId": "MPL-2.0",
+      "source": {
+        "kind": "license-steward-canonical",
+        "repository": null,
+        "revision": "MPL-2.0",
+        "path": null,
+        "url": "https://www.mozilla.org/media/MPL/2.0/index.815ca599c9df.txt",
+        "relationship": "canonical-text-for-declared-spdx-license"
+      },
+      "equivalentSources": []
+    },
+    {
+      "id": "tauri-apache-2.0",
+      "path": "third_party/licenses/texts/tauri-Apache-2.0.txt",
+      "sizeBytes": 10174,
+      "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+      "spdxLicenseId": "Apache-2.0",
+      "source": {
+        "kind": "upstream-repository-file",
+        "repository": "https://github.com/tauri-apps/tauri",
+        "revision": "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a",
+        "path": "LICENSE_APACHE-2.0",
+        "url": "https://raw.githubusercontent.com/tauri-apps/tauri/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_APACHE-2.0",
+        "relationship": "exact-package-vcs-revision"
+      },
+      "equivalentSources": []
+    },
+    {
+      "id": "tauri-mit",
+      "path": "third_party/licenses/texts/tauri-MIT.txt",
+      "sizeBytes": 1090,
+      "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d",
+      "spdxLicenseId": "MIT",
+      "source": {
+        "kind": "upstream-repository-file",
+        "repository": "https://github.com/tauri-apps/tauri",
+        "revision": "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a",
+        "path": "LICENSE_MIT",
+        "url": "https://raw.githubusercontent.com/tauri-apps/tauri/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_MIT",
+        "relationship": "exact-package-vcs-revision"
+      },
+      "equivalentSources": []
+    },
+    {
+      "id": "rust-unic-apache-2.0",
+      "path": "third_party/licenses/texts/rust-unic-Apache-2.0.txt",
+      "sizeBytes": 10847,
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "spdxLicenseId": "Apache-2.0",
+      "source": {
+        "kind": "upstream-repository-file",
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016",
+        "path": "LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
+        "relationship": "exact-package-family-vcs-revision"
+      },
+      "equivalentSources": [
+        {
+          "kind": "upstream-repository-file",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+          "path": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-APACHE",
+          "relationship": "byte-identical-upstream-file"
+        }
+      ]
+    },
+    {
+      "id": "rust-unic-mit",
+      "path": "third_party/licenses/texts/rust-unic-MIT.txt",
+      "sizeBytes": 1023,
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "spdxLicenseId": "MIT",
+      "source": {
+        "kind": "upstream-repository-file",
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016",
+        "path": "LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
+        "relationship": "exact-package-family-vcs-revision"
+      },
+      "equivalentSources": [
+        {
+          "kind": "upstream-repository-file",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+          "path": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT",
+          "relationship": "byte-identical-upstream-file"
+        }
+      ]
+    },
+    {
+      "id": "rust-unic-copyright",
+      "path": "third_party/licenses/texts/rust-unic-COPYRIGHT.md",
+      "sizeBytes": 608,
+      "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
+      "spdxLicenseId": null,
+      "source": {
+        "kind": "upstream-repository-file",
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016",
+        "path": "COPYRIGHT.md",
+        "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md",
+        "relationship": "exact-package-family-vcs-revision"
+      },
+      "equivalentSources": [
+        {
+          "kind": "upstream-repository-file",
+          "repository": "https://github.com/open-i18n/rust-unic",
+          "revision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+          "path": "COPYRIGHT.md",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT.md",
+          "relationship": "byte-identical-upstream-file"
+        }
+      ]
+    },
+    {
+      "id": "webview2-rs-mit",
+      "path": "third_party/licenses/texts/webview2-rs-MIT.txt",
+      "sizeBytes": 1067,
+      "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+      "spdxLicenseId": "MIT",
+      "source": {
+        "kind": "upstream-repository-file",
+        "repository": "https://github.com/wravery/webview2-rs",
+        "revision": "b74dc5e2b394044bea5191052868ce7a106c202c",
+        "path": "LICENSE",
+        "url": "https://raw.githubusercontent.com/wravery/webview2-rs/b74dc5e2b394044bea5191052868ce7a106c202c/LICENSE",
+        "relationship": "exact-package-family-license"
+      },
+      "equivalentSources": [
+        {
+          "kind": "upstream-repository-file",
+          "repository": "https://github.com/wravery/webview2-rs",
+          "revision": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+          "path": "LICENSE",
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE",
+          "relationship": "byte-identical-upstream-file"
+        }
+      ]
+    }
+  ],
+  "overrides": [
+    {
+      "ecosystem": "npm",
+      "name": "react-remove-scroll-bar",
+      "version": "2.3.8",
+      "declaredLicense": "MIT",
+      "packagePath": "node_modules/react-remove-scroll-bar",
+      "resolved": "https://registry.npmjs.org/react-remove-scroll-bar/-/react-remove-scroll-bar-2.3.8.tgz",
+      "lockIntegrity": "sha512-9r+yi9+mgU33AKcj6IbT9oRCO78WriSj6t/cF8DWBZJ9aOGPOTEDvdUDz1FwKim7QXWwmHqtdHnRJfhAxEG46Q==",
+      "registryTarballSha1": "99c20f908ee467b385b68a3469b4a3e750012223",
+      "repository": "https://github.com/theKashey/react-remove-scroll-bar",
+      "registryGitHead": "b3b1287aad81def2e2ae707274b74531b61ddbaf",
+      "reason": "license-file-omitted-from-npm-tarball",
+      "textIds": [
+        "react-remove-scroll-bar-2.3.8-mit"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "alloc-stdlib",
+      "version": "0.2.4",
+      "declaredLicense": "BSD-3-Clause",
+      "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+      "registryChecksum": "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195",
+      "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+      "vcsRevision": "ae42d22078b98549e987d2f03d12df7b984fde47",
+      "vcsPath": "alloc-stdlib",
+      "reason": "license-file-omitted-from-crate-archive",
+      "textIds": [
+        "rust-alloc-no-stdlib-bsd-3-clause"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "selectors",
+      "version": "0.36.1",
+      "declaredLicense": "MPL-2.0",
+      "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+      "registryChecksum": "c5d9c0c92a92d33f08817311cf3f2c29a3538a8240e94a6a3c622ce652d7e00c",
+      "repository": "https://github.com/servo/stylo",
+      "vcsRevision": "635e1a19d02960588a00e189bd4bd5bdb150ec3d",
+      "vcsPath": "selectors",
+      "reason": "license-file-omitted-from-crate-archive",
+      "textIds": [
+        "mozilla-mpl-2.0"
+      ],
+      "obligations": [
+        "mpl-2.0-source-code-form-review-required"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "tauri-plugin",
+      "version": "2.6.3",
+      "declaredLicense": "Apache-2.0 OR MIT",
+      "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+      "registryChecksum": "74be5dd4bed9afbd145e5716b5fa2ec28cbc29c34ffa61c258c9273d896c8020",
+      "repository": "https://github.com/tauri-apps/tauri",
+      "vcsRevision": "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a",
+      "vcsPath": "crates/tauri-plugin",
+      "reason": "license-file-omitted-from-crate-archive",
+      "textIds": [
+        "tauri-apache-2.0",
+        "tauri-mit"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "unic-char-property",
+      "version": "0.9.0",
+      "declaredLicense": "MIT OR Apache-2.0",
+      "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+      "registryChecksum": "a8c57a407d9b6fa02b4795eb81c5b6652060a15a7903ea981f3d723e6c0be221",
+      "repository": "https://github.com/open-i18n/rust-unic/",
+      "vcsRevision": "5878605364af97a3358368a6eaef02104af2e016",
+      "vcsPath": null,
+      "reason": "license-file-omitted-from-crate-archive",
+      "textIds": [
+        "rust-unic-apache-2.0",
+        "rust-unic-mit",
+        "rust-unic-copyright"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "unic-char-range",
+      "version": "0.9.0",
+      "declaredLicense": "MIT OR Apache-2.0",
+      "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+      "registryChecksum": "0398022d5f700414f6b899e10b8348231abf9173fa93144cbc1a43b9793c1fbc",
+      "repository": "https://github.com/open-i18n/rust-unic/",
+      "vcsRevision": "5878605364af97a3358368a6eaef02104af2e016",
+      "vcsPath": null,
+      "reason": "license-file-omitted-from-crate-archive",
+      "textIds": [
+        "rust-unic-apache-2.0",
+        "rust-unic-mit",
+        "rust-unic-copyright"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "unic-common",
+      "version": "0.9.0",
+      "declaredLicense": "MIT OR Apache-2.0",
+      "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+      "registryChecksum": "80d7ff825a6a654ee85a63e80f92f054f904f21e7d12da4e22f9834a4aaa35bc",
+      "repository": "https://github.com/open-i18n/rust-unic/",
+      "vcsRevision": "5878605364af97a3358368a6eaef02104af2e016",
+      "vcsPath": null,
+      "reason": "license-file-omitted-from-crate-archive",
+      "textIds": [
+        "rust-unic-apache-2.0",
+        "rust-unic-mit",
+        "rust-unic-copyright"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "unic-ucd-ident",
+      "version": "0.9.0",
+      "declaredLicense": "MIT OR Apache-2.0",
+      "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+      "registryChecksum": "e230a37c0381caa9219d67cf063aa3a375ffed5bf541a452db16e744bdab6987",
+      "repository": "https://github.com/open-i18n/rust-unic/",
+      "vcsRevision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+      "vcsPath": null,
+      "reason": "license-file-omitted-from-crate-archive",
+      "textIds": [
+        "rust-unic-apache-2.0",
+        "rust-unic-mit",
+        "rust-unic-copyright"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "unic-ucd-version",
+      "version": "0.9.0",
+      "declaredLicense": "MIT OR Apache-2.0",
+      "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+      "registryChecksum": "96bd2f2237fe450fcd0a1d2f5f4e91711124f7857ba2e964247776ebeeb7b0c4",
+      "repository": "https://github.com/open-i18n/rust-unic/",
+      "vcsRevision": "5878605364af97a3358368a6eaef02104af2e016",
+      "vcsPath": null,
+      "reason": "license-file-omitted-from-crate-archive",
+      "textIds": [
+        "rust-unic-apache-2.0",
+        "rust-unic-mit",
+        "rust-unic-copyright"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "webview2-com-macros",
+      "version": "0.8.1",
+      "declaredLicense": "MIT",
+      "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+      "registryChecksum": "67a921c1b6914c367b2b823cd4cde6f96beec77d30a939c8199bb377cf9b9b54",
+      "repository": "https://github.com/wravery/webview2-rs",
+      "vcsRevision": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+      "vcsPath": "crates/callback-macros",
+      "reason": "license-file-omitted-from-crate-archive",
+      "textIds": [
+        "webview2-rs-mit"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "webview2-com-sys",
+      "version": "0.38.2",
+      "declaredLicense": "MIT",
+      "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+      "registryChecksum": "381336cfffd772377d291702245447a5251a2ffa5bad679c99e61bc48bacbf9c",
+      "repository": "https://github.com/wravery/webview2-rs",
+      "vcsRevision": "b74dc5e2b394044bea5191052868ce7a106c202c",
+      "vcsPath": "crates/bindings",
+      "reason": "license-file-omitted-from-crate-archive",
+      "textIds": [
+        "webview2-rs-mit"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "webview2-com",
+      "version": "0.38.2",
+      "declaredLicense": "MIT",
+      "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+      "registryChecksum": "7130243a7a5b33c54a444e54842e6a9e133de08b5ad7b5861cd8ed9a6a5bc96a",
+      "repository": "https://github.com/wravery/webview2-rs",
+      "vcsRevision": "b74dc5e2b394044bea5191052868ce7a106c202c",
+      "vcsPath": "crates/webview2-com",
+      "reason": "license-file-omitted-from-crate-archive",
+      "textIds": [
+        "webview2-rs-mit"
+      ]
+    }
+  ]
+}

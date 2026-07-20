@@ -25,6 +25,12 @@ const licensingDecision = readFileSync(
   "utf8",
 );
 const ffmpegManifest = readJson("../third_party/ffmpeg/windows-x64.json");
+const licenseTextOverrides = readJson(
+  "../third_party/licenses/license-text-overrides.json",
+);
+const licenseTextOverrideApprovals = readJson(
+  "../third_party/licenses/license-text-override-approvals.json",
+);
 const ffmpegBuildInfo = readJson(
   "../src-tauri/resources/licenses/ffmpeg/BUILD-INFO.json",
 );
@@ -223,6 +229,123 @@ test("compliance evidence covers locked npm, Cargo, and FFmpeg inputs", () => {
   );
   assert.match(bundleGateScript, /target must be x86_64-pc-windows-msvc/);
   assert.match(bundleGateScript, /approved release generator/);
+});
+
+test("missing dependency license texts use locked and reviewable overrides", () => {
+  assert.equal(licenseTextOverrides.schemaVersion, 1);
+  const policy = objectAt(licenseTextOverrides, "policy");
+  for (const field of [
+    "offlineOnly",
+    "exactComponentMatchRequired",
+    "unusedOverrideIsError",
+    "localPackageLicenseFilesTakePrecedence",
+    "reviewDoesNotConstituteLegalApproval",
+  ]) {
+    assert.equal(policy[field], true, `${field} must remain fail-closed`);
+  }
+
+  const texts = licenseTextOverrides.texts as JsonObject[];
+  const overrides = licenseTextOverrides.overrides as JsonObject[];
+  assert.equal(texts.length, 9);
+  assert.equal(overrides.length, 12);
+
+  const textIds = new Set<string>();
+  for (const text of texts) {
+    const id = String(text.id);
+    const path = String(text.path);
+    assert.equal(textIds.has(id), false, `duplicate override text id: ${id}`);
+    textIds.add(id);
+    assert.match(path, /^third_party\/licenses\/texts\/[A-Za-z0-9._-]+$/);
+    const bytes = readFileSync(new URL(`../${path}`, import.meta.url));
+    assert.equal(bytes.byteLength, text.sizeBytes);
+    assert.equal(
+      createHash("sha256").update(bytes).digest("hex"),
+      text.sha256,
+    );
+    const source = objectAt(text, "source");
+    assert.match(String(source.url), /^https:\/\//);
+    assert.equal(typeof source.relationship, "string");
+    assert.equal(
+      text.spdxLicenseId === null || typeof text.spdxLicenseId === "string",
+      true,
+    );
+    assert.equal(Array.isArray(text.equivalentSources), true);
+    for (const equivalent of text.equivalentSources as JsonObject[]) {
+      assert.equal(equivalent.relationship, "byte-identical-upstream-file");
+      assert.match(String(equivalent.revision), /^[a-f0-9]{40}$/);
+      assert.match(String(equivalent.url), /^https:\/\//);
+    }
+  }
+
+  const expectedComponents = new Set([
+    "npm:react-remove-scroll-bar@2.3.8",
+    "cargo:alloc-stdlib@0.2.4",
+    "cargo:selectors@0.36.1",
+    "cargo:tauri-plugin@2.6.3",
+    "cargo:unic-char-property@0.9.0",
+    "cargo:unic-char-range@0.9.0",
+    "cargo:unic-common@0.9.0",
+    "cargo:unic-ucd-ident@0.9.0",
+    "cargo:unic-ucd-version@0.9.0",
+    "cargo:webview2-com-macros@0.8.1",
+    "cargo:webview2-com-sys@0.38.2",
+    "cargo:webview2-com@0.38.2",
+  ]);
+  for (const override of overrides) {
+    const component = `${String(override.ecosystem)}:${String(override.name)}@${String(override.version)}`;
+    assert.equal(expectedComponents.delete(component), true, component);
+    if (override.ecosystem === "cargo") {
+      assert.match(String(override.vcsRevision), /^[a-f0-9]{40}$/);
+    } else {
+      assert.match(String(override.registryGitHead), /^[a-f0-9]{40}$/);
+    }
+    assert.equal(Array.isArray(override.textIds), true);
+    for (const textId of override.textIds as string[]) {
+      assert.equal(textIds.has(textId), true, `${component}: ${textId}`);
+    }
+    assert.equal("review" in override, false);
+  }
+  assert.equal(expectedComponents.size, 0);
+
+  assert.equal(licenseTextOverrideApprovals.schemaVersion, 1);
+  assert.equal(Array.isArray(licenseTextOverrideApprovals.approvals), true);
+  assert.equal((licenseTextOverrideApprovals.approvals as JsonObject[]).length, 0);
+
+  const npmOverride = overrides.find(
+    (entry) => entry.ecosystem === "npm",
+  ) as JsonObject;
+  const lockedNpmPackage = objectAt(
+    objectAt(packageLock, "packages"),
+    "node_modules/react-remove-scroll-bar",
+  );
+  assert.equal(npmOverride.lockIntegrity, lockedNpmPackage.integrity);
+  assert.equal(npmOverride.resolved, lockedNpmPackage.resolved);
+  assert.match(String(npmOverride.registryTarballSha1), /^[a-f0-9]{40}$/);
+  assert.match(String(npmOverride.registryGitHead), /^[a-f0-9]{40}$/);
+
+  const selectorsOverride = overrides.find(
+    (entry) => entry.name === "selectors",
+  ) as JsonObject;
+  assert.deepEqual(selectorsOverride.obligations, [
+    "mpl-2.0-source-code-form-review-required",
+  ]);
+
+  assert.match(complianceGenerator, /tracked-license-override/);
+  assert.match(complianceGenerator, /\.cargo_vcs_info\.json/);
+  assert.match(complianceGenerator, /License override is stale because the package now includes local text/);
+  assert.match(complianceGenerator, /does not match Cargo\.lock/);
+  assert.match(complianceGenerator, /LICENSE_OVERRIDE_REVIEW_PENDING/);
+  assert.match(complianceGenerator, /License override text SPDX coverage mismatch/);
+  assert.match(complianceGenerator, /must be tracked in the Git index and match its indexed bytes/);
+  assert.match(complianceGenerator, /Locked npm tarball does not match its SHA-512\/SHA-1 provenance/);
+  assert.match(complianceGenerator, /approval manifest contains unknown or stale components/);
+  assert.match(bundleGateScript, /tracked license-text override manifest/);
+  assert.match(bundleGateScript, /structured license-text override approval manifest/);
+  assert.match(bundleGateScript, /License-text override manifest contains an unsafe text path/);
+  assert.match(bundleGateScript, /does not match its manifest size and SHA-256/);
+  assert.match(bundleGateScript, /does not have exact SPDX text coverage/);
+  assert.match(bundleGateScript, /text records that are not bound to a component/);
+  assert.match(bundleGateScript, /pending blockers do not match the structured license override approvals/);
 });
 
 test("first-party licensing is consistently declared as MIT", () => {

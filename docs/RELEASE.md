@@ -57,7 +57,7 @@
 
 当前固定的 BtbN `win64-lgpl` 二进制继续只用于内部 RC。它实际启用了大量本应用不需要的外部组件，因此仓库另设手工 `FFmpeg minimal Windows x64 candidate` workflow：从固定 FFmpeg commit 交叉编译只保留 `file/mov/h264/scale/mjpeg/image2` 的最小候选，同时生成精确源码包、构建参数、工具链和 Windows 合成视频烟测证据。Windows 门禁会复核 `SHA256SUMS.txt`、`BUILD-METADATA.json`、12 位固定 commit 标识，并直接解析 PE import table；实际导入必须与交叉工具链 `objdump` 结果一致且仅命中固定的 Windows 系统 DLL allowlist。候选报告固定为 `passed-candidate-not-promoted` 且 `promotionAuthorized = false`；真实高光视频回归、源码长期镜像、许可/专利/法律审批全部完成前，不得替换现有固定二进制或对外分发。
 
-`scripts/release/generate-compliance-evidence.mjs` 从 `package-lock.json`、Windows x64 Cargo 解析图和 FFmpeg manifest 生成两份 npm SPDX 2.3、Windows Cargo SPDX 2.3、FFmpeg 组件快照、第三方声明、去重后的许可证全文、索引、阻断摘要和逐文件 SHA-256 manifest。可在不存在输出目录时运行 `npm run release:compliance:generate`。生成器拒绝复用已有输出目录、缺许可证声明的第三方组件和发生变化的锁文件输入；bundle 门禁还固定生成器路径、Windows target 和全部输入哈希。缺少许可证文本或审批只会形成稳定 blocker，不能被自动写成“已批准”。
+`scripts/release/generate-compliance-evidence.mjs` 从 `package-lock.json`、Windows x64 Cargo 解析图和 FFmpeg manifest 生成两份 npm SPDX 2.3、Windows Cargo SPDX 2.3、FFmpeg 组件快照、第三方声明、去重后的许可证全文、索引、阻断摘要和逐文件 SHA-256 manifest。可在不存在输出目录时运行 `npm run release:compliance:generate`。发布归档漏带正文的精确依赖由 `third_party/licenses/license-text-overrides.json` 补充：manifest 固定版本、锁文件 checksum/integrity、上游提交、SPDX 正文覆盖、正文大小和 SHA-256，生成器只在包内正文确实为空时离线应用，并拒绝未使用、重复、越界、symlink/junction、未进入 Git index、版本/SPDX/VCS/哈希不一致的 override。`license-text-override-approvals.json` 使用绑定组件与正文哈希的独立结构化记录；没有匹配批准时仍输出稳定 pending blocker。bundle 门禁固定生成器、Windows target、全部锁文件、两份 override manifest 及每份正文的哈希；技术证据不能被自动写成“已批准”。
 
 ## 内部 RC 构建
 

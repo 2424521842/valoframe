@@ -44,7 +44,7 @@
 - [ ] 已记录原始下载 URL、下载时间、版本和构建参数。
 - [ ] 已根据实际启用组件完成许可证审核，没有根据项目名猜测 LGPL/GPL 状态。
 - [ ] SBOM 或等价组件清单已生成并归档。
-- [ ] npm/Cargo SPDX、FFmpeg 组件快照、第三方声明、许可证全文和 SHA-256 manifest 均由锁文件重新生成；缺文本 override 和人工审核已闭合。
+- [ ] npm/Cargo SPDX、FFmpeg 组件快照、第三方声明、许可证全文和 SHA-256 manifest 均由锁文件重新生成；12 项 tracked license override 已逐项批准，`selectors` 的 MPL 2.0 源代码形式义务和其他人工审核已闭合。
 - [ ] 最小自建 FFmpeg 候选的 checksum/build metadata、12 位 commit、PE 实际 imports 与 objdump 结果已一致，imports 只命中 Windows 系统 DLL allowlist；Windows 合成视频和代表性真实高光视频均通过，且对应源码包与最终二进制同址长期提供。通过前仍使用内部 RC 固定版本。
 - [ ] 对应源代码镜像或书面提供方式可长期访问并匹配该二进制。
 - [x] 项目自有代码已选择 MIT，根许可证已纳入仓库，并记录当前不另设重复 EULA。

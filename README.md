@@ -86,6 +86,7 @@ GitHub Actions 使用同一组门槛：Ubuntu 上执行 `npm ci`、`npm test` �
 
 - [License](LICENSE)
 - [Licensing Scope](docs/LICENSING.md)
+- [Third-party License Review](docs/THIRD_PARTY_LICENSE_REVIEW.md)
 - [PRD](docs/PRD.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Data Model](docs/DATA_MODEL.md)

@@ -9,6 +9,7 @@
 *.ts text eol=lf
 *.tsx text eol=lf
 *.txt text eol=lf
+third_party/licenses/texts/MPL-2.0.txt text eol=lf whitespace=-trailing-space
 *.yaml text eol=lf
 *.yml text eol=lf
 LICENSE text eol=lf

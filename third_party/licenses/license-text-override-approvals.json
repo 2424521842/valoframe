@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Structured owner or legal review decisions bound to exact dependency components and license-text SHA-256 values.",
+  "approvals": []
+}
