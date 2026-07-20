@@ -9,7 +9,7 @@
 内部 RC 只用于仓库负责人或同一法律主体控制的受限测试设备上的安装、升级和卸载验证，不是公开发布：
 
 - 可以暂时不做 Authenticode 签名，但必须在分发说明中明确“未签名”，并预期 Windows SmartScreen/信誉提示。
-- FFmpeg 对应源码、第三方许可证和项目许可尚未闭合时，不得向主体外的测试者分发；任何内部传递也必须经过实际许可负责人确认。
+- FFmpeg 对应源码和第三方许可证尚未闭合时，不得向主体外的测试者分发；任何内部传递也必须经过实际许可负责人确认。
 - 不得上传公共下载页、包管理器或自动更新端点。
 - 不启用自动更新，不把内部 RC 当作后续公开版本的可信更新源。
 - 每个 RC 仍需记录版本、Git 提交、构建环境、安装器 SHA-256，以及所含 FFmpeg 的版本、来源和 SHA-256。
@@ -31,7 +31,7 @@
 
 目录级映射让受版本控制的许可证/来源元数据可以保证资源根存在，因此普通 `cargo check/test` 不要求先下载大体积 FFmpeg。发布构建仍必须由静态检查确认实际 `ffmpeg.exe` 已 staged 且与受审 manifest 一致；目录存在不等于发布资源齐备。
 
-配置没有填入尚未确定的 publisher、证书、许可证文件、更新端点或更新公钥。不得用占位值绕过公开发布阻断。
+配置没有填入尚未确定的 publisher、证书、第三方合规审批、更新端点或更新公钥。项目自有代码已选择 MIT；不得用占位值绕过其余公开发布阻断。
 
 ## 版本和身份
 
@@ -57,7 +57,7 @@
 
 当前固定的 BtbN `win64-lgpl` 二进制继续只用于内部 RC。它实际启用了大量本应用不需要的外部组件，因此仓库另设手工 `FFmpeg minimal Windows x64 candidate` workflow：从固定 FFmpeg commit 交叉编译只保留 `file/mov/h264/scale/mjpeg/image2` 的最小候选，同时生成精确源码包、构建参数、工具链和 Windows 合成视频烟测证据。Windows 门禁会复核 `SHA256SUMS.txt`、`BUILD-METADATA.json`、12 位固定 commit 标识，并直接解析 PE import table；实际导入必须与交叉工具链 `objdump` 结果一致且仅命中固定的 Windows 系统 DLL allowlist。候选报告固定为 `passed-candidate-not-promoted` 且 `promotionAuthorized = false`；真实高光视频回归、源码长期镜像、许可/专利/法律审批全部完成前，不得替换现有固定二进制或对外分发。
 
-`scripts/release/generate-compliance-evidence.mjs` 从 `package-lock.json`、Windows x64 Cargo 解析图和 FFmpeg manifest 生成两份 npm SPDX 2.3、Windows Cargo SPDX 2.3、FFmpeg 组件快照、第三方声明、去重后的许可证全文、索引、阻断摘要和逐文件 SHA-256 manifest。可在不存在输出目录时运行 `npm run release:compliance:generate`。生成器拒绝复用已有输出目录、缺许可证声明的第三方组件和发生变化的锁文件输入；bundle 门禁还固定生成器路径、Windows target 和全部输入哈希。缺少许可证文本、项目许可或审批只会形成稳定 blocker，不能被自动写成“已批准”。
+`scripts/release/generate-compliance-evidence.mjs` 从 `package-lock.json`、Windows x64 Cargo 解析图和 FFmpeg manifest 生成两份 npm SPDX 2.3、Windows Cargo SPDX 2.3、FFmpeg 组件快照、第三方声明、去重后的许可证全文、索引、阻断摘要和逐文件 SHA-256 manifest。可在不存在输出目录时运行 `npm run release:compliance:generate`。生成器拒绝复用已有输出目录、缺许可证声明的第三方组件和发生变化的锁文件输入；bundle 门禁还固定生成器路径、Windows target 和全部输入哈希。缺少许可证文本或审批只会形成稳定 blocker，不能被自动写成“已批准”。
 
 ## 内部 RC 构建
 
@@ -85,7 +85,7 @@ npm run release:bundle:windows:internal
 
 构建前必须由发布静态检查确认 `src-tauri/resources/bin/ffmpeg.exe` 已 staged，且与本次发布记录/manifest 的哈希一致。隔离构建的安装器位于 `$env:CARGO_TARGET_DIR\release\bundle\nsis\`。`--no-sign` 只适用于内部 RC；公开发布不得沿用该参数。
 
-`scripts/release/check-bundle.ps1` 还必须同时接收本次 Tauri 构建生成的 `release\nsis\...\installer.nsi` 和完整 7-Zip 的 `7z.exe`。门禁会先校验 PE overlay 上的 NSIS first header，再把 `installer.nsi` 的 `Section Install` 静态绑定到本次主程序、`bin\ffmpeg.exe`、FFmpeg 许可文件以及 `COMPLIANCE-MANIFEST.json` 声明的全部第三方材料；随后只把这些目标从最终安装器受控解包到一次性目录。当前快照为 15 个文件，但数量由 manifest 驱动，不再硬编码为六个。所有资源必须逐字节匹配；Tauri 会在打包期间把主程序中唯一的 `__TAURI_BUNDLE_TYPE_VAR_UNK` 改为同偏移的 `..._NSS`。内部未签名模式使用 `strict-unsigned` 比较，整文件除这三个 marker 字节外不得有任何差异。公开模式使用 `authenticode-aware` 比较：外部 UNK staging 文件必须 `NotSigned` 且无证书表；内嵌 NSS 文件的证书表必须从 `Align8(staging file length)` 开始、只允许 0–7 个零 padding、以合法 WIN_CERTIFICATE 项精确覆盖到 EOF。只在 NSS→UNK 后同时归零 PE checksum 和 security-directory entry，再比较 staging 文件长度内包括合法 overlay 在内的全部字节。内嵌 NSS 主程序和安装器不仅必须为 `Valid`，还必须与公开 policy 中获批的 publisher subject 和证书 thumbprint 精确一致、存在时间戳证书，并额外通过微软签名的 `signtool verify /pa /all /v`。报告明确区分两种比较模式并留存 raw/canonical 哈希、证书表边界、签名者、时间戳和 signtool 证据。
+`scripts/release/check-bundle.ps1` 还必须同时接收本次 Tauri 构建生成的 `release\nsis\...\installer.nsi` 和完整 7-Zip 的 `7z.exe`。门禁会先校验 PE overlay 上的 NSIS first header，再把 `installer.nsi` 的 `Section Install` 静态绑定到本次主程序、`bin\ffmpeg.exe`、项目 MIT 许可证及范围说明、FFmpeg 许可文件以及 `COMPLIANCE-MANIFEST.json` 声明的全部第三方材料；随后只把这些目标从最终安装器受控解包到一次性目录。当前快照为 17 个文件，但数量由 manifest 驱动，不再硬编码。根 `LICENSE`/`LICENSE-SCOPE.txt`、公开 policy 中获批的 SHA-256 与安装目录对应文件必须逐字节一致。所有资源必须逐字节匹配；Tauri 会在打包期间把主程序中唯一的 `__TAURI_BUNDLE_TYPE_VAR_UNK` 改为同偏移的 `..._NSS`。内部未签名模式使用 `strict-unsigned` 比较，整文件除这三个 marker 字节外不得有任何差异。公开模式使用 `authenticode-aware` 比较：外部 UNK staging 文件必须 `NotSigned` 且无证书表；内嵌 NSS 文件的证书表必须从 `Align8(staging file length)` 开始、只允许 0–7 个零 padding、以合法 WIN_CERTIFICATE 项精确覆盖到 EOF。只在 NSS→UNK 后同时归零 PE checksum 和 security-directory entry，再比较 staging 文件长度内包括合法 overlay 在内的全部字节。内嵌 NSS 主程序和安装器不仅必须为 `Valid`，还必须与公开 policy 中获批的 publisher subject 和证书 thumbprint 精确一致、存在时间戳证书，并额外通过微软签名的 `signtool verify /pa /all /v`。报告明确区分两种比较模式并留存 raw/canonical 哈希、证书表边界、签名者、时间戳和 signtool 证据。
 
 CI 将已通过检查的全部 NSIS 载荷保留到 `RUNNER_TEMP` 下的预先为空目录。移动前后都重新验证临时根目录、父链和输出目录没有 reparse point，移动后再按最终报告重新枚举并复核文件数量及每项哈希。启动烟测重新读取该 JSON 报告，逐项核对路径、大小和 SHA-256，并只使用报告中的 `rawEmbeddedSha256` 授权真实 NSS 主程序；不得现场计算一个新哈希再自授权。未显式请求输出时，静态检查仍会删除一次性解包目录。
 
@@ -95,7 +95,7 @@ CI 将已通过检查的全部 NSIS 载荷保留到 `RUNNER_TEMP` 下的预先�
 
 该检查不会运行安装器，只证明最终压缩包中存在与本次输入一致的主程序、FFmpeg 和全部声明的合规文件；它不证明安装、升级、卸载、WebView2 引导或应用运行行为。下面的干净虚拟机矩阵仍是发布必需证据，不能由静态解包替代。
 
-`release/public-release-policy.json` 与 `scripts/release/public-release-preflight.ps1` 是整体公开发布预检。它覆盖项目许可/EULA、第三方材料、品牌和图标分发范围、publisher/identifier、Riot/腾讯声明、FFmpeg、代码签名/时间戳、干净 VM、updater 决策和数据安全证据，并输出稳定 blocker code。审批字段必须是真正的 JSON Boolean。干净 VM 与数据安全 evidence manifest 必须使用 schema v1、绑定本次 40 位 release commit、完整覆盖固定场景/检查集合，并让每项证据文件通过 SHA-256 复核。内部 workflow 要求该预检保持 `blocked`；bundle gate 通过本身永远不是整体公开发布批准。
+`release/public-release-policy.json` 与 `scripts/release/public-release-preflight.ps1` 是整体公开发布预检。它覆盖项目许可/是否另设 EULA 的决定、第三方材料、品牌和图标分发范围、publisher/identifier、Riot/腾讯声明、FFmpeg、代码签名/时间戳、干净 VM、updater 决策和数据安全证据，并输出稳定 blocker code。审批字段必须是真正的 JSON Boolean。项目自有代码已选择 MIT，当前明确不另设重复 EULA；这不会放宽第三方或品牌门禁。干净 VM 与数据安全 evidence manifest 必须使用 schema v1、绑定本次 40 位 release commit、完整覆盖固定场景/检查集合，并让每项证据文件通过 SHA-256 复核。内部 workflow 要求该预检保持 `blocked`；bundle gate 通过本身永远不是整体公开发布批准。
 
 若既有代码尚未达到严格 Clippy 零告警，应记录实际告警并先修复，不能把跳过检查变成公开发布惯例。
 
@@ -151,7 +151,7 @@ Windows 上 Tauri 通过 Known Folder API 解析应用数据目录；仅在子�
 以下内容必须由项目负责人或法律/发布负责人提供，仓库不能自行猜测：
 
 - 真实 publisher/法律主体和稳定 identifier；
-- 项目许可证、EULA（若需要）及第三方声明；
+- 第三方声明及其人工审核；项目自有代码已选择 MIT，并记录不另设 EULA；
 - 正式品牌图标和安装器视觉资产；
 - FFmpeg 二进制来源、许可证审核、SBOM 与源代码镜像/提供方式；
 - Authenticode 证书、签名服务和可信时间戳策略；

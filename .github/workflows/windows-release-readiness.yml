@@ -139,6 +139,8 @@ jobs:
           $requiredPayloads = @(
             'valorant-highlight-manager.exe',
             'bin\ffmpeg.exe',
+            'licenses\project\LICENSE.txt',
+            'licenses\project\LICENSE-SCOPE.txt',
             'licenses\ffmpeg\COPYING.LGPLv3.txt',
             'licenses\ffmpeg\COPYING.GPLv3.txt',
             'licenses\ffmpeg\BUILD-INFO.json',

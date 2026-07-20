@@ -176,8 +176,9 @@
 - [x] 配置 NSIS current-user 内部 RC、禁止降级、显式 WebView2 策略和简中/英文安装语言。
 - [x] 增加 FFmpeg 准备/验证、bundle 静态检查、安全启动烟测和手工 release-readiness workflow；公开模式默认 fail closed。
 - [x] 增加整体公开发布 policy/preflight，覆盖许可、品牌、publisher、签名/时间戳、VM、updater 和数据安全，并输出稳定 blocker code。
+- [x] 项目自有代码选择 MIT，npm/Cargo/根许可文本一致，并记录不另设重复 EULA。
 - [x] 加入 Tauri 单实例保护，第二次启动只恢复/显示/聚焦原窗口；发布烟测保留 PID、窗口和 Job 交接证据。
-- [ ] 使用正式 publisher、品牌、项目许可和 Authenticode 在一次性 Windows VM 完成安装/升级/卸载。
+- [ ] 使用正式 publisher、品牌和 Authenticode 在一次性 Windows VM 完成安装/升级/卸载。
 - [ ] 实现自动更新端点、签名密钥、最小权限 UI 和失败/回滚策略。
 - [x] 增加 Windows 发布说明、内部 RC 边界和干净机器回归清单。
 

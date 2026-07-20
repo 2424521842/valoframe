@@ -1668,6 +1668,15 @@ $nsisScript = Get-CanonicalExistingPath -LiteralPath $NsisScriptPath -RequireDir
 $resourceRoot = Get-CanonicalExistingPath -LiteralPath $ResourceDirectory -RequireDirectory $true -Description 'resource directory'
 $manifestPath = Get-CanonicalExistingPath -LiteralPath $FfmpegManifestPath -RequireDirectory $false -Description 'FFmpeg manifest'
 $repositoryRoot = Get-CanonicalExistingPath -LiteralPath (Join-Path $PSScriptRoot '..\..') -RequireDirectory $true -Description 'repository root'
+$projectLicense = Get-CanonicalExistingPath -LiteralPath (Join-Path $repositoryRoot 'LICENSE') -RequireDirectory $false -Description 'project MIT license'
+$projectLicenseRelativePath = 'licenses\project\LICENSE.txt'
+$projectLicenseScope = Get-CanonicalExistingPath -LiteralPath (Join-Path $repositoryRoot 'LICENSE-SCOPE.txt') -RequireDirectory $false -Description 'project license scope'
+$projectLicenseScopeRelativePath = 'licenses\project\LICENSE-SCOPE.txt'
+$releasePolicyPath = Get-CanonicalExistingPath -LiteralPath $PublicReleasePolicyPath -RequireDirectory $false -Description 'public release policy'
+$approvedReleasePolicyPath = Get-CanonicalExistingPath -LiteralPath (Join-Path $repositoryRoot 'release\public-release-policy.json') -RequireDirectory $false -Description 'approved public release policy'
+if (-not [string]::Equals($releasePolicyPath, $approvedReleasePolicyPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'PublicReleasePolicyPath must resolve to the repository approved release/public-release-policy.json.'
+}
 $verifiedPayloadOutput = Resolve-VerifiedPayloadOutput -ConfiguredPath $VerifiedPayloadOutputDirectory
 
 $resourceRootItem = Get-Item -LiteralPath $resourceRoot -Force
@@ -1678,7 +1687,10 @@ foreach ($inputFile in @(
         [ordered]@{ path = $mainExecutable; description = 'main executable' },
         [ordered]@{ path = $nsisBundle; description = 'NSIS installer' },
         [ordered]@{ path = $nsisScript; description = 'generated installer.nsi' },
-        [ordered]@{ path = $manifestPath; description = 'FFmpeg manifest' }
+        [ordered]@{ path = $manifestPath; description = 'FFmpeg manifest' },
+        [ordered]@{ path = $projectLicense; description = 'project MIT license' },
+        [ordered]@{ path = $projectLicenseScope; description = 'project license scope' },
+        [ordered]@{ path = $releasePolicyPath; description = 'public release policy' }
     )) {
     $inputItem = Get-Item -LiteralPath $inputFile.path -Force
     if (($inputItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -1853,6 +1865,8 @@ if (-not [string]::Equals($ffmpegHash, $expectedFfmpegHash, [System.StringCompar
 $licenseDeclarations = [System.Collections.Generic.Dictionary[string, object]]::new(
     [System.StringComparer]::OrdinalIgnoreCase
 )
+$licenseDeclarations[$projectLicenseRelativePath] = $null
+$licenseDeclarations[$projectLicenseScopeRelativePath] = $null
 foreach ($relativePath in $LicenseRelativePaths) {
     if ([string]::IsNullOrWhiteSpace($relativePath)) {
         throw 'LicenseRelativePaths must not contain empty values.'
@@ -1876,7 +1890,7 @@ if ($null -ne $manifestLicenseFilesProperty -and $null -ne $manifestLicenseFiles
 
 $licenseReports = [System.Collections.Generic.List[object]]::new()
 foreach ($declaration in $licenseDeclarations.GetEnumerator()) {
-    $licensePath = Get-ResourceFile -Root $resourceRoot -RelativePath $declaration.Key -Description "bundled FFmpeg license file '$($declaration.Key)'"
+    $licensePath = Get-ResourceFile -Root $resourceRoot -RelativePath $declaration.Key -Description "bundled license file '$($declaration.Key)'"
     $licenseItem = Get-Item -LiteralPath $licensePath -Force
     $licenseHash = Get-Sha256 -LiteralPath $licensePath
     if ($null -ne $declaration.Value) {
@@ -1899,6 +1913,56 @@ foreach ($declaration in $licenseDeclarations.GetEnumerator()) {
             sizeBytes = $licenseItem.Length
             sha256 = $licenseHash
         })
+}
+
+$bundledProjectLicensePath = Get-ResourceFile -Root $resourceRoot -RelativePath $projectLicenseRelativePath -Description 'bundled project MIT license'
+$projectLicenseItem = Get-Item -LiteralPath $projectLicense -Force
+$bundledProjectLicenseItem = Get-Item -LiteralPath $bundledProjectLicensePath -Force
+$projectLicenseHash = Get-Sha256 -LiteralPath $projectLicense
+$bundledProjectLicenseHash = Get-Sha256 -LiteralPath $bundledProjectLicensePath
+if ($projectLicenseItem.Length -ne $bundledProjectLicenseItem.Length -or
+    -not [string]::Equals($projectLicenseHash, $bundledProjectLicenseHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Bundled project MIT license must exactly match the repository root LICENSE.'
+}
+$projectLicenseText = Get-Content -Raw -LiteralPath $bundledProjectLicensePath -Encoding UTF8
+if ($projectLicenseText -notmatch '(?m)^MIT License\r?$' -or
+    $projectLicenseText -notmatch 'Permission is hereby granted, free of charge' -or
+    $projectLicenseText -notmatch 'Copyright \(c\) 2026 VALOFRAME Contributors') {
+    throw 'Bundled project license does not contain the approved MIT license markers.'
+}
+$bundledProjectLicenseScopePath = Get-ResourceFile -Root $resourceRoot -RelativePath $projectLicenseScopeRelativePath -Description 'bundled project license scope'
+$projectLicenseScopeItem = Get-Item -LiteralPath $projectLicenseScope -Force
+$bundledProjectLicenseScopeItem = Get-Item -LiteralPath $bundledProjectLicenseScopePath -Force
+$projectLicenseScopeHash = Get-Sha256 -LiteralPath $projectLicenseScope
+$bundledProjectLicenseScopeHash = Get-Sha256 -LiteralPath $bundledProjectLicenseScopePath
+if ($projectLicenseScopeItem.Length -ne $bundledProjectLicenseScopeItem.Length -or
+    -not [string]::Equals($projectLicenseScopeHash, $bundledProjectLicenseScopeHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Bundled project license scope must exactly match the repository root LICENSE-SCOPE.txt.'
+}
+$projectLicenseScopeText = Get-Content -Raw -LiteralPath $bundledProjectLicenseScopePath -Encoding UTF8
+if ($projectLicenseScopeText -notmatch '(?m)^VALOFRAME LICENSING SCOPE\r?$' -or
+    $projectLicenseScopeText -notmatch 'are not licensed under the\s+MIT License' -or
+    $projectLicenseScopeText -notmatch 'third-party material') {
+    throw 'Bundled project license scope does not contain the approved exclusion markers.'
+}
+$releasePolicy = Get-Content -Raw -LiteralPath $releasePolicyPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
+$projectLicensePolicy = Get-RequiredJsonProperty -Object $releasePolicy -Name 'projectLicense' -Context 'public release policy'
+$projectLicenseApproved = Get-RequiredJsonProperty -Object $projectLicensePolicy -Name 'approved' -Context 'public release project license'
+if ($projectLicenseApproved -isnot [bool] -or -not $projectLicenseApproved) {
+    throw 'Public release project license must be explicitly approved.'
+}
+if ((Get-RequiredJsonString -Object $projectLicensePolicy -Name 'spdxExpression' -Context 'public release project license') -cne 'MIT' -or
+    (Get-RequiredJsonString -Object $projectLicensePolicy -Name 'file' -Context 'public release project license') -cne 'LICENSE' -or
+    (Get-RequiredJsonString -Object $projectLicensePolicy -Name 'scopeFile' -Context 'public release project license') -cne 'LICENSE-SCOPE.txt') {
+    throw 'Public release project license paths or SPDX expression are not the approved MIT values.'
+}
+$approvedProjectLicenseHash = Get-RequiredJsonString -Object $projectLicensePolicy -Name 'sha256' -Context 'public release project license'
+$approvedProjectLicenseScopeHash = Get-RequiredJsonString -Object $projectLicensePolicy -Name 'scopeSha256' -Context 'public release project license'
+Assert-Sha256Text -Value $approvedProjectLicenseHash -Description 'approved project MIT license hash'
+Assert-Sha256Text -Value $approvedProjectLicenseScopeHash -Description 'approved project license scope hash'
+if (-not [string]::Equals($projectLicenseHash, $approvedProjectLicenseHash, [System.StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals($projectLicenseScopeHash, $approvedProjectLicenseScopeHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Project license or scope bytes do not match the approved public release policy SHA-256.'
 }
 
 $copyingPath = Get-ResourceFile -Root $resourceRoot -RelativePath 'licenses\ffmpeg\COPYING.LGPLv3.txt' -Description 'bundled LGPL license'
@@ -1965,7 +2029,7 @@ $expectedPayload.Add([ordered]@{
     })
 foreach ($licenseReport in $licenseReports) {
     $relativePath = ([string] $licenseReport.relativePath).Replace('/', '\')
-    $payloadSource = Get-ResourceFile -Root $resourceRoot -RelativePath $relativePath -Description "required FFmpeg compliance payload '$relativePath'"
+    $payloadSource = Get-ResourceFile -Root $resourceRoot -RelativePath $relativePath -Description "required license payload '$relativePath'"
     $expectedPayload.Add([ordered]@{
             destination = $relativePath
             sourcePath = $payloadSource

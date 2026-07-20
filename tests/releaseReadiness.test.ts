@@ -6,7 +6,24 @@ import test from "node:test";
 type JsonObject = Record<string, unknown>;
 
 const packageJson = readJson("../package.json");
+const packageLock = readJson("../package-lock.json");
 const tauriConfig = readJson("../src-tauri/tauri.conf.json");
+const cargoManifest = readFileSync(
+  new URL("../src-tauri/Cargo.toml", import.meta.url),
+  "utf8",
+);
+const projectLicenseText = readFileSync(
+  new URL("../LICENSE", import.meta.url),
+  "utf8",
+);
+const projectLicenseScopeText = readFileSync(
+  new URL("../LICENSE-SCOPE.txt", import.meta.url),
+  "utf8",
+);
+const licensingDecision = readFileSync(
+  new URL("../docs/LICENSING.md", import.meta.url),
+  "utf8",
+);
 const ffmpegManifest = readJson("../third_party/ffmpeg/windows-x64.json");
 const ffmpegBuildInfo = readJson(
   "../src-tauri/resources/licenses/ffmpeg/BUILD-INFO.json",
@@ -68,7 +85,11 @@ test("Windows bundle policy is explicit and downgrade-safe", () => {
   const webviewInstallMode = objectAt(windows, "webviewInstallMode");
 
   assert.deepEqual(bundle.targets, ["nsis"]);
-  assert.deepEqual(bundle.resources, { "resources/": "" });
+  assert.deepEqual(bundle.resources, {
+    "resources/": "",
+    "../LICENSE": "licenses/project/LICENSE.txt",
+    "../LICENSE-SCOPE.txt": "licenses/project/LICENSE-SCOPE.txt",
+  });
   assert.equal(windows.allowDowngrades, false);
   assert.deepEqual(webviewInstallMode, {
     type: "downloadBootstrapper",
@@ -204,6 +225,44 @@ test("compliance evidence covers locked npm, Cargo, and FFmpeg inputs", () => {
   assert.match(bundleGateScript, /approved release generator/);
 });
 
+test("first-party licensing is consistently declared as MIT", () => {
+  assert.equal(packageJson.license, "MIT");
+  assert.equal(
+    objectAt(objectAt(packageLock, "packages"), "").license,
+    "MIT",
+  );
+  assert.match(cargoManifest, /^license = "MIT"$/m);
+  assert.match(projectLicenseText, /^MIT License$/m);
+  assert.match(projectLicenseText, /Copyright \(c\) 2026 VALOFRAME Contributors/);
+  assert.match(projectLicenseText, /Permission is hereby granted, free of charge/);
+
+  const projectLicense = objectAt(publicReleasePolicy, "projectLicense");
+  assert.equal(projectLicense.approved, true);
+  assert.equal(projectLicense.spdxExpression, "MIT");
+  assert.equal(projectLicense.file, "LICENSE");
+  assert.equal(
+    createHash("sha256").update(projectLicenseText).digest("hex"),
+    projectLicense.sha256,
+  );
+  assert.equal(projectLicense.scopeFile, "LICENSE-SCOPE.txt");
+  assert.equal(
+    createHash("sha256").update(projectLicenseScopeText).digest("hex"),
+    projectLicense.scopeSha256,
+  );
+  assert.equal(
+    projectLicense.approvalReference,
+    "docs/LICENSING.md#项目许可决定",
+  );
+
+  const eula = objectAt(publicReleasePolicy, "eula");
+  assert.equal(eula.required, false);
+  assert.equal(eula.approved, true);
+  assert.equal(eula.file, null);
+  assert.match(licensingDecision, /当前公开发布决定是不再另设一份重复的最终用户许可协议/);
+  assert.match(licensingDecision, /MIT 不会改变仓库中第三方材料原有的许可或权利归属/);
+  assert.match(projectLicenseScopeText, /are not licensed under the\nMIT License/);
+});
+
 test("public release preflight covers every non-bundle approval domain", () => {
   assert.equal(publicReleasePolicy.schemaVersion, 1);
   assert.equal(publicReleasePolicy.releaseMode, "public");
@@ -214,6 +273,9 @@ test("public release preflight covers every non-bundle approval domain", () => {
 
   for (const code of [
     "PROJECT_LICENSE_APPROVAL_MISSING",
+    "PROJECT_LICENSE_BUNDLE_MISSING",
+    "PROJECT_LICENSE_HASH_MISMATCH",
+    "PROJECT_LICENSE_SCOPE_MISSING",
     "EULA_APPROVAL_MISSING",
     "THIRD_PARTY_APPROVAL_MISSING",
     "BRAND_APPROVAL_MISSING",
@@ -238,6 +300,7 @@ test("public release preflight covers every non-bundle approval domain", () => {
   assert.match(publicReleasePreflight, /Get-EvidenceValidationError/);
   assert.match(publicReleasePreflight, /evidence artifact.*does not match its SHA-256/);
   assert.match(publicReleasePreflight, /sourceCommit does not match the release commit/);
+  assert.match(publicReleasePreflight, /separate-EULA requirement must be an explicit JSON Boolean decision/);
   assert.equal(
     objectAt(publicReleasePolicy, "authenticode").signtoolVerificationRequired,
     true,
@@ -336,6 +399,10 @@ test("bundle gate proves NSIS format and all shipped compliance payload files", 
   assert.match(bundleGateScript, /expectedCertificateThumbprint/);
   assert.match(bundleGateScript, /TimeStamperCertificate/);
   assert.match(bundleGateScript, /signtool verify \/pa \/all \/v/);
+  assert.match(bundleGateScript, /Bundled project MIT license must exactly match the repository root LICENSE/);
+  assert.match(bundleGateScript, /Bundled project license scope must exactly match the repository root LICENSE-SCOPE\.txt/);
+  assert.match(bundleGateScript, /Bundled project license does not contain the approved MIT license markers/);
+  assert.match(bundleGateScript, /Project license or scope bytes do not match the approved public release policy SHA-256/);
   assert.match(bundleGateScript, /VerifiedPayloadOutputDirectory/);
   assert.match(bundleGateScript, /Assert-VerifiedPayloadMatchesReport/);
   assert.match(bundleGateScript, /rootAndParentChainRecheckedAfterMove/);
@@ -346,6 +413,8 @@ test("bundle gate proves NSIS format and all shipped compliance payload files", 
 
   for (const destination of [
     "bin\\ffmpeg.exe",
+    "licenses\\project\\LICENSE.txt",
+    "licenses\\project\\LICENSE-SCOPE.txt",
     "licenses\\ffmpeg\\COPYING.LGPLv3.txt",
     "licenses\\ffmpeg\\COPYING.GPLv3.txt",
     "licenses\\ffmpeg\\BUILD-INFO.json",
@@ -362,6 +431,7 @@ test("bundle gate proves NSIS format and all shipped compliance payload files", 
   }
 
   assert.match(releaseWorkflow, /-NsisScriptPath \$nsisScripts\[0\]\.FullName/);
+  assert.match(releaseWorkflow, /licenses\\project\\LICENSE-SCOPE\.txt/);
   assert.match(releaseWorkflow, /-NsisExtractorPath \$sevenZip/);
   assert.match(
     releaseWorkflow,

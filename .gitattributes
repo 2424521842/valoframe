@@ -11,6 +11,7 @@
 *.txt text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+LICENSE text eol=lf
 
 *.icns binary
 *.ico binary

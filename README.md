@@ -2,7 +2,7 @@
 
 > **非官方社区项目。** 瓦刻是在遵循 Riot Games [“Legal Jibber Jabber”政策](https://www.riotgames.com/en/legal)的前提下创建的免费工具。Riot Games 不认可或赞助本项目；本项目也与 Riot Games、腾讯及其关联公司不存在隶属、赞助或认可关系。VALORANT、《无畏契约》及相关名称、商标和游戏内容归其各自权利人所有。
 
-> **许可状态。** 本仓库目前未授予开源许可证；除另有声明的第三方材料外，默认保留全部权利。公开可见不等于允许复制、修改或再分发。项目许可仍是正式发布前的待确认项。
+> **许可状态。** 项目自有源代码和随附文档采用 [MIT License](LICENSE)。第三方依赖、FFmpeg、游戏内容及商标仍遵循各自条款和权利归属，详见[许可范围说明](docs/LICENSING.md)。
 
 `valorant-highlight-manager` 是“瓦刻（VALOFRAME）”的代码仓库。这是一款 Tauri 2 + React + TypeScript + Rust 桌面应用，用于在默认不改动原始文件的前提下索引和管理无畏契约国服高光素材；只有用户在应用回收站再次明确确认“永久删除”时，才会删除所选本地视频。
 
@@ -70,8 +70,8 @@ GitHub Actions 使用同一组门槛：Ubuntu 上执行 `npm ci`、`npm test` �
 
 ## 尚未完成
 
-- 锁定依赖的 SPDX/第三方材料生成器和最小自建 FFmpeg 候选链已经落地，但缺失许可证文本的受审 override、最小候选真实视频回归/长期源码镜像，以及项目许可、专利与法律审批尚未闭合，因此不能对外分发。
-- 正式 publisher/identifier/项目许可和品牌资产、Authenticode 签名、一次性 VM 的安装升级卸载、公开分发与自动更新。
+- 锁定依赖的 SPDX/第三方材料生成器和最小自建 FFmpeg 候选链已经落地，但缺失许可证文本的受审 override、最小候选真实视频回归/长期源码镜像，以及第三方、专利与法律审批尚未闭合，因此不能对外分发。
+- 正式 publisher/identifier 和品牌资产、Authenticode 签名、一次性 VM 的安装升级卸载、公开分发与自动更新。
 
 ## 明确不做
 
@@ -84,6 +84,8 @@ GitHub Actions 使用同一组门槛：Ubuntu 上执行 `npm ci`、`npm test` �
 
 ## 文档
 
+- [License](LICENSE)
+- [Licensing Scope](docs/LICENSING.md)
 - [PRD](docs/PRD.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Data Model](docs/DATA_MODEL.md)

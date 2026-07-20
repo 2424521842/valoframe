@@ -2,15 +2,19 @@
   "schemaVersion": 1,
   "releaseMode": "public",
   "projectLicense": {
-    "approved": false,
-    "spdxExpression": null,
-    "file": null,
-    "approvalReference": null
+    "approved": true,
+    "spdxExpression": "MIT",
+    "file": "LICENSE",
+    "sha256": "8af1ac5c320f356a77fc41190f889893cf1f6b91d9b85b2e0b1abff5e14167dd",
+    "scopeFile": "LICENSE-SCOPE.txt",
+    "scopeSha256": "ac42a28a0d39e952c93ef8a4f9bf586f18ff9974e28999ce471711ded1981f67",
+    "approvalReference": "docs/LICENSING.md#项目许可决定"
   },
   "eula": {
-    "approved": false,
+    "required": false,
+    "approved": true,
     "file": null,
-    "approvalReference": null
+    "approvalReference": "docs/LICENSING.md#项目许可决定"
   },
   "thirdPartyCompliance": {
     "approved": false,

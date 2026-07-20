@@ -3,6 +3,7 @@ name = "valorant-highlight-manager"
 version = "0.1.0"
 description = "VALOFRAME local VALORANT CN highlight asset manager"
 authors = ["VALOFRAME Contributors"]
+license = "MIT"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

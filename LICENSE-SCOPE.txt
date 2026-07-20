@@ -1,0 +1,37 @@
+VALOFRAME LICENSING SCOPE
+
+Effective date: 2026-07-20
+
+1. First-party software
+
+The source code and accompanying documentation created for VALOFRAME (瓦刻)
+are licensed under the MIT License in the repository root LICENSE file.
+No separate end-user license agreement is required for this first-party
+software at this time.
+
+2. Third-party software
+
+The MIT License does not relicense npm or Cargo dependencies, FFmpeg, or any
+other third-party material. Those components remain subject to their own
+licenses, notices, attribution requirements, and corresponding-source terms.
+The installed third-party license materials are provided separately under the
+licenses/ directory.
+
+3. Game names, trademarks, and content
+
+Riot Games, Tencent, VALORANT, 无畏契约, and related names, trademarks, and
+game content belong to their respective owners. The VALOFRAME MIT License does
+not grant rights in those materials or imply sponsorship, endorsement, or
+affiliation.
+
+4. VALOFRAME brand assets
+
+The artwork and brand assets tracked at src-tauri/icons/**,
+public/favicon.ico, and public/valoframe-mark.png are not licensed under the
+MIT License. Their inclusion in an official VALOFRAME source repository or
+distribution does not grant recipients trademark rights, permission to reuse
+the branding on derivative products, or permission to present a derivative as
+an official VALOFRAME release.
+
+Where a file or directory carries a separate license notice, that notice
+controls for that material.

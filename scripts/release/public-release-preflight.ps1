@@ -246,15 +246,78 @@ if (-not (Test-ApprovedReference -Section $policy.projectLicense) -or
     [string]::IsNullOrWhiteSpace([string] $policy.projectLicense.spdxExpression)) {
     Add-Blocker -Code 'PROJECT_LICENSE_APPROVAL_MISSING' -PolicyField 'projectLicense' -Message 'Project license choice and approval are incomplete.'
 }
-elseif ($null -eq (Resolve-RepositoryFile -Root $root -RelativePath ([string] $policy.projectLicense.file) -Description 'project license file' -Optional)) {
-    Add-Blocker -Code 'PROJECT_LICENSE_FILE_MISSING' -PolicyField 'projectLicense.file' -Message 'Approved project license file is missing.'
+else {
+    $projectLicenseFile = Resolve-RepositoryFile -Root $root -RelativePath ([string] $policy.projectLicense.file) -Description 'project license file' -Optional
+    if ($null -eq $projectLicenseFile) {
+        Add-Blocker -Code 'PROJECT_LICENSE_FILE_MISSING' -PolicyField 'projectLicense.file' -Message 'Approved project license file is missing.'
+    }
+    else {
+        $approvedLicenseHash = [string] $policy.projectLicense.sha256
+        $actualLicenseHash = (Get-FileHash -LiteralPath $projectLicenseFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($approvedLicenseHash -cnotmatch '^[0-9a-f]{64}$' -or $actualLicenseHash -cne $approvedLicenseHash) {
+            Add-Blocker -Code 'PROJECT_LICENSE_HASH_MISMATCH' -PolicyField 'projectLicense.sha256' -Message 'Project license bytes do not match the approved SHA-256.'
+        }
+    }
+    $projectLicenseScopeFile = Resolve-RepositoryFile -Root $root -RelativePath ([string] $policy.projectLicense.scopeFile) -Description 'project license scope file' -Optional
+    if ($null -eq $projectLicenseScopeFile) {
+        Add-Blocker -Code 'PROJECT_LICENSE_SCOPE_MISSING' -PolicyField 'projectLicense.scopeFile' -Message 'Project license scope and exclusions file is missing.'
+    }
+    else {
+        $approvedScopeHash = [string] $policy.projectLicense.scopeSha256
+        $actualScopeHash = (Get-FileHash -LiteralPath $projectLicenseScopeFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($approvedScopeHash -cnotmatch '^[0-9a-f]{64}$' -or $actualScopeHash -cne $approvedScopeHash) {
+            Add-Blocker -Code 'PROJECT_LICENSE_HASH_MISMATCH' -PolicyField 'projectLicense.scopeSha256' -Message 'Project license scope bytes do not match the approved SHA-256.'
+        }
+    }
+    $packageJsonPath = Resolve-RepositoryFile -Root $root -RelativePath 'package.json' -Description 'package manifest'
+    $packageJson = Get-Content -Raw -LiteralPath $packageJsonPath -Encoding UTF8 | ConvertFrom-Json -Depth 20
+    if ([string] $packageJson.license -cne [string] $policy.projectLicense.spdxExpression) {
+        Add-Blocker -Code 'PROJECT_LICENSE_APPROVAL_MISSING' -PolicyField 'projectLicense.spdxExpression' -Message 'package.json license does not match the approved SPDX expression.'
+    }
+    $cargoManifestPath = Resolve-RepositoryFile -Root $root -RelativePath 'src-tauri/Cargo.toml' -Description 'Cargo manifest'
+    $cargoManifestText = Get-Content -Raw -LiteralPath $cargoManifestPath -Encoding UTF8
+    $cargoLicensePattern = '(?m)^license\s*=\s*"' + [regex]::Escape([string] $policy.projectLicense.spdxExpression) + '"\s*$'
+    if ($cargoManifestText -cnotmatch $cargoLicensePattern) {
+        Add-Blocker -Code 'PROJECT_LICENSE_APPROVAL_MISSING' -PolicyField 'projectLicense.spdxExpression' -Message 'Cargo.toml license does not match the approved SPDX expression.'
+    }
+    $resourceMapProperty = $tauriConfig.bundle.PSObject.Properties['resources']
+    $licenseResourceProperty = if ($null -eq $resourceMapProperty -or $null -eq $resourceMapProperty.Value) {
+        $null
+    }
+    else {
+        $resourceMapProperty.Value.PSObject.Properties['../LICENSE']
+    }
+    if ($null -eq $licenseResourceProperty -or
+        $licenseResourceProperty.Value -isnot [string] -or
+        [string] $licenseResourceProperty.Value -cne 'licenses/project/LICENSE.txt') {
+        Add-Blocker -Code 'PROJECT_LICENSE_BUNDLE_MISSING' -PolicyField 'projectLicense.file' -Message 'The approved project license is not mapped into the Windows bundle.'
+    }
+    $scopeResourceProperty = if ($null -eq $resourceMapProperty -or $null -eq $resourceMapProperty.Value) {
+        $null
+    }
+    else {
+        $resourceMapProperty.Value.PSObject.Properties['../LICENSE-SCOPE.txt']
+    }
+    if ($null -eq $scopeResourceProperty -or
+        $scopeResourceProperty.Value -isnot [string] -or
+        [string] $scopeResourceProperty.Value -cne 'licenses/project/LICENSE-SCOPE.txt') {
+        Add-Blocker -Code 'PROJECT_LICENSE_BUNDLE_MISSING' -PolicyField 'projectLicense.scopeFile' -Message 'The project license scope file is not mapped into the Windows bundle.'
+    }
 }
 
-if (-not (Test-ApprovedReference -Section $policy.eula)) {
-    Add-Blocker -Code 'EULA_APPROVAL_MISSING' -PolicyField 'eula' -Message 'Public-distribution EULA approval is incomplete.'
+$eulaRequiredProperty = $policy.eula.PSObject.Properties['required']
+if ($null -eq $eulaRequiredProperty -or $eulaRequiredProperty.Value -isnot [bool]) {
+    Add-Blocker -Code 'EULA_APPROVAL_MISSING' -PolicyField 'eula.required' -Message 'The separate-EULA requirement must be an explicit JSON Boolean decision.'
 }
-elseif ($null -eq (Resolve-RepositoryFile -Root $root -RelativePath ([string] $policy.eula.file) -Description 'EULA file' -Optional)) {
-    Add-Blocker -Code 'EULA_FILE_MISSING' -PolicyField 'eula.file' -Message 'Approved EULA file is missing.'
+elseif (-not (Test-ApprovedReference -Section $policy.eula)) {
+    Add-Blocker -Code 'EULA_APPROVAL_MISSING' -PolicyField 'eula' -Message 'Public-distribution EULA approval or explicit no-separate-EULA decision is incomplete.'
+}
+elseif ($eulaRequiredProperty.Value -eq $true -and
+    $null -eq (Resolve-RepositoryFile -Root $root -RelativePath ([string] $policy.eula.file) -Description 'EULA file' -Optional)) {
+    Add-Blocker -Code 'EULA_FILE_MISSING' -PolicyField 'eula.file' -Message 'The approved EULA or governing distribution-license file is missing.'
+}
+elseif ($eulaRequiredProperty.Value -eq $false -and $null -ne $policy.eula.file) {
+    Add-Blocker -Code 'EULA_APPROVAL_MISSING' -PolicyField 'eula.file' -Message 'A no-separate-EULA decision must leave eula.file null.'
 }
 
 $compliance = $policy.thirdPartyCompliance
