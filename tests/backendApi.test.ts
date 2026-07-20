@@ -10,6 +10,7 @@ import {
   mapBackendTag,
   mediaPathForClipId,
   mergeClipsWithSources,
+  scanCommandErrorActiveJobId,
   toClipSummary,
 } from "../src/api/backend.ts";
 import type { BackendClip, BackendClipSummary, BackendSource, BackendTag, ScanSummary } from "../src/types.ts";
@@ -91,6 +92,12 @@ const backendTag: BackendTag = {
   name: "ACE",
   color: "red",
 };
+
+test("reads the active job id from an already-running command error", () => {
+  assert.equal(scanCommandErrorActiveJobId({ activeJobId: "scan-existing" }), "scan-existing");
+  assert.equal(scanCommandErrorActiveJobId({ activeJobId: null }), null);
+  assert.equal(scanCommandErrorActiveJobId({ jobId: "scan-failed" }), null);
+});
 
 test("maps backend clips into the frontend clip contract", () => {
   const clip = mergeClipsWithSources(

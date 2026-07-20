@@ -211,7 +211,11 @@ export function useClipDetailController({
   const invalidate = useCallback(() => {
     rawCacheRef.current.clear();
     cancelPending();
-  }, [cancelPending]);
+    const requestedClipId = clipIdRef.current;
+    if (activeRef.current && requestedClipId) {
+      void requestDetail(requestedClipId, true);
+    }
+  }, [cancelPending, requestDetail]);
 
   const getClip = useCallback((cachedClipId: string): ClipDetail | undefined => {
     const rawClip = rawCacheRef.current.get(cachedClipId);

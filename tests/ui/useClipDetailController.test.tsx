@@ -237,25 +237,36 @@ describe("useClipDetailController", () => {
     expect(readyClip(controller.result.current.state)?.thumbnailRevision).toBe("rev-2");
   });
 
-  it("invalidates pending work and removes deleted clips from the cache", async () => {
-    const pending = deferred<ClipDetail>();
-    mocks.getClipDetail.mockReturnValueOnce(pending.promise);
+  it("immediately reloads the active detail after invalidation and ignores stale work", async () => {
+    const staleRequest = deferred<ClipDetail>();
+    const refreshedRequest = deferred<ClipDetail>();
+    mocks.getClipDetail
+      .mockReturnValueOnce(staleRequest.promise)
+      .mockReturnValueOnce(refreshedRequest.promise);
     const controller = renderController();
     await waitFor(() => expect(controller.result.current.state.status).toBe("loading"));
 
     act(() => controller.result.current.invalidate());
-    expect(controller.result.current.state.status).toBe("idle");
-    await act(async () => {
-      pending.resolve(detail("a"));
-      await pending.promise;
-    });
-    expect(controller.result.current.state.status).toBe("idle");
+    expect(controller.result.current.state.status).toBe("loading");
+    await waitFor(() => expect(mocks.getClipDetail).toHaveBeenCalledTimes(2));
 
-    mocks.getClipDetail.mockResolvedValueOnce(detail("a"));
     await act(async () => {
-      expect(await controller.result.current.retry()).toBe(true);
+      staleRequest.resolve({ ...detail("a"), note: "stale note" });
+      await staleRequest.promise;
+    });
+    expect(controller.result.current.state.status).toBe("loading");
+
+    await act(async () => {
+      refreshedRequest.resolve({ ...detail("a"), note: "refreshed note" });
+      await refreshedRequest.promise;
     });
     expect(readyClipId(controller.result.current.state)).toBe("a");
+    expect(readyClip(controller.result.current.state)?.note).toBe("refreshed note");
+  });
+
+  it("removes deleted clips from the cache", async () => {
+    const controller = renderController();
+    await waitForReady(controller.result, "a");
 
     act(() => controller.result.current.removeClip("a"));
     expect(controller.result.current.state.status).toBe("idle");
@@ -263,7 +274,7 @@ describe("useClipDetailController", () => {
     await act(async () => {
       expect(await controller.result.current.retry()).toBe(true);
     });
-    expect(mocks.getClipDetail).toHaveBeenCalledTimes(3);
+    expect(mocks.getClipDetail).toHaveBeenCalledTimes(2);
   });
 });
 

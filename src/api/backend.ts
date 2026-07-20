@@ -1100,6 +1100,14 @@ export function scanCommandErrorJobId(error: unknown): string | null {
   return typeof jobId === "string" ? jobId : null;
 }
 
+export function scanCommandErrorActiveJobId(error: unknown): string | null {
+  if (typeof error !== "object" || error === null || !("activeJobId" in error)) {
+    return null;
+  }
+  const activeJobId = (error as { activeJobId?: unknown }).activeJobId;
+  return typeof activeJobId === "string" ? activeJobId : null;
+}
+
 function accountIdentityFromBackendClip(
   clip: BackendClip,
   sourceDisplayName: string,

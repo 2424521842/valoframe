@@ -33,6 +33,12 @@ vi.mock("../../src/api/backend", () => ({
   discoverAndScanFixedDrives: mocks.discoverAndScanFixedDrives,
   getScanStatus: mocks.getScanStatus,
   listenToScanProgress: mocks.listenToScanProgress,
+  scanCommandErrorActiveJobId: (error: unknown) => {
+    if (typeof error !== "object" || error === null || !("activeJobId" in error)) {
+      return null;
+    }
+    return typeof error.activeJobId === "string" ? error.activeJobId : null;
+  },
   scanCommandErrorCode: (error: unknown) =>
     typeof error === "object" && error !== null && "code" in error
       ? String(error.code)
@@ -161,6 +167,161 @@ describe("useScanController", () => {
     });
   });
 
+  it("keeps tracking a running job when progress arrives before the conflict response", async () => {
+    const scan = deferred<ScanJobResult<ScanSummary>>();
+    mocks.scanRoots.mockReturnValue(scan.promise);
+    const { result, refresh } = renderController();
+    let request!: Promise<void>;
+
+    await waitFor(() => expect(mocks.listeners.size).toBe(1));
+    act(() => {
+      request = result.current.startScan();
+      emitProgress(progress("scan-existing", "冲突响应前的进度"));
+    });
+
+    await act(async () => {
+      scan.reject(alreadyRunningError("scan-existing"));
+      await request;
+    });
+
+    expect(result.current.isScanning).toBe(true);
+    expect(result.current.activeJobId).toBe("scan-existing");
+    expect(result.current.progress?.message).toBe("冲突响应前的进度");
+    expect(refresh).not.toHaveBeenCalled();
+
+    act(() => {
+      emitProgress(progress("scan-existing", "冲突后的后续进度"));
+      emitProgress(terminalScanProgress("scan-existing", "completed", "后台扫描完成"));
+      emitProgress(terminalScanProgress("scan-existing", "completed", "重复的终态事件"));
+    });
+
+    await waitFor(() => expect(result.current.isScanning).toBe(false));
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe("completed");
+    expect(result.current.errorMessage).toBeNull();
+  });
+
+  it("settles an already-running job from status recovery when no later event arrives", async () => {
+    mocks.isTauri = true;
+    mocks.scanRoots.mockRejectedValueOnce(alreadyRunningError("scan-recovered"));
+    mocks.getScanStatus.mockResolvedValue(runningStatus("scan-recovered"));
+    const { result, refresh } = renderController();
+
+    await act(async () => {
+      await result.current.startScan();
+    });
+
+    expect(result.current.isScanning).toBe(true);
+    expect(result.current.activeJobId).toBe("scan-recovered");
+
+    mocks.getScanStatus.mockResolvedValue(
+      terminalStatus("scan-recovered", "completed", "后台扫描完成"),
+    );
+
+    await waitFor(() => expect(result.current.isScanning).toBe(false), { timeout: 1_500 });
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      emitProgress(terminalScanProgress("scan-recovered", "completed", "迟到的终态事件"));
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let late running progress overwrite a recovered terminal state", async () => {
+    mocks.isTauri = true;
+    mocks.scanRoots.mockRejectedValueOnce(alreadyRunningError("scan-recovered"));
+    mocks.getScanStatus.mockResolvedValue(runningStatus("scan-recovered"));
+    const refreshResult = deferred<boolean>();
+    const { result, refresh } = renderController();
+    refresh.mockReturnValue(refreshResult.promise);
+
+    await act(async () => {
+      await result.current.startScan();
+    });
+    mocks.getScanStatus.mockResolvedValue(
+      terminalStatus("scan-recovered", "completed", "后台扫描完成"),
+    );
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1), { timeout: 1_500 });
+
+    act(() => {
+      emitProgress(progress("scan-recovered", "迟到的运行中事件"));
+    });
+    expect(result.current.status).toBe("completed");
+    expect(result.current.progress?.terminal).toBe(true);
+
+    await act(async () => {
+      refreshResult.resolve(true);
+      await refreshResult.promise;
+    });
+    await waitFor(() => expect(result.current.isScanning).toBe(false));
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves an in-flight cancellation while adopting a conflicting job", async () => {
+    const scan = deferred<ScanJobResult<ScanSummary>>();
+    const cancellation = deferred<CancelScanResult>();
+    mocks.scanRoots.mockReturnValue(scan.promise);
+    mocks.cancelScan.mockReturnValue(cancellation.promise);
+    const { result, refresh } = renderController();
+    let scanRequest!: Promise<void>;
+    let cancelRequest!: Promise<void>;
+
+    await waitFor(() => expect(mocks.listeners.size).toBe(1));
+    act(() => {
+      scanRequest = result.current.startScan();
+      emitProgress(progress("scan-existing", "已有任务正在扫描"));
+      cancelRequest = result.current.cancelScan();
+    });
+    expect(mocks.cancelScan).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      scan.reject(alreadyRunningError("scan-existing"));
+      await scanRequest;
+    });
+    act(() => {
+      emitProgress(progress("scan-existing", "迟到的运行中事件"));
+      void result.current.cancelScan();
+    });
+    expect(result.current.status).toBe("cancelling");
+    expect(mocks.cancelScan).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      cancellation.resolve(cancelResult("scan-existing"));
+      await cancelRequest;
+    });
+    act(() => {
+      emitProgress(terminalScanProgress("scan-existing", "cancelled", "后台扫描已取消"));
+    });
+    await waitFor(() => expect(result.current.isScanning).toBe(false));
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps cancellation monotonic when an adopted job has no progress snapshot", async () => {
+    mocks.scanRoots.mockRejectedValueOnce(alreadyRunningError("scan-existing"));
+    const { result } = renderController();
+
+    await act(async () => {
+      await result.current.startScan();
+    });
+    expect(result.current.activeJobId).toBe("scan-existing");
+    expect(result.current.progress).toBeNull();
+
+    await act(async () => {
+      await result.current.cancelScan();
+    });
+    act(() => {
+      emitProgress(progress("scan-existing", "迟到的运行中事件"));
+      void result.current.cancelScan();
+    });
+    expect(result.current.status).toBe("cancelling");
+    expect(mocks.cancelScan).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      emitProgress(terminalScanProgress("scan-existing", "cancelled", "后台扫描已取消"));
+    });
+    await waitFor(() => expect(result.current.isScanning).toBe(false));
+  });
+
   it("enters cancelling and cancels only the current job", async () => {
     const scan = deferred<ScanJobResult<ScanSummary>>();
     const cancellation = deferred<CancelScanResult>();
@@ -223,7 +384,7 @@ describe("useScanController", () => {
 function renderController(reactStrictMode = false) {
   const refresh = vi.fn(async () => true);
   const notify = vi.fn();
-  return renderHook(
+  const controller = renderHook(
     () => useScanController({
       sourcePaths: ["D:\\ArchiveA", "D:\\ArchiveB"],
       refresh,
@@ -231,6 +392,7 @@ function renderController(reactStrictMode = false) {
     }),
     { reactStrictMode },
   );
+  return { ...controller, refresh, notify };
 }
 
 function summary(): ScanSummary {
@@ -305,6 +467,46 @@ function runningStatus(jobId: string): ScanStatus {
     terminal: false,
     status: "running",
     message: "已恢复扫描状态",
+  };
+}
+
+function terminalStatus(
+  jobId: string,
+  status: "completed" | "partial" | "cancelled" | "failed",
+  message: string,
+): ScanStatus {
+  return {
+    jobId,
+    phase: status,
+    currentRoot: "D:\\ArchiveA",
+    source: null,
+    processed: 2,
+    total: 2,
+    terminal: true,
+    status,
+    message,
+  };
+}
+
+function terminalScanProgress(
+  jobId: string,
+  status: "completed" | "partial" | "cancelled" | "failed",
+  message: string,
+): ScanProgress {
+  return {
+    ...progress(jobId, message),
+    phase: status,
+    processed: 2,
+    terminal: true,
+    status,
+  };
+}
+
+function alreadyRunningError(jobId: string) {
+  return {
+    code: "already-running",
+    message: `已有扫描任务正在运行：${jobId}`,
+    activeJobId: jobId,
   };
 }
 

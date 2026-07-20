@@ -36,6 +36,7 @@ import {
 import { useClipDetailController } from "./hooks/useClipDetailController";
 import { useClipMutationController } from "./hooks/useClipMutationController";
 import { useLibraryFacetsController } from "./hooks/useLibraryFacetsController";
+import { useLocalDay } from "./hooks/useLocalDay";
 import { useScanController } from "./hooks/useScanController";
 import { useTagController } from "./hooks/useTagController";
 import { useThumbnailController } from "./hooks/useThumbnailController";
@@ -126,9 +127,10 @@ function App() {
   const hasSidebarOverlay = isSidebarOverlay && isSidebarOpen;
 
   const effectiveDatePreset = libraryMode === "today" ? "today" : datePreset;
+  const localDay = useLocalDay();
   const filterDateRange = useMemo(
-    () => dateRangeForPreset(effectiveDatePreset),
-    [effectiveDatePreset],
+    () => dateRangeForPreset(effectiveDatePreset, localDay),
+    [effectiveDatePreset, localDay],
   );
   const productionListQuery = useMemo(
     () => buildClipListQuery({

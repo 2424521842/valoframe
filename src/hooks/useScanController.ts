@@ -6,6 +6,7 @@ import {
   discoverAndScanFixedDrives,
   getScanStatus,
   listenToScanProgress,
+  scanCommandErrorActiveJobId,
   scanCommandErrorCode,
   scanCommandErrorJobId,
   scanDefaultAclosDir,
@@ -69,6 +70,9 @@ export function useScanController({
   const cancelRequestActiveRef = useRef(false);
   const activeJobIdRef = useRef<string | null>(null);
   const statusRef = useRef<ScanJobStatus>("idle");
+  const latestProgressRef = useRef<ScanProgress | null>(null);
+  const trackingConflictingJobRef = useRef(false);
+  const finishingConflictingJobRef = useRef<string | null>(null);
   const staleJobIdsRef = useRef(new Set<string>());
   const sourcePathsRef = useRef<readonly string[]>(sourcePaths);
   const refreshRef = useRef(refresh);
@@ -127,6 +131,9 @@ export function useScanController({
     cancelRequestActiveRef.current = false;
     activeJobIdRef.current = null;
     statusRef.current = "running";
+    latestProgressRef.current = null;
+    trackingConflictingJobRef.current = false;
+    finishingConflictingJobRef.current = null;
     if (mountedRef.current) {
       setActiveJobId(null);
       setIsScanning(true);
@@ -155,11 +162,121 @@ export function useScanController({
     activeJobIdRef.current = null;
     scanRequestActiveRef.current = false;
     cancelRequestActiveRef.current = false;
+    trackingConflictingJobRef.current = false;
+    finishingConflictingJobRef.current = null;
     if (mountedRef.current) {
       setActiveJobId(null);
       setIsScanning(false);
     }
   }, []);
+
+  const publishScanTerminalOutcome = useCallback((
+    nextStatus: ScanJobStatus,
+    scanSummary: ScanSummary | null,
+    terminalMessage: string,
+  ) => {
+    if (nextStatus === "completed") {
+      setErrorMessage(null);
+      publish({
+        kind: "success",
+        message: scanSummary ? scanActivityMessage(scanSummary) : "扫描完成，素材索引已刷新",
+      });
+    } else if (nextStatus === "partial") {
+      setErrorMessage(`扫描部分完成：${scanSummary?.errors[0] ?? terminalMessage}`);
+      publish({ kind: "warning", message: "扫描部分完成，素材索引已刷新" });
+    } else if (nextStatus === "cancelled") {
+      setErrorMessage("扫描已取消；取消前已安全写入的索引已保留。");
+      publish({ kind: "warning", message: "扫描已取消，素材索引已刷新" });
+    } else {
+      setErrorMessage(`扫描失败：${terminalMessage}`);
+      publish({ kind: "error", message: "扫描失败，素材索引已刷新" });
+    }
+  }, [publish]);
+
+  const finishConflictingJob = useCallback(async (terminalProgress: ScanProgress) => {
+    const jobId = terminalProgress.jobId;
+    if (
+      !trackingConflictingJobRef.current ||
+      finishingConflictingJobRef.current ||
+      (activeJobIdRef.current && activeJobIdRef.current !== jobId)
+    ) {
+      return;
+    }
+
+    finishingConflictingJobRef.current = jobId;
+    activeJobIdRef.current = jobId;
+    statusRef.current = terminalProgress.status;
+    latestProgressRef.current = terminalProgress;
+    if (mountedRef.current) {
+      setActiveJobId(jobId);
+      setStatus(terminalProgress.status);
+      setProgress(terminalProgress);
+    }
+
+    try {
+      const refreshed = await refreshRef.current();
+      if (!mountedRef.current) {
+        return;
+      }
+
+      if (!refreshed) {
+        setErrorMessage(`${scanStatusLabel(terminalProgress.status)}，但刷新素材列表失败`);
+        publish({
+          kind: "warning",
+          message: `${scanStatusLabel(terminalProgress.status)}，但刷新素材列表失败`,
+        });
+      } else {
+        publishScanTerminalOutcome(
+          terminalProgress.status,
+          null,
+          terminalProgress.message,
+        );
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setErrorMessage(`扫描已结束，但刷新素材列表失败：${commandErrorMessage(error)}`);
+        publish({ kind: "error", message: "扫描已结束，但刷新素材列表失败" });
+      }
+    } finally {
+      if (
+        trackingConflictingJobRef.current &&
+        finishingConflictingJobRef.current === jobId
+      ) {
+        finishRequest();
+      }
+    }
+  }, [finishRequest, publish, publishScanTerminalOutcome]);
+
+  const trackConflictingJob = useCallback((error: unknown) => {
+    const conflictJobId = scanCommandErrorActiveJobId(error)
+      ?? scanCommandErrorJobId(error)
+      ?? activeJobIdRef.current;
+    const observedProgress = latestProgressRef.current;
+
+    trackingConflictingJobRef.current = true;
+    finishingConflictingJobRef.current = null;
+    if (conflictJobId) {
+      staleJobIdsRef.current.delete(conflictJobId);
+      activeJobIdRef.current = conflictJobId;
+      if (observedProgress?.jobId !== conflictJobId) {
+        latestProgressRef.current = null;
+      }
+      if (mountedRef.current) {
+        setActiveJobId(conflictJobId);
+        if (observedProgress?.jobId !== conflictJobId) {
+          setProgress(null);
+          updateStatus("running");
+        }
+      }
+    }
+
+    if (
+      observedProgress?.terminal &&
+      (!conflictJobId || observedProgress.jobId === conflictJobId)
+    ) {
+      void finishConflictingJob(observedProgress);
+    }
+  }, [finishConflictingJob, updateStatus]);
 
   const applyTerminalResult = useCallback((
     response: ScanJobResult<unknown>,
@@ -170,13 +287,17 @@ export function useScanController({
     if (scanSummary) {
       setSummary(scanSummary);
     }
-    setProgress((current) => terminalProgress(
-      response.jobId,
-      response.status,
-      response.message,
-      scanSummary,
-      current,
-    ));
+    setProgress((current) => {
+      const nextProgress = terminalProgress(
+        response.jobId,
+        response.status,
+        response.message,
+        scanSummary,
+        current,
+      );
+      latestProgressRef.current = nextProgress;
+      return nextProgress;
+    });
   }, [rememberJob, updateStatus]);
 
   useEffect(() => {
@@ -188,6 +309,19 @@ export function useScanController({
         return;
       }
       if (staleJobIdsRef.current.has(nextProgress.jobId)) {
+        return;
+      }
+
+      const latestProgress = latestProgressRef.current;
+      if (
+        (latestProgress?.jobId === nextProgress.jobId && latestProgress.terminal) ||
+        (
+          activeJobIdRef.current === nextProgress.jobId &&
+          cancelRequestActiveRef.current &&
+          statusRef.current === "cancelling" &&
+          nextProgress.status === "running"
+        )
+      ) {
         return;
       }
 
@@ -204,9 +338,14 @@ export function useScanController({
       }
 
       statusRef.current = nextProgress.status;
+      latestProgressRef.current = nextProgress;
       setStatus(nextProgress.status);
       setProgress(nextProgress);
       publish({ kind: "progress", message: nextProgress.message });
+
+      if (nextProgress.terminal && trackingConflictingJobRef.current) {
+        void finishConflictingJob(nextProgress);
+      }
     };
 
     void listenToScanProgress(handleProgress)
@@ -231,7 +370,7 @@ export function useScanController({
       unlisten?.();
       unlisten = null;
     };
-  }, [publish]);
+  }, [finishConflictingJob, publish]);
 
   useEffect(() => {
     if (!isScanning || !isTauri()) {
@@ -244,8 +383,8 @@ export function useScanController({
       if (
         disposed ||
         requestPending ||
-        activeJobIdRef.current ||
-        !scanRequestActiveRef.current
+        !scanRequestActiveRef.current ||
+        (activeJobIdRef.current && !trackingConflictingJobRef.current)
       ) {
         return;
       }
@@ -257,11 +396,25 @@ export function useScanController({
           return;
         }
 
+        const trackedJobId = activeJobIdRef.current;
+        const nextProgress = progressFromRecoveredStatus(
+          recoveredStatus,
+          latestProgressRef.current,
+        );
+        if (recoveredStatus.terminal && trackingConflictingJobRef.current) {
+          void finishConflictingJob(nextProgress);
+          return;
+        }
+        if (trackedJobId) {
+          return;
+        }
+
         activeJobIdRef.current = recoveredStatus.jobId;
+        latestProgressRef.current = nextProgress;
         setActiveJobId(recoveredStatus.jobId);
         statusRef.current = recoveredStatus.status;
         setStatus(recoveredStatus.status);
-        setProgress((current) => progressFromRecoveredStatus(recoveredStatus, current));
+        setProgress(nextProgress);
         publish({ kind: "progress", message: recoveredStatus.message });
       } catch {
         // Progress events remain the primary path; polling only repairs a missed first event.
@@ -278,8 +431,13 @@ export function useScanController({
       mountedRef.current &&
       scanRequestActiveRef.current &&
       Boolean(recoveredStatus.jobId) &&
+      (!activeJobIdRef.current || activeJobIdRef.current === recoveredStatus.jobId) &&
       !staleJobIdsRef.current.has(recoveredStatus.jobId ?? "") &&
-      (recoveredStatus.status === "running" || recoveredStatus.status === "cancelling")
+      (
+        recoveredStatus.status === "running" ||
+        recoveredStatus.status === "cancelling" ||
+        (trackingConflictingJobRef.current && recoveredStatus.terminal)
+      )
     );
 
     void recoverActiveJob();
@@ -291,13 +449,14 @@ export function useScanController({
       disposed = true;
       window.clearInterval(interval);
     };
-  }, [isScanning, publish]);
+  }, [finishConflictingJob, isScanning, publish]);
 
   const startScan = useCallback(async () => {
     const paths = [...sourcePathsRef.current];
     if (!beginRequest(`准备扫描 ${paths.length || 1} 个目录`)) {
       return;
     }
+    let keepTrackingConflictingJob = false;
 
     try {
       const response = paths.length === 0
@@ -321,32 +480,22 @@ export function useScanController({
         return;
       }
 
-      if (response.status === "completed" && scanSummary) {
-        setErrorMessage(null);
-        publish({ kind: "success", message: scanActivityMessage(scanSummary) });
-      } else if (response.status === "partial") {
-        setErrorMessage(`扫描部分完成：${scanSummary?.errors[0] ?? response.message}`);
-        publish({ kind: "warning", message: "扫描部分完成，素材索引已刷新" });
-      } else if (response.status === "cancelled") {
-        setErrorMessage("扫描已取消；取消前已安全写入的索引已保留。");
-        publish({ kind: "warning", message: "扫描已取消，素材索引已刷新" });
-      } else {
-        setErrorMessage(`扫描失败：${response.message}`);
-        publish({ kind: "error", message: "扫描失败，素材索引已刷新" });
-      }
+      publishScanTerminalOutcome(response.status, scanSummary, response.message);
     } catch (error) {
       if (!mountedRef.current) {
         return;
       }
-      const failedJobId = scanCommandErrorJobId(error);
-      if (failedJobId) {
-        rememberJob(failedJobId);
-      }
       const failureMessage = commandErrorMessage(error);
       if (scanCommandErrorCode(error) === "already-running") {
+        keepTrackingConflictingJob = true;
+        trackConflictingJob(error);
         setErrorMessage(`扫描互斥冲突：${failureMessage}`);
         publish({ kind: "warning", message: "已有扫描任务正在运行" });
       } else {
+        const failedJobId = scanCommandErrorJobId(error);
+        if (failedJobId) {
+          rememberJob(failedJobId);
+        }
         await refreshRef.current();
         if (!mountedRef.current) {
           return;
@@ -356,14 +505,26 @@ export function useScanController({
         publish({ kind: "error", message: "扫描失败，已刷新当前索引" });
       }
     } finally {
-      finishRequest();
+      if (!keepTrackingConflictingJob) {
+        finishRequest();
+      }
     }
-  }, [applyTerminalResult, beginRequest, finishRequest, publish, rememberJob, updateStatus]);
+  }, [
+    applyTerminalResult,
+    beginRequest,
+    finishRequest,
+    publish,
+    publishScanTerminalOutcome,
+    rememberJob,
+    trackConflictingJob,
+    updateStatus,
+  ]);
 
   const discoverAll = useCallback(async () => {
     if (!beginRequest("正在全电脑发现无畏时刻素材")) {
       return;
     }
+    let keepTrackingConflictingJob = false;
 
     try {
       const response = await discoverAndScanFixedDrives();
@@ -400,15 +561,17 @@ export function useScanController({
       if (!mountedRef.current) {
         return;
       }
-      const failedJobId = scanCommandErrorJobId(error);
-      if (failedJobId) {
-        rememberJob(failedJobId);
-      }
       const failureMessage = commandErrorMessage(error);
       if (scanCommandErrorCode(error) === "already-running") {
+        keepTrackingConflictingJob = true;
+        trackConflictingJob(error);
         setErrorMessage(`扫描互斥冲突：${failureMessage}`);
         publish({ kind: "warning", message: "已有扫描任务正在运行" });
       } else {
+        const failedJobId = scanCommandErrorJobId(error);
+        if (failedJobId) {
+          rememberJob(failedJobId);
+        }
         await refreshRef.current();
         if (!mountedRef.current) {
           return;
@@ -418,9 +581,19 @@ export function useScanController({
         publish({ kind: "error", message: "全电脑发现失败，已刷新当前索引" });
       }
     } finally {
-      finishRequest();
+      if (!keepTrackingConflictingJob) {
+        finishRequest();
+      }
     }
-  }, [applyTerminalResult, beginRequest, finishRequest, publish, rememberJob, updateStatus]);
+  }, [
+    applyTerminalResult,
+    beginRequest,
+    finishRequest,
+    publish,
+    rememberJob,
+    trackConflictingJob,
+    updateStatus,
+  ]);
 
   const cancelScan = useCallback(async () => {
     const jobId = activeJobIdRef.current;
@@ -430,14 +603,18 @@ export function useScanController({
 
     cancelRequestActiveRef.current = true;
     updateStatus("cancelling");
-    setProgress((current) => current?.jobId === jobId
-      ? {
-        ...current,
-        phase: "cancelling",
-        status: "cancelling",
-        message: "正在取消扫描",
-      }
-      : current);
+    setProgress((current) => {
+      const nextProgress: ScanProgress | null = current?.jobId === jobId
+        ? {
+          ...current,
+          phase: "cancelling",
+          status: "cancelling",
+          message: "正在取消扫描",
+        }
+        : current;
+      latestProgressRef.current = nextProgress;
+      return nextProgress;
+    });
     publish({ kind: "info", message: "正在取消扫描" });
     try {
       const result = await requestScanCancellation(jobId);

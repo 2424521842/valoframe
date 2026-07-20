@@ -93,6 +93,10 @@ struct ScanWorkResult<T> {
     status: ScanJobStatus,
     result: Option<T>,
     message: String,
+    /// Whether the work callback already committed this terminal state to `scan_runs`.
+    /// Scanner executions only return success after that commit; pre-scan cancellation is the
+    /// exceptional success path that still needs the outer fallback write.
+    scan_run_terminal_persisted: bool,
 }
 
 #[derive(Default)]
@@ -433,13 +437,7 @@ where
 
         match result {
             Ok(Ok(result)) => {
-                scanner::ensure_scan_run_terminal(
-                    &connection,
-                    &worker_job_id,
-                    &worker_root_hint,
-                    result.status.as_str(),
-                    &result.message,
-                )?;
+                ensure_scan_work_terminal(&connection, &worker_job_id, &worker_root_hint, &result)?;
                 Ok(result)
             }
             Ok(Err(error)) => {
@@ -507,6 +505,25 @@ where
     response
 }
 
+fn ensure_scan_work_terminal<T>(
+    connection: &Connection,
+    job_id: &str,
+    root_hint: &str,
+    result: &ScanWorkResult<T>,
+) -> Result<(), String> {
+    if result.scan_run_terminal_persisted {
+        return Ok(());
+    }
+
+    scanner::ensure_scan_run_terminal(
+        connection,
+        job_id,
+        root_hint,
+        result.status.as_str(),
+        &result.message,
+    )
+}
+
 fn scan_execution_work(execution: scanner::ScanExecution) -> ScanWorkResult<scanner::ScanSummary> {
     let status = match execution.status {
         scanner::ScanExecutionStatus::Completed => ScanJobStatus::Completed,
@@ -522,6 +539,7 @@ fn scan_execution_work(execution: scanner::ScanExecution) -> ScanWorkResult<scan
         status,
         result: Some(execution.summary),
         message,
+        scan_run_terminal_persisted: true,
     }
 }
 
@@ -599,6 +617,7 @@ fn discover_and_scan_roots_controlled(
             status: ScanJobStatus::Cancelled,
             result: None,
             message: "已取消全电脑发现".to_string(),
+            scan_run_terminal_persisted: false,
         });
     }
     if discovery.opened_drive_count == 0 {
@@ -650,6 +669,7 @@ fn discover_and_scan_roots_controlled(
             scan_summary,
         }),
         message,
+        scan_run_terminal_persisted: true,
     })
 }
 
@@ -769,23 +789,25 @@ mod tests {
         cell::Cell,
         fs,
         path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
         add_tag_to_clip_for_database, add_tag_to_clips_for_database, clip_id_from_media_request,
         clip_media_protocol_response, copy_clip_path_for_database, create_tag_for_database,
         delete_clips_permanently_for_database, delete_tag_for_database, discover_and_scan_roots,
-        emit_scan_progress_ignoring_failure, get_clip_detail_for_database,
-        get_clip_media_for_database, list_tags_for_database, open_clip_location_for_database,
-        parse_media_range, remove_clip_from_index_for_database, remove_tag_from_clip_for_database,
-        remove_tag_from_clips_for_database, set_clip_favorite_for_database,
-        set_clip_trashed_for_database, set_clips_favorite_for_database,
-        set_clips_trashed_for_database, update_clip_note_for_database, update_tag_for_database,
-        ByteRange, PingResponse, ScanCommandError, ScanEventCursor, MAX_MEDIA_CHUNK_BYTES,
+        emit_scan_progress_ignoring_failure, ensure_scan_work_terminal,
+        get_clip_detail_for_database, get_clip_media_for_database, list_tags_for_database,
+        open_clip_location_for_database, parse_media_range, remove_clip_from_index_for_database,
+        remove_tag_from_clip_for_database, remove_tag_from_clips_for_database,
+        set_clip_favorite_for_database, set_clip_trashed_for_database,
+        set_clips_favorite_for_database, set_clips_trashed_for_database,
+        update_clip_note_for_database, update_tag_for_database, ByteRange, PingResponse,
+        ScanCommandError, ScanEventCursor, ScanWorkResult, MAX_MEDIA_CHUNK_BYTES,
     };
     use crate::db::{self, ClipInput, SourceDirInput};
     use crate::scan_coordinator::{ScanJobStatus, ScanProgressEvent};
+    use crate::scanner::{self, ScanExecutionStatus, ScanSummary};
     use crate::thumbnail::MAX_THUMBNAIL_BYTES;
     use tauri::http::{
         header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, RANGE},
@@ -875,6 +897,105 @@ mod tests {
         });
 
         assert!(attempted.get());
+    }
+
+    #[test]
+    fn persisted_scan_work_skips_the_redundant_terminal_write() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("fixture root should be created");
+        let database_path = root.join("highlight-index.sqlite3");
+        db::migrate_database(&database_path).expect("database should migrate");
+        let connection = db::open_database(&database_path).expect("database should open");
+        connection
+            .busy_timeout(Duration::from_millis(1))
+            .expect("short busy timeout should configure");
+
+        let job_id = "scan-persisted-before-command-fallback";
+        let root_hint = root.display().to_string();
+        scanner::ensure_scan_run_started(&connection, job_id, &root_hint)
+            .expect("scan run should start");
+        let message = "Scan completed before the command fallback";
+        let mut summary = ScanSummary::empty(root_hint.clone());
+        summary.message = Some(message.to_string());
+        scanner::finalize_scan_run_for_job(
+            &connection,
+            job_id,
+            ScanExecutionStatus::Completed,
+            &summary,
+        )
+        .expect("scanner should persist its terminal result");
+
+        let blocker = db::open_database(&database_path).expect("blocking connection should open");
+        blocker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("blocking writer should acquire the database");
+        let redundant_write_error = scanner::ensure_scan_run_terminal(
+            &connection,
+            job_id,
+            &root_hint,
+            "completed",
+            message,
+        )
+        .expect_err("a redundant terminal write should contend with the blocking writer");
+        assert!(
+            redundant_write_error.contains("locked") || redundant_write_error.contains("busy"),
+            "unexpected SQLite contention error: {redundant_write_error}"
+        );
+
+        let result = ScanWorkResult {
+            status: ScanJobStatus::Completed,
+            result: Some(()),
+            message: message.to_string(),
+            scan_run_terminal_persisted: true,
+        };
+        ensure_scan_work_terminal(&connection, job_id, &root_hint, &result)
+            .expect("a persisted successful scan must not perform the redundant write");
+
+        blocker
+            .execute_batch("ROLLBACK")
+            .expect("blocking writer should roll back");
+        let (status, persisted_message): (String, String) = connection
+            .query_row(
+                "SELECT status, message FROM scan_runs WHERE job_id = ?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("persisted scan run should load");
+        assert_eq!(status, "completed");
+        assert_eq!(persisted_message, message);
+
+        drop(blocker);
+        drop(connection);
+        fs::remove_dir_all(root).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn unpersisted_scan_work_uses_the_terminal_fallback() {
+        let connection = rusqlite::Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        let job_id = "scan-cancelled-before-scanner-start";
+        let root_hint = "fixed drives";
+        scanner::ensure_scan_run_started(&connection, job_id, root_hint)
+            .expect("scan run should start");
+        let result = ScanWorkResult::<()> {
+            status: ScanJobStatus::Cancelled,
+            result: None,
+            message: "cancelled during discovery".to_string(),
+            scan_run_terminal_persisted: false,
+        };
+
+        ensure_scan_work_terminal(&connection, job_id, root_hint, &result)
+            .expect("pre-scan cancellation should use the fallback terminal write");
+
+        let (status, message): (String, String) = connection
+            .query_row(
+                "SELECT status, message FROM scan_runs WHERE job_id = ?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("cancelled scan run should load");
+        assert_eq!(status, "cancelled");
+        assert_eq!(message, "cancelled during discovery");
     }
 
     #[test]
