@@ -1,0 +1,728 @@
+name: Unsigned community beta
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Beta tag, for example v0.1.0-beta.1"
+        required: true
+        type: string
+      approved_source_commit:
+        description: "Exact 40-character commit SHA approved for this beta"
+        required: true
+        type: string
+      confirmation:
+        description: "Type UNSIGNED-COMMUNITY-BETA <tag> <approved_source_commit>"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: community-beta-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate beta-only request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      APPROVED_SOURCE_COMMIT: ${{ inputs.approved_source_commit }}
+      RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the requested source commit
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reject unapproved source, unsafe channel, or conflicting release state
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_confirmation="UNSIGNED-COMMUNITY-BETA $RELEASE_TAG $APPROVED_SOURCE_COMMIT"
+          test "$RELEASE_CONFIRMATION" = "$expected_confirmation"
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$ ]]
+          [[ "$APPROVED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$APPROVED_SOURCE_COMMIT" = "$GITHUB_SHA"
+
+          api_get_or_404() {
+            local endpoint="$1"
+            local output="$2"
+            local error_file
+            local status
+            error_file="$(mktemp)"
+            if gh api "$endpoint" >"$output" 2>"$error_file"; then
+              rm -f "$error_file"
+              return 0
+            else
+              status=$?
+            fi
+            if grep -Eq 'HTTP 404([^0-9]|$)' "$error_file"; then
+              rm -f "$error_file"
+              return 4
+            fi
+            cat "$error_file" >&2
+            rm -f "$error_file"
+            return "$status"
+          }
+
+          resolve_tag_commit() {
+            local reference_json="$1"
+            local object_json
+            local object_type
+            local object_sha
+            local depth=0
+            object_type="$(jq -er '.object.type' "$reference_json")"
+            object_sha="$(jq -er '.object.sha' "$reference_json")"
+            while test "$object_type" = "tag"; do
+              depth=$((depth + 1))
+              if test "$depth" -gt 8; then
+                echo "Tag $RELEASE_TAG has an excessive annotated-tag chain" >&2
+                return 1
+              fi
+              object_json="$(mktemp)"
+              gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" >"$object_json"
+              object_type="$(jq -er '.object.type' "$object_json")"
+              object_sha="$(jq -er '.object.sha' "$object_json")"
+              rm -f "$object_json"
+            done
+            test "$object_type" = "commit"
+            printf '%s\n' "$object_sha"
+          }
+
+          release_json="$(mktemp)"
+          if api_get_or_404 "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" "$release_json"; then
+            echo "Refusing to overwrite existing release $RELEASE_TAG" >&2
+            exit 1
+          else
+            api_status=$?
+            if test "$api_status" -ne 4; then
+              exit "$api_status"
+            fi
+          fi
+          rm -f "$release_json"
+
+          tag_json="$(mktemp)"
+          if api_get_or_404 "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" "$tag_json"; then
+            tag_commit="$(resolve_tag_commit "$tag_json")"
+            if test "$tag_commit" != "$APPROVED_SOURCE_COMMIT"; then
+              echo "Existing tag $RELEASE_TAG points to $tag_commit, expected $APPROVED_SOURCE_COMMIT" >&2
+              exit 1
+            fi
+            echo "Existing tag $RELEASE_TAG is an exact retry tag for $tag_commit"
+          else
+            api_status=$?
+            if test "$api_status" -ne 4; then
+              exit "$api_status"
+            fi
+            echo "Tag $RELEASE_TAG is available for this approved source commit"
+          fi
+          rm -f "$tag_json"
+
+      - name: Run Community Beta preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          node ./scripts/release/community-beta-preflight.mjs \
+            --tag "$RELEASE_TAG" \
+            --expected-source-commit "$APPROVED_SOURCE_COMMIT" \
+            --repository-root . \
+            --github-ref "$GITHUB_REF" \
+            --default-branch "$DEFAULT_BRANCH"
+
+  ffmpeg:
+    name: Build exact minimal FFmpeg and corresponding source
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      FFMPEG_COMMIT: ce3c09c101c83add623774d414a9f9498caf5c25
+    steps:
+      - name: Check out VALOFRAME
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install MinGW-w64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends mingw-w64 nasm xz-utils
+
+      - name: Check out exact FFmpeg source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/ffmpeg-source"
+          git -C "$RUNNER_TEMP/ffmpeg-source" init
+          git -C "$RUNNER_TEMP/ffmpeg-source" remote add origin https://github.com/FFmpeg/FFmpeg.git
+          git -C "$RUNNER_TEMP/ffmpeg-source" fetch --depth 1 origin "$FFMPEG_COMMIT"
+          git -C "$RUNNER_TEMP/ffmpeg-source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/ffmpeg-source" rev-parse HEAD)" = "$FFMPEG_COMMIT"
+
+      - name: Build pinned minimal LGPL FFmpeg
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./scripts/release/build-minimal-ffmpeg.sh \
+            "$RUNNER_TEMP/ffmpeg-source" \
+            ./third_party/ffmpeg/minimal-windows-x64-candidate.json \
+            "$RUNNER_TEMP/candidate-output"
+
+      - name: Package exact corresponding source and build evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_epoch="$(git -C "$RUNNER_TEMP/ffmpeg-source" show -s --format=%ct HEAD)"
+          package_root="$RUNNER_TEMP/corresponding-source-root"
+          artifact_root="$RUNNER_TEMP/minimal-candidate-artifact"
+          mkdir -p "$package_root/ffmpeg" "$package_root/valoframe-build" "$artifact_root"
+          git -C "$RUNNER_TEMP/ffmpeg-source" archive --format=tar "$FFMPEG_COMMIT" | tar -xf - -C "$package_root/ffmpeg"
+          cp ./scripts/release/build-minimal-ffmpeg.sh "$package_root/valoframe-build/"
+          cp ./third_party/ffmpeg/minimal-windows-x64-candidate.json "$package_root/valoframe-build/"
+          cp "$RUNNER_TEMP/candidate-output/BUILD-METADATA.json" "$package_root/valoframe-build/"
+          tar \
+            --sort=name \
+            --mtime="@$source_epoch" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            --pax-option=delete=atime,delete=ctime \
+            -cJf "$artifact_root/ffmpeg-corresponding-source.tar.xz" \
+            -C "$package_root" .
+
+          cp "$RUNNER_TEMP/candidate-output/ffmpeg.exe" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/BUILD-METADATA.json" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/configure-flags.txt" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/compiler-version.txt" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/pe-imports.txt" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/config.h" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/config.mak" "$artifact_root/"
+          (
+            cd "$artifact_root"
+            sha256sum \
+              BUILD-METADATA.json \
+              compiler-version.txt \
+              config.h \
+              config.mak \
+              configure-flags.txt \
+              ffmpeg-corresponding-source.tar.xz \
+              ffmpeg.exe \
+              pe-imports.txt \
+              > SHA256SUMS.txt
+          )
+
+      - name: Upload unverified cross-built candidate
+        uses: actions/upload-artifact@v6
+        with:
+          name: community-beta-ffmpeg-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/minimal-candidate-artifact
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: true
+
+  build-windows:
+    name: Build and verify unsigned Windows Community Beta
+    needs: [validate, ffmpeg]
+    runs-on: windows-2025
+    timeout-minutes: 75
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Configure isolated output paths
+        shell: pwsh
+        run: |
+          "CARGO_TARGET_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-community-beta-target')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFMPEG_CANDIDATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'vhm-community-beta-ffmpeg-candidate')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFMPEG_PACKAGE_ROOT=$(Join-Path $env:RUNNER_TEMP 'vhm-community-beta-ffmpeg-package')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFMPEG_ARCHIVE_OUTPUT_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-community-beta-ffmpeg-release-assets')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BETA_ASSET_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-community-beta-release-assets')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BETA_COMPLIANCE_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-community-beta-third-party-compliance')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Check out VALOFRAME
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Python for release smoke inspection
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.96.1 --profile minimal --component clippy --component rustfmt
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Run frontend and release tests
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Check Rust formatting
+        shell: pwsh
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Run Clippy
+        shell: pwsh
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings
+
+      - name: Run Rust tests
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- --test-threads=1
+
+      - name: Download minimal FFmpeg candidate
+        uses: actions/download-artifact@v6
+        with:
+          name: community-beta-ffmpeg-candidate-${{ github.run_id }}
+          path: ${{ env.FFMPEG_CANDIDATE_ROOT }}
+
+      - name: Verify minimal FFmpeg on native Windows x64
+        shell: pwsh
+        run: |
+          $metadataPath = Join-Path $env:FFMPEG_CANDIDATE_ROOT 'BUILD-METADATA.json'
+          $metadata = Get-Content -Raw -LiteralPath $metadataPath -Encoding UTF8 | ConvertFrom-Json -Depth 20
+          $reportPath = Join-Path $env:FFMPEG_CANDIDATE_ROOT 'WINDOWS-VERIFICATION.json'
+          $reportJson = & ./scripts/release/verify-minimal-ffmpeg-candidate.ps1 `
+            -FfmpegPath (Join-Path $env:FFMPEG_CANDIDATE_ROOT 'ffmpeg.exe') `
+            -ExpectedSha256 ([string] $metadata.executable.sha256) `
+            -OutputPath $reportPath
+          $report = ($reportJson -join "`n") | ConvertFrom-Json -Depth 20
+          if ($report.status -cne 'passed-candidate-not-promoted' -or $report.promotionAuthorized -ne $false) {
+            throw 'Minimal FFmpeg native verification did not return the candidate-only safe state.'
+          }
+
+      - name: Build hash-bound technical FFmpeg package
+        shell: pwsh
+        run: |
+          node ./scripts/release/package-minimal-ffmpeg-community-beta.mjs `
+            --candidate-root $env:FFMPEG_CANDIDATE_ROOT `
+            --output $env:FFMPEG_PACKAGE_ROOT `
+            --repository-root .
+
+      - name: Stage owner-approved Community Beta FFmpeg resources
+        shell: pwsh
+        run: |
+          $manifestPath = Join-Path $env:GITHUB_WORKSPACE '.tmp\community-beta\ffmpeg-windows-x64.json'
+          $stageJson = & ./scripts/release/stage-community-beta-ffmpeg.ps1 `
+            -PackageRoot $env:FFMPEG_PACKAGE_ROOT `
+            -BinaryArchiveOutputDirectory $env:FFMPEG_ARCHIVE_OUTPUT_DIR `
+            -ReleaseTag $env:RELEASE_TAG `
+            -RepositorySlug $env:GITHUB_REPOSITORY `
+            -ApplicationSourceCommit $env:GITHUB_SHA `
+            -RepositoryRoot $env:GITHUB_WORKSPACE `
+            -OutputManifestPath $manifestPath
+          $stage = ($stageJson -join "`n") | ConvertFrom-Json -Depth 20
+          if ($stage.status -cne 'staged-for-unsigned-community-beta' -or $stage.strictPublicReleaseApproved -ne $false) {
+            throw 'FFmpeg staging did not remain in the Community Beta-only state.'
+          }
+          "BETA_FFMPEG_MANIFEST=$($stage.manifestPath)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BETA_FFMPEG_ARCHIVE=$($stage.binaryArchive.path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BETA_FFMPEG_SOURCE=$($stage.correspondingSource.path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Generate beta-scoped SBOM and license evidence
+        shell: pwsh
+        run: |
+          node ./scripts/release/generate-compliance-evidence.mjs `
+            --output $env:BETA_COMPLIANCE_DIR `
+            --offline `
+            --release-profile community-beta `
+            --ffmpeg-manifest .tmp/community-beta/ffmpeg-windows-x64.json
+
+          $expectedSource = [System.IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'vhm-community-beta-third-party-compliance'))
+          $actualSource = [System.IO.Path]::GetFullPath($env:BETA_COMPLIANCE_DIR)
+          if (-not [string]::Equals($actualSource, $expectedSource, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Community Beta compliance source escaped the dedicated runner-temporary path.'
+          }
+          $sourceItem = Get-Item -LiteralPath $actualSource -Force -ErrorAction Stop
+          if (-not $sourceItem.PSIsContainer -or ($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Community Beta compliance source must be a regular directory.'
+          }
+
+          $repositoryRoot = [System.IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\')
+          $licenseRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot 'src-tauri\resources\licenses'))
+          $expectedLicenseRoot = [System.IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'src-tauri\resources\licenses'))
+          if (-not [string]::Equals($licenseRoot, $expectedLicenseRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Tauri license root did not resolve to the controlled repository path.'
+          }
+          $licenseRootItem = Get-Item -LiteralPath $licenseRoot -Force -ErrorAction Stop
+          if (-not $licenseRootItem.PSIsContainer -or ($licenseRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Tauri license root must be a regular directory.'
+          }
+
+          $destination = [System.IO.Path]::GetFullPath((Join-Path $licenseRoot 'third-party'))
+          $expectedDestination = [System.IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'src-tauri\resources\licenses\third-party'))
+          if (-not [string]::Equals($destination, $expectedDestination, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Third-party compliance destination escaped the controlled repository path.'
+          }
+          if (Test-Path -LiteralPath $destination) {
+            $destinationItem = Get-Item -LiteralPath $destination -Force -ErrorAction Stop
+            if (-not $destinationItem.PSIsContainer -or ($destinationItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw 'Existing third-party compliance destination must be a regular directory.'
+            }
+            Remove-Item -LiteralPath $destination -Recurse -Force
+          }
+
+          Move-Item -LiteralPath $actualSource -Destination $destination
+          $installedItem = Get-Item -LiteralPath $destination -Force -ErrorAction Stop
+          if (-not $installedItem.PSIsContainer -or ($installedItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Installed third-party compliance evidence must be a regular directory.'
+          }
+
+      - name: Build unsigned updater-free NSIS
+        run: npm run release:bundle:windows:community-beta
+
+      - name: Verify Community Beta installer and retain controlled payload
+        shell: pwsh
+        run: |
+          $main = Join-Path $env:CARGO_TARGET_DIR 'release\valorant-highlight-manager.exe'
+          $installers = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release\bundle\nsis') -Filter '*.exe' -File)
+          $nsisScripts = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release\nsis') -Filter 'installer.nsi' -File -Recurse)
+          if ($installers.Count -ne 1 -or $nsisScripts.Count -ne 1) {
+            throw "Expected one installer and one installer.nsi; found $($installers.Count) and $($nsisScripts.Count)."
+          }
+          $verifiedPayload = Join-Path $env:RUNNER_TEMP 'vhm-community-beta-verified-payload'
+          [void] (New-Item -ItemType Directory -Path $verifiedPayload)
+          $sevenZip = (Get-Command 7z.exe -CommandType Application -ErrorAction Stop).Source
+          $reportJson = & ./scripts/release/check-bundle.ps1 `
+            -MainExecutablePath $main `
+            -NsisBundlePath $installers[0].FullName `
+            -NsisScriptPath $nsisScripts[0].FullName `
+            -NsisExtractorPath $sevenZip `
+            -VerifiedPayloadOutputDirectory $verifiedPayload `
+            -ResourceDirectory (Join-Path $env:CARGO_TARGET_DIR 'release') `
+            -FfmpegManifestPath $env:BETA_FFMPEG_MANIFEST `
+            -AllowUnsignedCommunityBeta `
+            -CommunityBetaFfmpegArchivePath $env:BETA_FFMPEG_ARCHIVE `
+            -CommunityBetaSourceBundlePath $env:BETA_FFMPEG_SOURCE
+          $reportPath = Join-Path $env:RUNNER_TEMP 'community-beta-bundle-report.json'
+          $reportJson | Set-Content -LiteralPath $reportPath -Encoding utf8
+          $report = ($reportJson -join "`n") | ConvertFrom-Json -Depth 30
+          if ($report.status -cne 'passed' -or $report.releaseMode -cne 'unsigned-community-beta' -or $report.strictPublicReleaseApproved -ne $false) {
+            throw 'Community Beta bundle gate did not return the required beta-only state.'
+          }
+          "BETA_INSTALLER=$($installers[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BETA_NSIS_SCRIPT=$($nsisScripts[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BETA_VERIFIED_PAYLOAD=$verifiedPayload" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BETA_BUNDLE_REPORT=$reportPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Prove strict public preflight and bundle gate remain blocked
+        shell: pwsh
+        run: |
+          $preflightPath = Join-Path $env:RUNNER_TEMP 'strict-public-preflight.json'
+          $preflightJson = & ./scripts/release/public-release-preflight.ps1 -ExpectBlocked -OutputPath $preflightPath
+          $preflight = ($preflightJson -join "`n") | ConvertFrom-Json -Depth 30
+          if ($preflight.status -cne 'blocked' -or [int] $preflight.blockerCount -le 0) {
+            throw 'Strict public preflight did not remain blocked.'
+          }
+
+          $strictFailure = $null
+          try {
+            $null = & ./scripts/release/check-bundle.ps1 `
+              -MainExecutablePath (Join-Path $env:CARGO_TARGET_DIR 'release\valorant-highlight-manager.exe') `
+              -NsisBundlePath $env:BETA_INSTALLER `
+              -NsisScriptPath $env:BETA_NSIS_SCRIPT `
+              -NsisExtractorPath ((Get-Command 7z.exe -CommandType Application -ErrorAction Stop).Source) `
+              -ResourceDirectory (Join-Path $env:CARGO_TARGET_DIR 'release') `
+              -FfmpegManifestPath $env:BETA_FFMPEG_MANIFEST
+          }
+          catch {
+            $strictFailure = $_.Exception.Message
+          }
+          if ([string]::IsNullOrWhiteSpace($strictFailure) -or $strictFailure -notmatch '^Public redistribution is blocked:') {
+            throw "Strict public bundle gate did not fail for the expected beta-only FFmpeg state: $strictFailure"
+          }
+          $strictReportPath = Join-Path $env:RUNNER_TEMP 'strict-public-bundle-block.json'
+          [ordered]@{
+            schemaVersion = 1
+            status = 'blocked-as-required'
+            releaseTag = $env:RELEASE_TAG
+            sourceCommit = $env:GITHUB_SHA
+            strictPublicReleaseApproved = $false
+            reason = $strictFailure
+          } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $strictReportPath -Encoding utf8
+          "BETA_PUBLIC_PREFLIGHT_REPORT=$preflightPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BETA_STRICT_BUNDLE_REPORT=$strictReportPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run isolated packaged-FFmpeg startup smoke
+        shell: pwsh
+        run: |
+          $report = Get-Content -Raw -LiteralPath $env:BETA_BUNDLE_REPORT -Encoding UTF8 | ConvertFrom-Json -Depth 30
+          $reportedPayloadCount = @($report.nsisPayload.entries).Count
+          if ($report.status -cne 'passed' -or
+              $report.releaseMode -cne 'unsigned-community-beta' -or
+              $report.nsisPayload.verifiedPayloadOutputVerification.entriesMatchedReport -ne $true -or
+              [int] $report.nsisPayload.verifiedPayloadOutputVerification.fileCount -ne $reportedPayloadCount) {
+            throw 'Bundle gate report does not authorize the verified Community Beta startup payload.'
+          }
+
+          $expectedPayloadRoot = [System.IO.Path]::GetFullPath($env:BETA_VERIFIED_PAYLOAD)
+          $payloadRoot = [System.IO.Path]::GetFullPath([string] $report.nsisPayload.verifiedPayloadOutputDirectory)
+          if (-not [string]::Equals($payloadRoot, $expectedPayloadRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Bundle gate report points outside the Community Beta verified-payload directory.'
+          }
+          $rootItem = Get-Item -LiteralPath $payloadRoot -Force -ErrorAction Stop
+          if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Verified Community Beta startup payload root must not be a reparse point.'
+          }
+
+          $entries = @($report.nsisPayload.entries)
+          if ($entries.Count -le 0) {
+            throw 'Bundle gate report must contain payload entries.'
+          }
+          $reportedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+          foreach ($entry in $entries) {
+            $destination = [string] $entry.destination
+            if ([string]::IsNullOrWhiteSpace($destination) -or
+                [System.IO.Path]::IsPathRooted($destination) -or
+                $destination.Contains(':') -or $destination.Contains('/') -or
+                @($destination.Split('\') | Where-Object { [string]::IsNullOrWhiteSpace($_) -or $_ -in @('.', '..') }).Count -ne 0) {
+              throw "Bundle gate report contains an unsafe payload destination: '$destination'."
+            }
+            $candidate = [System.IO.Path]::GetFullPath((Join-Path $payloadRoot $destination))
+            $rootPrefix = $payloadRoot.TrimEnd('\') + '\'
+            if (-not $candidate.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+                -not $reportedPaths.Add($candidate)) {
+              throw "Bundle gate report contains an escaping or duplicate payload destination: '$destination'."
+            }
+            $item = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+            if ($item.PSIsContainer -or
+                ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                $item.Length -ne [long] $entry.sizeBytes) {
+              throw "Verified Community Beta startup payload metadata mismatch: '$destination'."
+            }
+            $actualHash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash
+            if (-not [string]::Equals($actualHash, [string] $entry.sha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+              throw "Verified Community Beta startup payload hash mismatch: '$destination'."
+            }
+          }
+          $actualItems = @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force)
+          foreach ($item in $actualItems) {
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "Verified Community Beta startup payload contains a reparse point: '$($item.FullName)'."
+            }
+          }
+          $actualFiles = @($actualItems | Where-Object { -not $_.PSIsContainer })
+          if ($actualFiles.Count -ne $entries.Count -or
+              @($actualFiles | Where-Object { -not $reportedPaths.Contains([System.IO.Path]::GetFullPath($_.FullName)) }).Count -ne 0) {
+            throw 'Verified Community Beta startup payload files do not exactly match the bundle-gate report entries.'
+          }
+
+          $mainEntries = @($entries | Where-Object { $_.destination -ceq 'valorant-highlight-manager.exe' })
+          if ($mainEntries.Count -ne 1) {
+            throw 'Bundle gate report must identify exactly one embedded main executable.'
+          }
+          $main = Join-Path $payloadRoot 'valorant-highlight-manager.exe'
+          $expectedMainHash = [string] $mainEntries[0].normalization.rawEmbeddedSha256
+          if ($expectedMainHash -notmatch '^[0-9a-fA-F]{64}$' -or
+              -not [string]::Equals($expectedMainHash, [string] $mainEntries[0].sha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Bundle gate report embedded-main raw SHA-256 is missing or inconsistent.'
+          }
+          $smokeOutput = & ./scripts/release/windows-release-smoke.ps1 `
+            -ExecutablePath $main `
+            -ResourceDirectory $payloadRoot `
+            -FfmpegMode ResourceOverride `
+            -IsolationParent $env:RUNNER_TEMP `
+            -ExpectedExecutableSha256 $expectedMainHash
+          $smokeJson = ($smokeOutput -join [Environment]::NewLine)
+          $smokePath = Join-Path $env:RUNNER_TEMP 'community-beta-smoke-report.json'
+          $smokeJson | Set-Content -LiteralPath $smokePath -Encoding utf8
+          $smoke = $smokeJson | ConvertFrom-Json -Depth 30
+          if ($smoke.status -cne 'passed') {
+            throw 'Community Beta startup smoke failed.'
+          }
+          if ([int] $smoke.database.schemaVersion -ne 13 -or
+              [int] $smoke.database.requiredTableCount -ne 16 -or
+              [long] $smoke.database.trashSnapshotCount -ne 0 -or
+              [long] $smoke.database.deleteIntentCount -ne 0) {
+            throw 'Community Beta startup smoke did not prove a fresh schema-v13 database with empty trash-snapshot and delete-intent journals.'
+          }
+          $singleInstance = $smoke.runtime.singleInstance
+          if ($singleInstance.verified -ne $true -or
+              -not [string]::Equals([string] $singleInstance.sharedLaunchConfiguration.environmentOverrides.VHM_RELEASE_SMOKE_ROOT, [string] $smoke.runtime.isolationRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+              [int] $singleInstance.secondInstanceExitCode -ne 0 -or
+              [uint32] $singleInstance.secondInstanceJobActiveProcessesAfterExit -ne 0 -or
+              $singleInstance.onlyPrimaryNamedRootAfterHandoff -ne $true -or
+              $singleInstance.primaryWindowMinimizedBeforeHandoff -ne $true -or
+              $singleInstance.primaryWindowHandlePreserved -ne $true -or
+              $singleInstance.primaryWindowVisibleAfterHandoff -ne $true -or
+              $singleInstance.primaryWindowMinimizedAfterHandoff -ne $false) {
+            throw 'Community Beta startup smoke did not prove the required single-instance handoff invariants.'
+          }
+          "BETA_SMOKE_REPORT=$smokePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Assemble immutable prerelease assets
+        shell: pwsh
+        run: |
+          $assetsJson = & ./scripts/release/package-community-beta-assets.ps1 `
+            -ReleaseTag $env:RELEASE_TAG `
+            -SourceCommit $env:GITHUB_SHA `
+            -InstallerPath $env:BETA_INSTALLER `
+            -FfmpegPackageRoot $env:FFMPEG_PACKAGE_ROOT `
+            -FfmpegArchivePath $env:BETA_FFMPEG_ARCHIVE `
+            -FfmpegManifestPath $env:BETA_FFMPEG_MANIFEST `
+            -BundleReportPath $env:BETA_BUNDLE_REPORT `
+            -PublicPreflightReportPath $env:BETA_PUBLIC_PREFLIGHT_REPORT `
+            -StrictBundleBlockReportPath $env:BETA_STRICT_BUNDLE_REPORT `
+            -SmokeReportPath $env:BETA_SMOKE_REPORT `
+            -ResourceLicenseRoot (Join-Path $env:CARGO_TARGET_DIR 'release\licenses') `
+            -OutputDirectory $env:BETA_ASSET_DIR
+          $assets = ($assetsJson -join "`n") | ConvertFrom-Json -Depth 10
+          if ($assets.status -cne 'community-beta-release-assets-ready' -or $assets.strictPublicReleaseApproved -ne $false -or $assets.installer.authenticodeStatus -cne 'NotSigned') {
+            throw 'Community Beta release asset assembly returned an unsafe state.'
+          }
+
+      - name: Upload verified Community Beta release assets
+        uses: actions/upload-artifact@v6
+        with:
+          name: community-beta-release-assets-${{ github.run_id }}
+          path: ${{ env.BETA_ASSET_DIR }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: true
+
+  publish:
+    name: Publish GitHub prerelease
+    needs: build-windows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: community-beta-publish
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      APPROVED_SOURCE_COMMIT: ${{ inputs.approved_source_commit }}
+    steps:
+      - name: Download verified release assets
+        uses: actions/download-artifact@v6
+        with:
+          name: community-beta-release-assets-${{ github.run_id }}
+          path: release-assets
+
+      - name: Revalidate assets, bind the approved tag, and create prerelease only
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$APPROVED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$APPROVED_SOURCE_COMMIT" = "$GITHUB_SHA"
+          cd release-assets
+          sha256sum --check SHA256SUMS.txt
+          grep -Fqx 'UNSIGNED COMMUNITY BETA — NOT A FORMAL PUBLIC RELEASE' COMMUNITY-BETA-NOTICE.txt
+          test "$(find . -maxdepth 1 -type f -name '*.exe' | wc -l)" -eq 1
+          test "$(find . -maxdepth 1 -type f -name '*.sig' | wc -l)" -eq 0
+          test "$(find . -maxdepth 1 -type f -name 'latest.json' | wc -l)" -eq 0
+
+          api_get_or_404() {
+            local endpoint="$1"
+            local output="$2"
+            local error_file
+            local status
+            error_file="$(mktemp)"
+            if gh api "$endpoint" >"$output" 2>"$error_file"; then
+              rm -f "$error_file"
+              return 0
+            else
+              status=$?
+            fi
+            if grep -Eq 'HTTP 404([^0-9]|$)' "$error_file"; then
+              rm -f "$error_file"
+              return 4
+            fi
+            cat "$error_file" >&2
+            rm -f "$error_file"
+            return "$status"
+          }
+
+          resolve_tag_commit() {
+            local reference_json="$1"
+            local object_json
+            local object_type
+            local object_sha
+            local depth=0
+            object_type="$(jq -er '.object.type' "$reference_json")"
+            object_sha="$(jq -er '.object.sha' "$reference_json")"
+            while test "$object_type" = "tag"; do
+              depth=$((depth + 1))
+              if test "$depth" -gt 8; then
+                echo "Tag $RELEASE_TAG has an excessive annotated-tag chain" >&2
+                return 1
+              fi
+              object_json="$(mktemp)"
+              gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" >"$object_json"
+              object_type="$(jq -er '.object.type' "$object_json")"
+              object_sha="$(jq -er '.object.sha' "$object_json")"
+              rm -f "$object_json"
+            done
+            test "$object_type" = "commit"
+            printf '%s\n' "$object_sha"
+          }
+
+          release_json="$(mktemp)"
+          if api_get_or_404 "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" "$release_json"; then
+            echo "Refusing to overwrite existing release $RELEASE_TAG" >&2
+            exit 1
+          else
+            api_status=$?
+            if test "$api_status" -ne 4; then
+              exit "$api_status"
+            fi
+          fi
+          rm -f "$release_json"
+
+          tag_json="$(mktemp)"
+          if api_get_or_404 "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" "$tag_json"; then
+            tag_commit="$(resolve_tag_commit "$tag_json")"
+            if test "$tag_commit" != "$APPROVED_SOURCE_COMMIT"; then
+              echo "Existing tag $RELEASE_TAG points to $tag_commit, expected $APPROVED_SOURCE_COMMIT" >&2
+              exit 1
+            fi
+            echo "Reusing exact retry tag $RELEASE_TAG at $tag_commit"
+          else
+            api_status=$?
+            if test "$api_status" -ne 4; then
+              exit "$api_status"
+            fi
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$RELEASE_TAG" \
+              -f sha="$APPROVED_SOURCE_COMMIT" >"$tag_json"
+          fi
+          tag_commit="$(resolve_tag_commit "$tag_json")"
+          test "$tag_commit" = "$APPROVED_SOURCE_COMMIT"
+          rm -f "$tag_json"
+
+          mapfile -t assets < <(find . -maxdepth 1 -type f -print | sort)
+          gh release create "$RELEASE_TAG" "${assets[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "VALOFRAME unsigned community beta $RELEASE_TAG" \
+            --notes-file RELEASE-NOTES.md \
+            --prerelease \
+            --latest=false
+
+      - name: Verify the published release cannot be stable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.prerelease')" = "true"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.draft')" = "false"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.tag_name')" = "$RELEASE_TAG"

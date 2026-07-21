@@ -16,7 +16,22 @@
 
 ### 公开发布
 
-当前仓库不能据此文档直接宣称“可公开发布”。在 `WINDOWS_RELEASE_CHECKLIST.md` 的公开发布阻断项全部关闭前，只能生成内部 RC。
+当前仓库不能据此文档直接宣称“严格正式公开发布”。在 `WINDOWS_RELEASE_CHECKLIST.md` 的公开发布阻断项全部关闭前，不得把 Community Beta 描述为已签名正式版。
+
+### 未签名 Community Beta
+
+`Unsigned community beta` workflow 是给免费社区工具准备的独立 GitHub Prerelease 通道。它必须从默认分支手动触发，绑定完整 40 位源码 SHA，并输入 `UNSIGNED-COMMUNITY-BETA <tag> <SHA>`，只接受 `v<version>-beta.<序号>` 标签。该通道：
+
+- 保留当前清单中的游戏图片和项目图标，并绑定发布负责人的 beta 渠道决定；
+- 不启用 updater，不生成 `latest.json` 或更新签名；
+- 明确公开安装器、内嵌主程序均为 `NotSigned`，并在发布说明中提示 Unknown Publisher/SmartScreen；
+- 从固定 FFmpeg commit 构建零外部库的最小 LGPL 版本，在 Windows x64 复核后才进入安装包；
+- 将 FFmpeg 二进制/构建证据、许可证和精确对应源码与安装器一起上传；
+- 运行独立 `-AllowUnsignedCommunityBeta` bundle profile，同时反向证明严格 public preflight 与默认 bundle gate 仍然阻断；
+- 只创建 GitHub Prerelease，绝不覆盖既有 Release；仅当失败上传留下的标签仍精确指向本次批准 SHA 时允许安全重试；
+- 要求 `community-beta-publish` 环境至少配置 required reviewer，并把 deployment branch 限定到默认分支；个人仓库可由负责人自己完成发布前的第二次确认。
+
+具体下载提示和操作步骤见 [`COMMUNITY_BETA.md`](./COMMUNITY_BETA.md)。该通道是一次明确披露限制的社区测试决定，不会修改 `release/public-release-policy.json`，也不会伪造 Authenticode、时间戳、正式 VM 或法律审批。
 
 ## 固定的安装器契约
 
@@ -55,7 +70,7 @@
 
 不要仅凭“FFmpeg”名称推断许可证。许可证义务取决于实际构建及其启用组件；无法追溯的二进制不得进入公开安装包。
 
-当前固定的 BtbN `win64-lgpl` 二进制继续只用于内部 RC。它实际启用了大量本应用不需要的外部组件，因此仓库另设手工 `FFmpeg minimal Windows x64 candidate` workflow：从固定 FFmpeg commit 交叉编译只保留 `file/mov/h264/scale/mjpeg/image2` 的最小候选，同时生成精确源码包、构建参数、工具链和 Windows 合成视频烟测证据。Windows 门禁会复核 `SHA256SUMS.txt`、`BUILD-METADATA.json`、12 位固定 commit 标识，并直接解析 PE import table；实际导入必须与交叉工具链 `objdump` 结果一致且仅命中固定的 Windows 系统 DLL allowlist。候选报告固定为 `passed-candidate-not-promoted` 且 `promotionAuthorized = false`；真实高光视频回归、源码长期镜像、许可/专利/法律审批全部完成前，不得替换现有固定二进制或对外分发。
+当前固定的 BtbN `win64-lgpl` 二进制继续只用于内部 RC，不进入 Community Beta。它实际启用了大量本应用不需要的外部组件，因此仓库另设最小构建链：从固定 FFmpeg commit 交叉编译只保留 `file/mov/h264/scale/mjpeg/image2`，同时生成精确源码包、构建参数、工具链和 Windows 合成视频烟测证据。Windows 门禁会复核 `SHA256SUMS.txt`、`BUILD-METADATA.json`、12 位固定 commit 标识，并直接解析 PE import table；实际导入必须与交叉工具链 `objdump` 结果一致且仅命中固定的 Windows 系统 DLL allowlist。候选报告固定为 `passed-candidate-not-promoted` 且 `promotionAuthorized = false`；只有 Community Beta workflow 在发布负责人渠道决定、源码 sidecar 和 beta 专用门禁同时成立时才可把它用于未签名 Prerelease。Beta 证据会如实标记 MinGW/工具链运行时许可复核与目标市场编解码器专利复核尚未完成，不得写成已审批；严格正式发布仍保留真实素材回归、签名、VM 及完整审阅要求。
 
 `scripts/release/generate-compliance-evidence.mjs` 从 `package-lock.json`、Windows x64 Cargo 解析图和 FFmpeg manifest 生成两份 npm SPDX 2.3、Windows Cargo SPDX 2.3、FFmpeg 组件快照、第三方声明、去重后的许可证全文、索引、阻断摘要和逐文件 SHA-256 manifest。可在不存在输出目录时运行 `npm run release:compliance:generate`。发布归档漏带正文的精确依赖由 `third_party/licenses/license-text-overrides.json` 补充：manifest 固定版本、锁文件 checksum/integrity、上游提交、SPDX 正文覆盖、正文大小和 SHA-256，生成器只在包内正文确实为空时离线应用，并拒绝未使用、重复、越界、symlink/junction、未进入 Git index、版本/SPDX/VCS/哈希不一致的 override。`license-text-override-approvals.json` 使用绑定组件与正文哈希的独立结构化记录；没有匹配批准时仍输出稳定 pending blocker。bundle 门禁固定生成器、Windows target、全部锁文件、两份 override manifest 及每份正文的哈希；技术证据不能被自动写成“已批准”。
 
@@ -83,7 +98,7 @@ node .\scripts\release\generate-compliance-evidence.mjs `
 npm run release:bundle:windows:internal
 ```
 
-构建前必须由发布静态检查确认 `src-tauri/resources/bin/ffmpeg.exe` 已 staged，且与本次发布记录/manifest 的哈希一致。隔离构建的安装器位于 `$env:CARGO_TARGET_DIR\release\bundle\nsis\`。`--no-sign` 只适用于内部 RC；公开发布不得沿用该参数。
+构建前必须由发布静态检查确认 `src-tauri/resources/bin/ffmpeg.exe` 已 staged，且与本次发布记录/manifest 的哈希一致。隔离构建的安装器位于 `$env:CARGO_TARGET_DIR\release\bundle\nsis\`。`--no-sign` 只适用于内部 RC 和明确披露限制的 Community Beta；严格正式公开发布不得沿用该参数。
 
 `scripts/release/check-bundle.ps1` 还必须同时接收本次 Tauri 构建生成的 `release\nsis\...\installer.nsi` 和完整 7-Zip 的 `7z.exe`。门禁会先校验 PE overlay 上的 NSIS first header，再把 `installer.nsi` 的 `Section Install` 静态绑定到本次主程序、`bin\ffmpeg.exe`、项目 MIT 许可证及范围说明、FFmpeg 许可文件以及 `COMPLIANCE-MANIFEST.json` 声明的全部第三方材料；随后只把这些目标从最终安装器受控解包到一次性目录。当前快照为 17 个文件，但数量由 manifest 驱动，不再硬编码。根 `LICENSE`/`LICENSE-SCOPE.txt`、公开 policy 中获批的 SHA-256 与安装目录对应文件必须逐字节一致。所有资源必须逐字节匹配；Tauri 会在打包期间把主程序中唯一的 `__TAURI_BUNDLE_TYPE_VAR_UNK` 改为同偏移的 `..._NSS`。内部未签名模式使用 `strict-unsigned` 比较，整文件除这三个 marker 字节外不得有任何差异。公开模式使用 `authenticode-aware` 比较：外部 UNK staging 文件必须 `NotSigned` 且无证书表；内嵌 NSS 文件的证书表必须从 `Align8(staging file length)` 开始、只允许 0–7 个零 padding、以合法 WIN_CERTIFICATE 项精确覆盖到 EOF。只在 NSS→UNK 后同时归零 PE checksum 和 security-directory entry，再比较 staging 文件长度内包括合法 overlay 在内的全部字节。内嵌 NSS 主程序和安装器不仅必须为 `Valid`，还必须与公开 policy 中获批的 publisher subject 和证书 thumbprint 精确一致、存在时间戳证书，并额外通过微软签名的 `signtool verify /pa /all /v`。报告明确区分两种比较模式并留存 raw/canonical 哈希、证书表边界、签名者、时间戳和 signtool 证据。
 

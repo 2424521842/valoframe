@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "recordId": "community-beta-v0.1.0-release-owner-decision",
+  "version": "0.1.0",
+  "channel": "community-beta",
+  "decision": "approved-by-release-owner-for-community-beta",
+  "decisionAuthority": "repository-release-owner",
+  "strictPublicReleaseApproval": false,
+  "releaseOwnerConfirmations": {
+    "gameImagesMayBeDistributedInThisChannel": true,
+    "projectBrandIconMayBeDistributedInThisChannel": true,
+    "unofficialProjectDisclaimerApprovedForThisChannel": true,
+    "ffmpegMinimalBuildMayBeDistributedInThisChannel": true,
+    "codecPatentReviewDeferredToStrictRelease": true,
+    "automaticUpdatesAreDisabled": true,
+    "installerIsUnsigned": true,
+    "ffmpegUseIsLimitedToThumbnailGeneration": true
+  },
+  "distributionRequirements": {
+    "windowsUnsignedWarningMustBeDisclosed": true,
+    "manualUpdateInstructionsMustBeDisclosed": true,
+    "ffmpegLicenseMaterialsMustAccompanyInstaller": true,
+    "ffmpegBinaryAndBuildEvidenceMustAccompanyInstaller": true,
+    "ffmpegCorrespondingSourceMustAccompanyInstaller": true,
+    "communityBetaLimitationsMustBeDisclosed": true
+  },
+  "ffmpegMaterials": {
+    "licenseDirectory": "src-tauri/resources/licenses/ffmpeg",
+    "sourceAvailabilityDocument": "src-tauri/resources/licenses/ffmpeg/SOURCE-OFFER.md",
+    "correspondingSourceSidecarRequired": true
+  },
+  "gameContentRecord": "release/approvals/game-content-rights.json",
+  "gameContentChannelScopeRecord": "release/approvals/community-beta-v0.1.0-game-content-scope.json",
+  "userDocumentation": "docs/COMMUNITY_BETA.md",
+  "nonAssertions": [
+    "This record is not an approval by Riot Games, Tencent, or any other third party.",
+    "This record does not claim that independent legal review has been completed.",
+    "This record does not mark the strict public-release policy as approved.",
+    "This record does not claim that the unsigned installer has an Authenticode publisher identity."
+  ]
+}

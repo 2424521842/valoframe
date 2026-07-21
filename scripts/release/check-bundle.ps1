@@ -14,6 +14,11 @@ That switch permits NotSigned application artifacts and an unfinished public
 FFmpeg redistribution record; it does not relax file, hash, path, or license
 checks. HashMismatch and all other invalid signature states still fail.
 
+Use -AllowUnsignedCommunityBeta only for the separately documented GitHub
+prerelease channel. That profile still requires the exact minimal FFmpeg binary
+archive and corresponding-source archive beside the installer, validates the
+channel decision record, and keeps the strict public-release policy blocked.
+
 .PARAMETER MainExecutablePath
 Path to the post-build external UNK staging executable used for byte provenance.
 The actually shipped NSS variant is extracted from the installer and checked.
@@ -48,6 +53,14 @@ Optional expected SHA-256 for the main executable.
 
 .PARAMETER ExpectedNsisBundleSha256
 Optional expected SHA-256 for the NSIS installer.
+
+.PARAMETER CommunityBetaFfmpegArchivePath
+Path to the exact minimal FFmpeg binary archive that will be uploaded beside a
+Community Beta installer.
+
+.PARAMETER CommunityBetaSourceBundlePath
+Path to the exact FFmpeg corresponding-source archive that will be uploaded
+beside a Community Beta installer.
 
 .EXAMPLE
 pwsh ./scripts/release/check-bundle.ps1 `
@@ -116,11 +129,24 @@ param(
 
     [string] $ExpectedNsisBundleSha256,
 
-    [switch] $AllowUnsignedInternalRc
+    [switch] $AllowUnsignedInternalRc,
+
+    [switch] $AllowUnsignedCommunityBeta,
+
+    [string] $CommunityBetaFfmpegArchivePath,
+
+    [string] $CommunityBetaSourceBundlePath,
+
+    [ValidateNotNullOrEmpty()]
+    [string] $CommunityBetaDecisionPath = (Join-Path $PSScriptRoot '..\..\release\approvals\community-beta-v0.1.0.json')
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($AllowUnsignedInternalRc -and $AllowUnsignedCommunityBeta) {
+    throw '-AllowUnsignedInternalRc and -AllowUnsignedCommunityBeta are mutually exclusive.'
+}
 
 function Test-IsWindows {
     return [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
@@ -1473,8 +1499,22 @@ function Get-CompliancePayloadReports {
         [Parameter(Mandatory = $true)] [string] $ResourceRoot,
         [Parameter(Mandatory = $true)] [string] $RelativeRoot,
         [Parameter(Mandatory = $true)] [string] $RepositoryRoot,
+        [Parameter(Mandatory = $true)] [string] $FfmpegManifestPath,
+        [Parameter(Mandatory = $true)] [ValidateSet('public', 'community-beta')] [string] $ExpectedReleaseProfile,
         [Parameter(Mandatory = $true)] [bool] $RequirePublicReady
     )
+
+    $ffmpegManifestRelativePath = [System.IO.Path]::GetRelativePath(
+        $RepositoryRoot,
+        $FfmpegManifestPath
+    ).Replace('\', '/')
+    if ([System.IO.Path]::IsPathRooted($ffmpegManifestRelativePath) -or
+        $ffmpegManifestRelativePath -eq '..' -or
+        $ffmpegManifestRelativePath.StartsWith('../', [System.StringComparison]::Ordinal) -or
+        $ffmpegManifestRelativePath.Contains(':') -or
+        $ffmpegManifestRelativePath.IndexOf([char] 0) -ge 0) {
+        throw 'FFmpeg compliance manifest input must remain inside the repository.'
+    }
 
     $complianceRoot = Get-ResourceDirectory `
         -Root $ResourceRoot `
@@ -1487,6 +1527,11 @@ function Get-CompliancePayloadReports {
     $manifest = Get-Content -Raw -LiteralPath $manifestPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
     if ([long] (Get-RequiredJsonProperty -Object $manifest -Name 'schemaVersion' -Context 'compliance manifest') -ne 1) {
         throw 'Unsupported compliance manifest schemaVersion.'
+    }
+    $manifestProfileProperty = $manifest.PSObject.Properties['releaseProfile']
+    $manifestProfile = if ($null -eq $manifestProfileProperty) { 'public' } else { [string] $manifestProfileProperty.Value }
+    if ($manifestProfile -cne $ExpectedReleaseProfile) {
+        throw "Compliance manifest releaseProfile '$manifestProfile' does not match '$ExpectedReleaseProfile'."
     }
     if ([string] (Get-RequiredJsonProperty -Object $manifest -Name 'target' -Context 'compliance manifest') -cne 'x86_64-pc-windows-msvc') {
         throw 'Compliance manifest target must be x86_64-pc-windows-msvc.'
@@ -1767,7 +1812,7 @@ function Get-CompliancePayloadReports {
             'package-lock.json',
             'src-tauri/Cargo.toml',
             'src-tauri/Cargo.lock',
-            'third_party/ffmpeg/windows-x64.json',
+            $ffmpegManifestRelativePath,
             $licenseOverrideManifestRelativePath,
             $licenseOverrideApprovalRelativePath
         )) {
@@ -1802,6 +1847,17 @@ function Get-CompliancePayloadReports {
     $summary = Get-Content -Raw -LiteralPath $summaryPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
     if ([long] (Get-RequiredJsonProperty -Object $summary -Name 'schemaVersion' -Context 'compliance summary') -ne 1) {
         throw 'Unsupported compliance summary schemaVersion.'
+    }
+    $summaryProfileProperty = $summary.PSObject.Properties['releaseProfile']
+    $summaryProfile = if ($null -eq $summaryProfileProperty) { 'public' } else { [string] $summaryProfileProperty.Value }
+    if ($summaryProfile -cne $ExpectedReleaseProfile) {
+        throw "Compliance summary releaseProfile '$summaryProfile' does not match '$ExpectedReleaseProfile'."
+    }
+    if ($ExpectedReleaseProfile -ceq 'community-beta') {
+        $productionApproval = Get-RequiredJsonProperty -Object $summary -Name 'productionApproval' -Context 'compliance summary'
+        if ($productionApproval -isnot [bool] -or [bool] $productionApproval) {
+            throw 'Community Beta compliance evidence must explicitly keep productionApproval false.'
+        }
     }
     $publicReady = Get-RequiredJsonProperty -Object $summary -Name 'publicRedistributionReady' -Context 'compliance summary'
     if ($publicReady -isnot [bool]) {
@@ -1845,7 +1901,7 @@ function Get-CompliancePayloadReports {
     $ffmpegComponent = Get-Content -Raw -LiteralPath $ffmpegComponentPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
     $recordedFfmpegManifestHash = Get-RequiredJsonString -Object $ffmpegComponent -Name 'manifestSha256' -Context 'FFmpeg component evidence'
     Assert-Sha256Text -Value $recordedFfmpegManifestHash -Description 'FFmpeg component manifest hash'
-    $currentFfmpegManifestPath = Get-ResourceFile -Root $RepositoryRoot -RelativePath 'third_party/ffmpeg/windows-x64.json' -Description 'FFmpeg provenance manifest'
+    $currentFfmpegManifestPath = Get-ResourceFile -Root $RepositoryRoot -RelativePath $ffmpegManifestRelativePath -Description 'FFmpeg provenance manifest'
     if (-not [string]::Equals($recordedFfmpegManifestHash, (Get-Sha256 -LiteralPath $currentFfmpegManifestPath), [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'FFmpeg component evidence does not match the current FFmpeg provenance manifest.'
     }
@@ -1882,6 +1938,59 @@ $approvedReleasePolicyPath = Get-CanonicalExistingPath -LiteralPath (Join-Path $
 if (-not [string]::Equals($releasePolicyPath, $approvedReleasePolicyPath, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw 'PublicReleasePolicyPath must resolve to the repository approved release/public-release-policy.json.'
 }
+$communityBetaDecision = $null
+$communityBetaFfmpegArchive = $null
+$communityBetaSourceBundle = $null
+if ($AllowUnsignedCommunityBeta) {
+    if ([string]::IsNullOrWhiteSpace($CommunityBetaFfmpegArchivePath) -or
+        [string]::IsNullOrWhiteSpace($CommunityBetaSourceBundlePath)) {
+        throw 'Community Beta verification requires both FFmpeg binary and corresponding-source archive paths.'
+    }
+    $communityBetaDecisionPath = Get-CanonicalExistingPath -LiteralPath $CommunityBetaDecisionPath -RequireDirectory $false -Description 'Community Beta decision record'
+    $approvedCommunityBetaDecisionPath = Get-CanonicalExistingPath -LiteralPath (Join-Path $repositoryRoot 'release\approvals\community-beta-v0.1.0.json') -RequireDirectory $false -Description 'approved Community Beta decision record'
+    if (-not [string]::Equals($communityBetaDecisionPath, $approvedCommunityBetaDecisionPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'CommunityBetaDecisionPath must resolve to release/approvals/community-beta-v0.1.0.json.'
+    }
+    $communityBetaDecision = Get-Content -Raw -LiteralPath $communityBetaDecisionPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    if ([long] (Get-RequiredJsonProperty -Object $communityBetaDecision -Name 'schemaVersion' -Context 'Community Beta decision') -ne 1 -or
+        (Get-RequiredJsonString -Object $communityBetaDecision -Name 'channel' -Context 'Community Beta decision') -cne 'community-beta' -or
+        (Get-RequiredJsonProperty -Object $communityBetaDecision -Name 'strictPublicReleaseApproval' -Context 'Community Beta decision') -isnot [bool] -or
+        [bool] $communityBetaDecision.strictPublicReleaseApproval) {
+        throw 'Community Beta decision must be schema v1, target community-beta, and explicitly not grant strict public approval.'
+    }
+    $betaConfirmations = Get-RequiredJsonProperty -Object $communityBetaDecision -Name 'releaseOwnerConfirmations' -Context 'Community Beta decision'
+    foreach ($confirmation in @(
+            'gameImagesMayBeDistributedInThisChannel',
+            'projectBrandIconMayBeDistributedInThisChannel',
+            'unofficialProjectDisclaimerApprovedForThisChannel',
+            'ffmpegMinimalBuildMayBeDistributedInThisChannel',
+            'codecPatentReviewDeferredToStrictRelease',
+            'automaticUpdatesAreDisabled',
+            'installerIsUnsigned',
+            'ffmpegUseIsLimitedToThumbnailGeneration'
+        )) {
+        $value = Get-RequiredJsonProperty -Object $betaConfirmations -Name $confirmation -Context 'Community Beta releaseOwnerConfirmations'
+        if ($value -isnot [bool] -or -not [bool] $value) {
+            throw "Community Beta decision confirmation '$confirmation' must be true."
+        }
+    }
+    $betaRequirements = Get-RequiredJsonProperty -Object $communityBetaDecision -Name 'distributionRequirements' -Context 'Community Beta decision'
+    foreach ($requirement in @(
+            'windowsUnsignedWarningMustBeDisclosed',
+            'manualUpdateInstructionsMustBeDisclosed',
+            'ffmpegLicenseMaterialsMustAccompanyInstaller',
+            'ffmpegBinaryAndBuildEvidenceMustAccompanyInstaller',
+            'ffmpegCorrespondingSourceMustAccompanyInstaller',
+            'communityBetaLimitationsMustBeDisclosed'
+        )) {
+        $value = Get-RequiredJsonProperty -Object $betaRequirements -Name $requirement -Context 'Community Beta distributionRequirements'
+        if ($value -isnot [bool] -or -not [bool] $value) {
+            throw "Community Beta distribution requirement '$requirement' must be true."
+        }
+    }
+    $communityBetaFfmpegArchive = Get-CanonicalExistingPath -LiteralPath $CommunityBetaFfmpegArchivePath -RequireDirectory $false -Description 'Community Beta FFmpeg binary archive'
+    $communityBetaSourceBundle = Get-CanonicalExistingPath -LiteralPath $CommunityBetaSourceBundlePath -RequireDirectory $false -Description 'Community Beta FFmpeg corresponding-source archive'
+}
 $verifiedPayloadOutput = Resolve-VerifiedPayloadOutput -ConfiguredPath $VerifiedPayloadOutputDirectory
 
 $resourceRootItem = Get-Item -LiteralPath $resourceRoot -Force
@@ -1900,6 +2009,20 @@ foreach ($inputFile in @(
     $inputItem = Get-Item -LiteralPath $inputFile.path -Force
     if (($inputItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "$($inputFile.description) must not be a reparse point: '$($inputFile.path)'."
+    }
+}
+if ($AllowUnsignedCommunityBeta) {
+    foreach ($betaInput in @(
+            [ordered]@{ path = $communityBetaDecisionPath; description = 'Community Beta decision record' },
+            [ordered]@{ path = $communityBetaFfmpegArchive; description = 'Community Beta FFmpeg binary archive' },
+            [ordered]@{ path = $communityBetaSourceBundle; description = 'Community Beta FFmpeg corresponding-source archive' }
+        )) {
+        $betaInputItem = Get-Item -LiteralPath $betaInput.path -Force
+        if ($betaInputItem.PSIsContainer -or
+            $betaInputItem.Length -le 0 -or
+            ($betaInputItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$($betaInput.description) must be a non-empty regular file without reparse points."
+        }
     }
 }
 
@@ -2014,7 +2137,78 @@ if ($redistributionReadyValue -isnot [bool]) {
 $redistributionReady = [bool] $redistributionReadyValue
 $sourceComplianceStatus = Get-RequiredJsonString -Object $sourceCompliance -Name 'status' -Context 'FFmpeg sourceCompliance'
 
-if (-not $AllowUnsignedInternalRc) {
+if ($AllowUnsignedCommunityBeta) {
+    $releaseChannel = Get-RequiredJsonString -Object $manifest -Name 'releaseChannel' -Context 'FFmpeg manifest'
+    if ($releaseChannel -cne 'community-beta' -or
+        $redistributionReady -or
+        $sourceComplianceStatus -cne 'community-beta-source-bundled-formal-review-pending') {
+        throw 'Community Beta FFmpeg manifest must remain beta-only and must not claim strict redistribution approval.'
+    }
+
+    $buildContract = Get-RequiredJsonProperty -Object $manifest -Name 'build' -Context 'Community Beta FFmpeg manifest'
+    $externalLibraries = @(Get-RequiredJsonProperty -Object $buildContract -Name 'externalLibraries' -Context 'Community Beta FFmpeg build')
+    if ($externalLibraries.Count -ne 0) {
+        throw 'Community Beta FFmpeg must be the minimal build with no external libraries.'
+    }
+
+    $projectMirrorUrl = Get-RequiredJsonString -Object $artifact -Name 'projectMirrorUrl' -Context 'Community Beta FFmpeg artifact'
+    $binaryMirrorUrl = Get-RequiredJsonString -Object $sourceCompliance -Name 'binaryMirrorUrl' -Context 'Community Beta FFmpeg sourceCompliance'
+    Assert-HttpsUrl -Value $projectMirrorUrl -Description 'Community Beta FFmpeg artifact projectMirrorUrl'
+    Assert-HttpsUrl -Value $binaryMirrorUrl -Description 'Community Beta FFmpeg sourceCompliance.binaryMirrorUrl'
+    if ($artifactUrl -cne $projectMirrorUrl -or $artifactUrl -cne $binaryMirrorUrl) {
+        throw 'Community Beta FFmpeg artifact and binary mirror URLs must match exactly.'
+    }
+
+    $artifactUri = [System.Uri] $artifactUrl
+    $artifactUrlFileName = [System.Uri]::UnescapeDataString([System.IO.Path]::GetFileName($artifactUri.AbsolutePath))
+    $binaryArchiveItem = Get-Item -LiteralPath $communityBetaFfmpegArchive -Force
+    if ($artifactUrlFileName -cne $artifactFileName -or
+        $binaryArchiveItem.Name -cne $artifactFileName -or
+        $binaryArchiveItem.Length -ne [long] $archiveSize -or
+        -not [string]::Equals((Get-Sha256 -LiteralPath $communityBetaFfmpegArchive), $archiveHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Community Beta FFmpeg binary archive does not match its pinned manifest metadata.'
+    }
+
+    $sourceBundle = Get-RequiredJsonProperty -Object $sourceCompliance -Name 'correspondingSourceBundle' -Context 'Community Beta FFmpeg sourceCompliance'
+    $sourceBundleUrl = Get-RequiredJsonString -Object $sourceBundle -Name 'url' -Context 'Community Beta FFmpeg correspondingSourceBundle'
+    Assert-HttpsUrl -Value $sourceBundleUrl -Description 'Community Beta FFmpeg corresponding source URL'
+    $sourceBundleSize = [long] (Get-RequiredJsonProperty -Object $sourceBundle -Name 'sizeBytes' -Context 'Community Beta FFmpeg correspondingSourceBundle')
+    $sourceBundleHash = Get-RequiredJsonString -Object $sourceBundle -Name 'sha256' -Context 'Community Beta FFmpeg correspondingSourceBundle'
+    Assert-Sha256Text -Value $sourceBundleHash -Description 'Community Beta FFmpeg corresponding source hash'
+    $sourceBundleUri = [System.Uri] $sourceBundleUrl
+    $sourceBundleUrlFileName = [System.Uri]::UnescapeDataString([System.IO.Path]::GetFileName($sourceBundleUri.AbsolutePath))
+    $sourceBundleItem = Get-Item -LiteralPath $communityBetaSourceBundle -Force
+    if ($sourceBundleUrlFileName -cne $sourceBundleItem.Name -or
+        $sourceBundleItem.Length -ne $sourceBundleSize -or
+        -not [string]::Equals((Get-Sha256 -LiteralPath $communityBetaSourceBundle), $sourceBundleHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Community Beta FFmpeg corresponding-source archive does not match its pinned manifest metadata.'
+    }
+
+    foreach ($releaseUrl in @($artifactUri, $sourceBundleUri)) {
+        if ($releaseUrl.AbsolutePath -notlike "*/releases/download/$providerReleaseTag/*") {
+            throw "Community Beta FFmpeg release URL is not bound to tag '$providerReleaseTag'."
+        }
+    }
+    $externalLibraryAuditComplete = Get-RequiredJsonProperty -Object $sourceCompliance -Name 'ffmpegExternalLibraryAuditComplete' -Context 'Community Beta FFmpeg sourceCompliance'
+    $thirdPartyLicenseAuditComplete = Get-RequiredJsonProperty -Object $sourceCompliance -Name 'thirdPartyLicenseAuditComplete' -Context 'Community Beta FFmpeg sourceCompliance'
+    $toolchainRuntimeLicenseReviewStatus = Get-RequiredJsonString -Object $sourceCompliance -Name 'toolchainRuntimeLicenseReviewStatus' -Context 'Community Beta FFmpeg sourceCompliance'
+    $ijgAttributionRequired = Get-RequiredJsonProperty -Object $sourceCompliance -Name 'ijgAttributionRequired' -Context 'Community Beta FFmpeg sourceCompliance'
+    $ijgAttributionIncluded = Get-RequiredJsonProperty -Object $sourceCompliance -Name 'ijgAttributionIncluded' -Context 'Community Beta FFmpeg sourceCompliance'
+    $patentReviewStatus = Get-RequiredJsonString -Object $sourceCompliance -Name 'patentReviewStatus' -Context 'Community Beta FFmpeg sourceCompliance'
+    if ($externalLibraryAuditComplete -isnot [bool] -or -not [bool] $externalLibraryAuditComplete -or
+        $thirdPartyLicenseAuditComplete -isnot [bool] -or [bool] $thirdPartyLicenseAuditComplete -or
+        $toolchainRuntimeLicenseReviewStatus -cne 'pending-for-strict-public-release' -or
+        $ijgAttributionRequired -isnot [bool] -or -not [bool] $ijgAttributionRequired -or
+        $ijgAttributionIncluded -isnot [bool] -or -not [bool] $ijgAttributionIncluded -or
+        $patentReviewStatus -cne 'pending-for-strict-public-release') {
+        throw 'Community Beta FFmpeg must prove the zero-external-library audit and IJG notice while retaining honest pending toolchain-runtime-license, third-party-license, and patent reviews.'
+    }
+    $legalApprovalProperty = $sourceCompliance.PSObject.Properties['legalApprovalReference']
+    if ($null -eq $legalApprovalProperty -or $null -ne $legalApprovalProperty.Value) {
+        throw 'Community Beta FFmpeg must not claim a formal legal approval reference.'
+    }
+}
+elseif (-not $AllowUnsignedInternalRc) {
     if (-not $redistributionReady) {
         throw 'Public redistribution is blocked: FFmpeg sourceCompliance.redistributionReady is false. Use -AllowUnsignedInternalRc only for a non-redistributed internal RC.'
     }
@@ -2210,7 +2404,9 @@ $complianceReport = Get-CompliancePayloadReports `
     -ResourceRoot $resourceRoot `
     -RelativeRoot $ThirdPartyComplianceRelativeRoot `
     -RepositoryRoot $repositoryRoot `
-    -RequirePublicReady (-not [bool] $AllowUnsignedInternalRc)
+    -FfmpegManifestPath $manifestPath `
+    -ExpectedReleaseProfile $(if ($AllowUnsignedCommunityBeta) { 'community-beta' } else { 'public' }) `
+    -RequirePublicReady (-not ([bool] $AllowUnsignedInternalRc -or [bool] $AllowUnsignedCommunityBeta))
 
 $mainHash = Get-Sha256 -LiteralPath $mainExecutable
 $nsisHash = Get-Sha256 -LiteralPath $nsisBundle
@@ -2260,7 +2456,7 @@ $extractorItem = Get-Item -LiteralPath $nsisExtractor -Force
 if (($extractorItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "NSIS extractor must not be a reparse point: '$nsisExtractor'."
 }
-$permitUnsigned = [bool] $AllowUnsignedInternalRc
+$permitUnsigned = [bool] ($AllowUnsignedInternalRc -or $AllowUnsignedCommunityBeta)
 $signingRequirements = if ($permitUnsigned) {
     $null
 }
@@ -2291,10 +2487,13 @@ $mainSignature = Get-SignatureReport `
     -UnsignedAcceptanceReason $(if ($AllowUnsignedInternalRc) {
         '-AllowUnsignedInternalRc was supplied'
     }
+    elseif ($AllowUnsignedCommunityBeta) {
+        '-AllowUnsignedCommunityBeta was supplied; the installer must be disclosed as unsigned'
+    }
     else {
         'the public artifact signature is verified on the embedded NSS executable'
     })
-if (-not $AllowUnsignedInternalRc -and $mainSignature.status -cne 'NotSigned') {
+if (-not $permitUnsigned -and $mainSignature.status -cne 'NotSigned') {
     throw "Public release external UNK staging main executable must be NotSigned; got '$($mainSignature.status)'."
 }
 $nsisSignature = Get-SignatureReport `
@@ -2303,11 +2502,46 @@ $nsisSignature = Get-SignatureReport `
     -PermitUnsigned $permitUnsigned `
     -SigningRequirements $signingRequirements
 $ffmpegSignature = Get-SignatureReport -LiteralPath $ffmpegPath -Description 'bundled FFmpeg executable' -PermitUnsigned $true -HashPinnedOnly
+if ($AllowUnsignedCommunityBeta -and
+    ($mainSignature.status -cne 'NotSigned' -or
+        $nsisSignature.status -cne 'NotSigned' -or
+        [string] $nsisArchivePayload.embeddedMainSignature.status -cne 'NotSigned')) {
+    throw 'Community Beta requires the staging executable, embedded executable, and installer to all be NotSigned so the warning is accurate.'
+}
 
 $report = [ordered]@{
     status = 'passed'
-    releaseMode = if ($AllowUnsignedInternalRc) { 'internal-rc' } else { 'public-redistribution' }
+    releaseMode = if ($AllowUnsignedInternalRc) {
+        'internal-rc'
+    }
+    elseif ($AllowUnsignedCommunityBeta) {
+        'unsigned-community-beta'
+    }
+    else {
+        'public-redistribution'
+    }
     checkedAtUtc = [DateTime]::UtcNow.ToString('o')
+    strictPublicReleaseApproved = -not [bool] ($AllowUnsignedInternalRc -or $AllowUnsignedCommunityBeta)
+    communityBetaDecision = if ($AllowUnsignedCommunityBeta) {
+        [ordered]@{
+            path = $communityBetaDecisionPath
+            sha256 = Get-Sha256 -LiteralPath $communityBetaDecisionPath
+            strictPublicReleaseApproval = $false
+            ffmpegBinaryArchive = [ordered]@{
+                path = $communityBetaFfmpegArchive
+                sizeBytes = (Get-Item -LiteralPath $communityBetaFfmpegArchive -Force).Length
+                sha256 = Get-Sha256 -LiteralPath $communityBetaFfmpegArchive
+            }
+            ffmpegCorrespondingSource = [ordered]@{
+                path = $communityBetaSourceBundle
+                sizeBytes = (Get-Item -LiteralPath $communityBetaSourceBundle -Force).Length
+                sha256 = Get-Sha256 -LiteralPath $communityBetaSourceBundle
+            }
+        }
+    }
+    else {
+        $null
+    }
     publicSigningPolicy = if ($null -eq $signingRequirements) {
         $null
     }

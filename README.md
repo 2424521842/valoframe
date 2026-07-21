@@ -14,10 +14,10 @@
 </p>
 
 > [!WARNING]
-> 瓦刻仍处于开发预览阶段，**目前没有可公开下载的安装包**。未签名内部 RC 只用于项目负责人或同一法律主体控制的设备，不得转发或上传到 GitHub Release。准备参与受控测试前，请先阅读[小范围测试指南](docs/INTERNAL_TESTING.md)。
+> v0.1.0 Community Beta 是未签名的早期测试版本，Windows 可能显示“未知发布者”或 SmartScreen 警告。只从项目明确公布的入口下载并核对 SHA-256；该版本没有自动更新，也不等于严格正式发布批准。安装前请阅读 [Community Beta 说明](docs/COMMUNITY_BETA.md)。
 
 > [!NOTE]
-> 这是非官方社区项目，与 Riot Games、腾讯及其关联公司不存在隶属、赞助或认可关系。仓库负责人已声明相关游戏图片取得授权，但尚未向仓库自动化提供授权原件、可验证外部证据或具体许可条款。当前列出的用途只是准备测试的保守操作假设；发布源码改动、README 截图或任何外发包前，必须人工对照原始授权确认渠道、主体、地域、期限和展示方式。记录见[权利声明摘要](release/approvals/game-content-rights.json)。
+> 这是非官方社区项目，与 Riot Games、腾讯及其关联公司不存在隶属、赞助或认可关系。发布负责人已确认当前清单锁定的游戏图片可以随 v0.1.0 Community Beta 发布；这是项目负责人的渠道决定，不声称第三方批准或独立法律审核已经完成。记录见 [Community Beta 决定](release/approvals/community-beta-v0.1.0.json)、[本版本素材范围](release/approvals/community-beta-v0.1.0-game-content-scope.json)和[原有游戏素材记录](release/approvals/game-content-rights.json)。
 
 > 界面预览图已经在本地准备并完成脱敏/哈希记录；因其中包含游戏素材，在 `github-project-marketing` 范围完成人工核对前不嵌入公开 README。
 
@@ -45,10 +45,12 @@
 | --- | --- | --- |
 | 浏览器界面预览 | 可用 | 使用合成 mock 数据体验素材库、扫描、标签和详情；不访问真实本地素材 |
 | 桌面源码运行 | 内部测试 | 可验证真实扫描与本地预览；必须从干净提交构建并记录 commit |
-| 未签名 Windows RC | 受控验证 | 仅限负责人或同一法律主体控制的设备，不得对外分发 |
-| 公开安装包 | 阻断 | 第三方许可、游戏素材的公开安装器/Release 二进制下载范围、品牌身份、签名、干净 VM 与数据安全证据尚未闭合 |
+| Community Beta | 发布流程已准备 | 工作流通过后以 GitHub Prerelease 提供；未签名、无自动更新，下载后需核对 SHA-256 |
+| 严格正式发布 | 阻断 | 代码签名、可信时间戳、完整许可审阅、干净 VM 与数据安全证据等门禁尚未全部闭合 |
 
 本轮改动正在 Draft PR [#1](https://github.com/2424521842/valoframe/pull/1) 的后续候选中准备；在新 commit 推送且对应 CI 通过前，旧 PR run 不代表当前工作树。默认分支在合并前仍可能展示较早的仓库快照。
+
+Community Beta 的下载要求、Windows 警告、手动更新方式、游戏图片说明及 FFmpeg 许可/对应源码要求见 [Community Beta 说明](docs/COMMUNITY_BETA.md)。FFmpeg 只用于生成缩略图；发布集合必须同时提供其许可证材料与对应源码。
 
 ## 快速体验
 
@@ -136,6 +138,7 @@ npm run assets:verify
 ## 文档
 
 - [小范围测试](docs/INTERNAL_TESTING.md)
+- [Community Beta 说明](docs/COMMUNITY_BETA.md)
 - [本地数据与隐私](docs/PRIVACY.md)
 - [PRD](docs/PRD.md)
 - [Architecture](docs/ARCHITECTURE.md)
@@ -153,4 +156,4 @@ npm run assets:verify
 
 项目自有源代码和随附文档采用 [MIT License](LICENSE)。第三方依赖、FFmpeg、游戏内容、名称、商标、品牌图标及其他非项目自有素材不因此获得 MIT 授权，详见[许可范围说明](LICENSE-SCOPE.txt)与[许可文档](docs/LICENSING.md)。
 
-本项目旨在作为免费、非商业的社区工具开展，并参考 Riot Games 的 [Legal Jibber Jabber](https://www.riotgames.com/en/legal)。该网页本身不构成授权；仓库只记录了负责人“已取得授权”的声明、42 张素材的技术证据及保守操作限制，尚未独立审阅具体许可范围。人工核对完成前，不发布本轮源码/宣传图，不制作公开安装器或 Release 二进制，也不用于商业分发或第三方复用。VALORANT、《无畏契约》及相关名称、商标和游戏内容归其各自权利人所有。
+本项目旨在作为免费、非商业的社区工具开展，并参考 Riot Games 的 [Legal Jibber Jabber](https://www.riotgames.com/en/legal)。该网页本身不构成授权。发布负责人已确认清单锁定的 42 张游戏图片可以随 v0.1.0 Community Beta 发布；该决定不声称 Riot Games、腾讯或其他第三方批准，也不声称独立法律审核已经完成。Community Beta 不用于商业分发或第三方复用，并且不等于严格正式发布批准。VALORANT、《无畏契约》及相关名称、商标和游戏内容归其各自权利人所有。

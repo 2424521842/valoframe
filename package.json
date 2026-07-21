@@ -23,6 +23,7 @@
     "release:ffmpeg:verify:internal": "pwsh -NoLogo -NoProfile -File ./scripts/release/verify-ffmpeg.ps1 -ValidationOnly",
     "release:compliance:generate": "node ./scripts/release/generate-compliance-evidence.mjs --output src-tauri/resources/licenses/third-party --offline",
     "release:bundle:windows:internal": "tauri build --bundles nsis --ci --no-sign",
+    "release:bundle:windows:community-beta": "tauri build --bundles nsis --ci --no-sign",
     "tauri": "tauri"
   },
   "dependencies": {

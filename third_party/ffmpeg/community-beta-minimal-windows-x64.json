@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "status": "community-beta-technical-packaging-contract",
+  "channel": "community-beta",
+  "platform": "windows",
+  "architecture": "x86_64",
+  "candidateManifest": "third_party/ffmpeg/minimal-windows-x64-candidate.json",
+  "sourceCommit": "ce3c09c101c83add623774d414a9f9498caf5c25",
+  "requiredInput": {
+    "candidateStatus": "candidate-not-promoted",
+    "buildMetadataStatus": "built-candidate-not-promoted",
+    "windowsVerificationStatus": "passed-candidate-not-promoted",
+    "windowsVerificationPromotionAuthorized": false,
+    "checksumManifest": "SHA256SUMS.txt",
+    "windowsVerificationFile": "WINDOWS-VERIFICATION.json",
+    "artifactFiles": [
+      "BUILD-METADATA.json",
+      "compiler-version.txt",
+      "config.h",
+      "config.mak",
+      "configure-flags.txt",
+      "ffmpeg-corresponding-source.tar.xz",
+      "ffmpeg.exe",
+      "pe-imports.txt"
+    ],
+    "maximumExecutableBytes": 134217728,
+    "maximumSourceArchiveBytes": 536870912
+  },
+  "licenseMaterials": [
+    {
+      "sourcePath": "src-tauri/resources/licenses/ffmpeg/COPYING.LGPLv3.txt",
+      "outputFileName": "COPYING.LGPLv3.txt",
+      "sizeBytes": 7651,
+      "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+    },
+    {
+      "sourcePath": "src-tauri/resources/licenses/ffmpeg/COPYING.GPLv3.txt",
+      "outputFileName": "COPYING.GPLv3.txt",
+      "sizeBytes": 35147,
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    }
+  ],
+  "output": {
+    "status": "prepared-community-beta-candidate-not-public-release-approved",
+    "runtimeRelativePath": "installer-resource-overlay/bin/ffmpeg.exe",
+    "licenseRootRelativePath": "installer-resource-overlay/licenses/ffmpeg",
+    "releaseAssetsRootRelativePath": "release-assets",
+    "sourceArchiveRelativePath": "release-assets/ffmpeg-corresponding-source.tar.xz",
+    "buildEvidenceRootRelativePath": "release-assets/build-evidence",
+    "windowsVerificationRelativePath": "release-assets/WINDOWS-VERIFICATION.json",
+    "packageManifestFileName": "COMMUNITY-BETA-FFMPEG-PACKAGE.json",
+    "checksumManifestFileName": "SHA256SUMS.txt"
+  },
+  "complianceBoundary": {
+    "technicalPackagingOnly": true,
+    "communityBetaDistributionAuthorized": false,
+    "publicReleaseApproved": false,
+    "modifiesPublicReleasePolicy": false,
+    "requiresReleaseOwnerApprovalBeforeDistribution": true,
+    "requiresCodecPatentReviewBeforeStrictPublicRelease": true,
+    "requiresToolchainRuntimeLicenseReviewBeforeStrictPublicRelease": true,
+    "notice": "A successful technical package proves artifact integrity and runtime verification only. Community-beta distribution additionally requires the repository release-owner decision; it never grants strict public-release approval."
+  }
+}

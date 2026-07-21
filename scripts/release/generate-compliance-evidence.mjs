@@ -20,6 +20,7 @@ const repositoryRoot = resolve(scriptDirectory, "..", "..");
 const options = parseArguments(process.argv.slice(2));
 const outputDirectory = resolve(repositoryRoot, options.output);
 const targetTriple = options.target ?? "x86_64-pc-windows-msvc";
+const releaseProfile = options.releaseProfile ?? "public";
 const generatedAt = new Date().toISOString();
 const licenseTextCatalog = new Map();
 
@@ -30,11 +31,13 @@ const packageJsonPath = join(repositoryRoot, "package.json");
 const packageLockPath = join(repositoryRoot, "package-lock.json");
 const cargoTomlPath = join(repositoryRoot, "src-tauri", "Cargo.toml");
 const cargoLockPath = join(repositoryRoot, "src-tauri", "Cargo.lock");
+const ffmpegManifestRelativePath = normalizeSafeRelativePath(
+  options.ffmpegManifest ?? "third_party/ffmpeg/windows-x64.json",
+  "FFmpeg manifest",
+);
 const ffmpegManifestPath = join(
   repositoryRoot,
-  "third_party",
-  "ffmpeg",
-  "windows-x64.json",
+  ...ffmpegManifestRelativePath.split("/"),
 );
 const ffmpegExecutablePath = join(
   repositoryRoot,
@@ -123,6 +126,8 @@ writeText("THIRD-PARTY-LICENSES.txt", createConsolidatedLicenseText());
 
 const summary = {
   schemaVersion: 1,
+  releaseProfile,
+  productionApproval: false,
   status: blockers.length === 0 ? "ready-for-approval" : "generated-with-blockers",
   generatedAt,
   target: targetTriple,
@@ -179,6 +184,7 @@ const evidenceFiles = listFilesRecursively(outputDirectory)
 
 writeJson("COMPLIANCE-MANIFEST.json", {
   schemaVersion: 1,
+  releaseProfile,
   generatedAt,
   generator: {
     path: "scripts/release/generate-compliance-evidence.mjs",
@@ -190,7 +196,7 @@ writeJson("COMPLIANCE-MANIFEST.json", {
     ["package-lock.json", packageLockPath],
     ["src-tauri/Cargo.toml", cargoTomlPath],
     ["src-tauri/Cargo.lock", cargoLockPath],
-    ["third_party/ffmpeg/windows-x64.json", ffmpegManifestPath],
+    [ffmpegManifestRelativePath, ffmpegManifestPath],
     [licenseOverrideManifestRelativePath, licenseOverrideManifestPath],
     [licenseOverrideApprovalRelativePath, licenseOverrideApprovalPath],
     ...licenseOverrideResult.inputFiles.map((entry) => [entry.path, entry.absolutePath]),
@@ -209,19 +215,36 @@ const finalReport = {
 process.stdout.write(`${JSON.stringify(finalReport, null, 2)}\n`);
 
 function parseArguments(argumentsList) {
-  const parsed = { output: null, target: null, offline: false };
+  const parsed = {
+    output: null,
+    target: null,
+    ffmpegManifest: null,
+    releaseProfile: null,
+    offline: false,
+  };
   for (let index = 0; index < argumentsList.length; index += 1) {
     const argument = argumentsList[index];
     if (argument === "--offline") {
       parsed.offline = true;
       continue;
     }
-    if (argument === "--output" || argument === "--target") {
+    if (
+      argument === "--output" ||
+      argument === "--target" ||
+      argument === "--ffmpeg-manifest" ||
+      argument === "--release-profile"
+    ) {
       const value = argumentsList[index + 1];
       if (!value || value.startsWith("--")) {
         throw new Error(`${argument} requires a value.`);
       }
-      parsed[argument.slice(2)] = value;
+      const key =
+        argument === "--ffmpeg-manifest"
+          ? "ffmpegManifest"
+          : argument === "--release-profile"
+            ? "releaseProfile"
+            : argument.slice(2);
+      parsed[key] = value;
       index += 1;
       continue;
     }
@@ -232,6 +255,9 @@ function parseArguments(argumentsList) {
   }
   if (parsed.target && !/^[A-Za-z0-9_.-]+$/.test(parsed.target)) {
     throw new Error(`Unsafe target triple: ${parsed.target}`);
+  }
+  if (parsed.releaseProfile && !["public", "community-beta"].includes(parsed.releaseProfile)) {
+    throw new Error(`Unsupported release profile: ${parsed.releaseProfile}`);
   }
   return parsed;
 }
