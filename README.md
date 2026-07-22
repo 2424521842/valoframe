@@ -25,8 +25,8 @@
 
 - **GitHub（推荐）**：[下载 `VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.1.0-beta.1/VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe)（6.84 MB）
   - SHA-256：`a4993e5152cddc42623b4fe7dc308100f142617765ddad36aab66ae8aeb40d08`
-- **蓝奏云（备用）**：[下载 `瓦刻_0.1.0_x64-setup.exe`](https://wwbfc.lanzoue.com/iLyG73xzgj8f)（密码：`4reb`，39.8 MB）
-  - SHA-256：`3e7d798ba1242c7598673febe2931369d5c2a2645c0a93923459182ea075fed0`
+- **蓝奏云（备用）**：[下载 `瓦刻_0.1.0_x64-setup.exe`](https://wwbfc.lanzoue.com/iYmie3y080ef)（密码：`4sj6`，6.83 MB）
+  - SHA-256：`3e8bc3692119a8f2c2e32fc4c46928e37cbfa40e6efeeafbc0060c7aac79ef74`
 
 > [!IMPORTANT]
 > 普通用户只需下载上面列出的 `.exe` 安装包。Release 页中的 `Source code`、FFmpeg 压缩包、许可归档、JSON 报告、校验清单等是源码或技术合规附件，不是安装包。两个下载入口目前对应不同文件，请按所选入口的文件名和 SHA-256 分别核验，不要混用校验值。
