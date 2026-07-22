@@ -1961,6 +1961,7 @@ if ($AllowUnsignedCommunityBeta) {
     $betaConfirmations = Get-RequiredJsonProperty -Object $communityBetaDecision -Name 'releaseOwnerConfirmations' -Context 'Community Beta decision'
     foreach ($confirmation in @(
             'gameImagesMayBeDistributedInThisChannel',
+            'gameContentScreenshotMayBePublishedInRepositoryReadme',
             'projectBrandIconMayBeDistributedInThisChannel',
             'unofficialProjectDisclaimerApprovedForThisChannel',
             'ffmpegMinimalBuildMayBeDistributedInThisChannel',

@@ -7,7 +7,7 @@
   "releaseOwnerAuthorization": {
     "authority": "repository-release-owner",
     "explicitChannelAuthorizationReceived": true,
-    "recordedOn": "2026-07-21",
+    "recordedOn": "2026-07-22",
     "strictPublicReleaseApproval": false
   },
   "baseRightsRecord": "release/approvals/game-content-rights.json",
@@ -19,6 +19,7 @@
   },
   "distributionScopes": [
     "github-public-prerelease",
+    "github-project-marketing",
     "public-release-artifact-download",
     "public-windows-installer",
     "in-app-display"

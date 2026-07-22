@@ -10,6 +10,15 @@ param(
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string] $SourceCommit,
 
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')]
+    [string] $RepositorySlug,
+
+    [string] $MirrorUrl = '',
+    [string] $MirrorPassword = '',
+    [string] $MirrorFileName = '',
+    [string] $MirrorSha256 = '',
+
     [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $InstallerPath,
     [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $FfmpegPackageRoot,
     [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $FfmpegArchivePath,
@@ -108,6 +117,22 @@ function Add-ZipEntry {
         $output.Dispose()
         $input.Dispose()
     }
+}
+
+$mirrorValues = @($MirrorUrl, $MirrorPassword, $MirrorFileName, $MirrorSha256)
+$hasMirror = @($mirrorValues | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0
+Assert-Condition -Condition (-not $hasMirror -or @($mirrorValues | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -eq 0) -Message 'Mirror metadata must be entirely empty or fully specified.'
+if ($hasMirror) {
+    $mirrorUri = $null
+    Assert-Condition -Condition (
+        [Uri]::TryCreate($MirrorUrl, [UriKind]::Absolute, [ref] $mirrorUri) -and
+        $mirrorUri.Scheme -ceq 'https' -and
+        [string]::IsNullOrEmpty($mirrorUri.UserInfo) -and
+        $MirrorUrl -cnotmatch '[\s`<>()\[\]]'
+    ) -Message 'Mirror URL must be a safe absolute HTTPS URL.'
+    Assert-Condition -Condition ($MirrorPassword -cmatch '^[A-Za-z0-9]{1,32}$') -Message 'Mirror password must be 1-32 ASCII letters or digits.'
+    Assert-Condition -Condition ($MirrorFileName -cmatch '^[^\x00-\x1f\\/:*?"<>|]+\.exe$' -and -not $MirrorFileName.Contains('`')) -Message 'Mirror file name must be a safe .exe file name.'
+    Assert-Condition -Condition ($MirrorSha256 -cmatch '^[0-9a-f]{64}$') -Message 'Mirror SHA-256 must be 64 lowercase hexadecimal characters.'
 }
 
 $installer = Get-RegularFile -Path $InstallerPath -Description 'Community Beta installer'
@@ -213,7 +238,9 @@ Assert-Condition -Condition (
 
 [void] [System.IO.Directory]::CreateDirectory($output)
 $installerOutputName = "VALOFRAME-$ReleaseTag-x64-unsigned-setup.exe"
-Copy-Item -LiteralPath $installer -Destination (Join-Path $output $installerOutputName)
+$installerOutputPath = Join-Path $output $installerOutputName
+Copy-Item -LiteralPath $installer -Destination $installerOutputPath
+$installerSha256 = Get-Sha256 -Path $installerOutputPath
 Copy-Item -LiteralPath $ffmpegArchive -Destination (Join-Path $output ([System.IO.Path]::GetFileName($ffmpegArchive)))
 Copy-Item -LiteralPath $sourceArchive -Destination (Join-Path $output ([System.IO.Path]::GetFileName($sourceArchive)))
 Copy-Item -LiteralPath $bundleReportFile -Destination (Join-Path $output 'community-beta-bundle-report.json')
@@ -256,20 +283,65 @@ Authenticode identity, trusted timestamp, formal VM evidence, or legal approval.
 "@
 Write-LfText -Path (Join-Path $output 'COMMUNITY-BETA-NOTICE.txt') -Text $notice -Encoding ([System.Text.UTF8Encoding]::new($false))
 
+$repositoryUrl = "https://github.com/$RepositorySlug"
+$installerDownloadUrl = "$repositoryUrl/releases/download/$ReleaseTag/$installerOutputName"
+$mirrorSection = if ($hasMirror) {
+@"
+### 备用镜像
+
+[**下载 ``$MirrorFileName``**]($MirrorUrl)
+
+- 密码：``$MirrorPassword``
+- SHA-256：``$MirrorSha256``
+
+> 镜像文件可能与 GitHub 安装包使用不同文件名或打包方式，请只使用这一节对应的 SHA-256 核验镜像文件，不要混用校验值。
+
+"@
+}
+else { '' }
+
 $releaseNotes = @"
-UNSIGNED COMMUNITY BETA — NOT A FORMAL PUBLIC RELEASE
+# 瓦刻（VALOFRAME）$ReleaseTag · Community Beta
 
-瓦刻 $ReleaseTag 是面向社区测试者的早期 Windows 版本。
+面向 Windows 10/11 x64 的社区测试版本。瓦刻在本机整理《无畏契约》高光视频，提供按账号与对局归组、筛选、预览、收藏、标签、备注、回收站和导出能力。
 
-- 安装包未签名，Windows 可能显示“未知发布者”或 SmartScreen 警告。
-- 没有应用内自动更新；后续版本需手动下载安装。
-- 请先用本页 SHA256SUMS.txt 核对下载文件。
-- FFmpeg 仅用于生成本地视频缩略图；最小二进制、构建证据、许可证和对应源码与安装包同时提供。
-- 首次使用前请备份应用数据；测试永久删除时只使用可丢弃的副本。
+## 下载
 
-这不是严格正式发布。代码签名、可信时间戳、正式 VM/数据安全证据和完整审阅仍在后续版本独立完成。
+### GitHub（推荐）
 
-Source commit: $SourceCommit
+[**下载 ``$installerOutputName``**]($installerDownloadUrl)
+
+- SHA-256：``$installerSha256``
+
+$mirrorSection> 普通用户只需下载本节列出的 ``.exe`` 安装包。本页的 ``Source code``、FFmpeg 压缩包、许可归档、JSON 报告、校验清单等属于源码或技术合规附件，不是安装程序。
+
+## 安装与 Windows 提示
+
+1. 下载后运行 ``Get-FileHash -Algorithm SHA256 -LiteralPath '.\安装包文件名.exe'``，确认结果与所选入口公布的 SHA-256 完全一致。
+2. 当前安装包未签名，Windows 可能显示“未知发布者”或 SmartScreen 的“Windows 已保护你的电脑”。确认来源和哈希后，可选择“更多信息”→“仍要运行”；无法确认时请取消安装。
+3. 此版本没有自动更新，后续版本需要手动下载安装。
+
+## 主要功能
+
+- 自动发现并只读扫描本机高光来源，按账号与对局整理素材。
+- 按英雄、地图、模式、日期、视频类型、标签和文件状态筛选。
+- 本地预览、收藏、自定义标签、备注、回收站和批量导出。
+- 本地优先：不提供云同步或遥测，视频与索引数据保留在设备上。
+
+## 测试版说明
+
+- 首次使用前建议备份应用数据；测试永久删除时只使用可丢弃的视频副本。
+- FFmpeg 仅用于本地缩略图生成。最小二进制、构建证据、许可证和对应源码与安装包同时提供，普通安装无需单独下载这些技术附件。
+- 这是未签名的 Community Beta，不是仓库定义的严格正式发布。代码签名、可信时间戳、正式 VM/数据安全证据和完整审阅仍在后续版本独立完成。
+- 项目为非官方社区工具，与 Riot Games、腾讯及其关联公司不存在隶属、赞助或认可关系。
+
+## 反馈
+
+- [提交 Beta 反馈]($repositoryUrl/issues/new?template=beta_feedback.yml)
+- [报告可复现问题]($repositoryUrl/issues/new?template=bug_report.yml)
+- [阅读 Community Beta 完整说明]($repositoryUrl/blob/main/docs/COMMUNITY_BETA.md)
+
+Source commit: ``$SourceCommit``
 "@
 Write-LfText -Path (Join-Path $output 'RELEASE-NOTES.md') -Text $releaseNotes -Encoding ([System.Text.UTF8Encoding]::new($false))
 
@@ -302,7 +374,7 @@ Write-LfText -Path (Join-Path $output 'SHA256SUMS.txt') -Text ($checksumLines -j
     fileCount = $allowedNames.Count + 1
     installer = [ordered]@{
         fileName = $installerOutputName
-        sha256 = Get-Sha256 -Path (Join-Path $output $installerOutputName)
+        sha256 = $installerSha256
         authenticodeStatus = $installerSignature
     }
     checksumManifest = 'SHA256SUMS.txt'

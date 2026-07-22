@@ -117,7 +117,7 @@ test("owner attestation remains pending review and narrower than public release"
   }
 });
 
-test("GitHub preview is synthetic, hash-pinned, and publication-blocked", () => {
+test("GitHub preview is synthetic, hash-pinned, and explicitly approved for publication", () => {
   const imageManifest = JSON.parse(
     readFileSync(
       new URL("../docs/images/manifest.json", import.meta.url),
@@ -135,6 +135,7 @@ test("GitHub preview is synthetic, hash-pinned, and publication-blocked", () => 
       gameAssetManifestSha256: string;
       gameAssetCollectionFingerprint: string;
       authorizationReference: string;
+      publicationDecisionReference: string;
       operationalAssumptionScope: string;
       publicationApproved: boolean;
       manualScopeReviewRequired: boolean;
@@ -163,8 +164,33 @@ test("GitHub preview is synthetic, hash-pinned, and publication-blocked", () => 
     manualReviewRequired: boolean;
     repositoryOperationalAssumptionScopes: string[];
   };
+  const channelAuthorization = JSON.parse(
+    readFileSync(
+      new URL(
+        "../release/approvals/community-beta-v0.1.0-game-content-scope.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as {
+    status: string;
+    distributionScopes: string[];
+  };
+  const releaseDecision = JSON.parse(
+    readFileSync(
+      new URL(
+        "../release/approvals/community-beta-v0.1.0.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as {
+    releaseOwnerConfirmations: {
+      gameContentScreenshotMayBePublishedInRepositoryReadme: boolean;
+    };
+  };
 
-  assert.equal(imageManifest.schemaVersion, 1);
+  assert.equal(imageManifest.schemaVersion, 2);
   assert.equal(imageManifest.images.length, 1);
   const image = imageManifest.images[0];
   const imageBytes = readFileSync(new URL(`../${image.path}`, import.meta.url));
@@ -190,7 +216,11 @@ test("GitHub preview is synthetic, hash-pinned, and publication-blocked", () => 
   );
   assert.equal(
     image.authorizationReference,
-    assetManifest.authorizationReference,
+    "release/approvals/community-beta-v0.1.0-game-content-scope.json",
+  );
+  assert.equal(
+    image.publicationDecisionReference,
+    "release/approvals/community-beta-v0.1.0.json",
   );
   assert.equal(
     authorization.repositoryOperationalAssumptionScopes.includes(
@@ -199,8 +229,23 @@ test("GitHub preview is synthetic, hash-pinned, and publication-blocked", () => 
     true,
   );
   assert.equal(authorization.manualReviewRequired, true);
-  assert.equal(image.publicationApproved, false);
-  assert.equal(image.manualScopeReviewRequired, true);
+  assert.equal(
+    channelAuthorization.status,
+    "approved-by-release-owner-for-community-beta",
+  );
+  assert.equal(
+    channelAuthorization.distributionScopes.includes(
+      image.operationalAssumptionScope,
+    ),
+    true,
+  );
+  assert.equal(
+    releaseDecision.releaseOwnerConfirmations
+      .gameContentScreenshotMayBePublishedInRepositoryReadme,
+    true,
+  );
+  assert.equal(image.publicationApproved, true);
+  assert.equal(image.manualScopeReviewRequired, false);
   assert.deepEqual(image.renderingOperations, [
     "display-scaling",
     "css-cropping-and-masking",

@@ -190,6 +190,7 @@ $decision = Get-Content -Raw -LiteralPath $decisionPath -Encoding UTF8 | Convert
 Assert-Condition -Condition ([long] $decision.schemaVersion -eq 1 -and [string] $decision.channel -ceq 'community-beta' -and $decision.strictPublicReleaseApproval -eq $false) -Message 'Community Beta decision record is invalid.'
 foreach ($confirmation in @(
         'gameImagesMayBeDistributedInThisChannel',
+        'gameContentScreenshotMayBePublishedInRepositoryReadme',
         'projectBrandIconMayBeDistributedInThisChannel',
         'unofficialProjectDisclaimerApprovedForThisChannel',
         'ffmpegMinimalBuildMayBeDistributedInThisChannel',

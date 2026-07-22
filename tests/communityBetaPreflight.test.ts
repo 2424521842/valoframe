@@ -97,6 +97,7 @@ test("fails closed on approval schema, channel, strict approval, and false or mi
     ["channel", (approval) => (approval.channel = "public")],
     ["strict", (approval) => (approval.strictPublicReleaseApproval = true)],
     ["game images", (approval) => (approval.releaseOwnerConfirmations.gameImagesMayBeDistributedInThisChannel = false)],
+    ["README screenshot", (approval) => delete approval.releaseOwnerConfirmations.gameContentScreenshotMayBePublishedInRepositoryReadme],
     ["brand icon", (approval) => delete approval.releaseOwnerConfirmations.projectBrandIconMayBeDistributedInThisChannel],
     ["disclaimer", (approval) => delete approval.releaseOwnerConfirmations.unofficialProjectDisclaimerApprovedForThisChannel],
     ["FFmpeg distribution", (approval) => (approval.releaseOwnerConfirmations.ffmpegMinimalBuildMayBeDistributedInThisChannel = false)],
@@ -343,6 +344,7 @@ function betaApproval() {
     strictPublicReleaseApproval: false,
     releaseOwnerConfirmations: {
       gameImagesMayBeDistributedInThisChannel: true,
+      gameContentScreenshotMayBePublishedInRepositoryReadme: true,
       projectBrandIconMayBeDistributedInThisChannel: true,
       unofficialProjectDisclaimerApprovedForThisChannel: true,
       ffmpegMinimalBuildMayBeDistributedInThisChannel: true,
@@ -449,6 +451,7 @@ function createGameContentFixture(root: string) {
       },
       distributionScopes: [
         "github-public-prerelease",
+        "github-project-marketing",
         "public-release-artifact-download",
         "public-windows-installer",
         "in-app-display",

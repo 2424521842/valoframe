@@ -15,6 +15,22 @@ on:
         description: "Type UNSIGNED-COMMUNITY-BETA <tag> <approved_source_commit>"
         required: true
         type: string
+      mirror_url:
+        description: "Optional HTTPS mirror URL; fill all four mirror fields or leave all empty"
+        required: false
+        type: string
+      mirror_password:
+        description: "Optional mirror password"
+        required: false
+        type: string
+      mirror_file_name:
+        description: "Optional mirror .exe file name"
+        required: false
+        type: string
+      mirror_sha256:
+        description: "Optional lowercase SHA-256 for the mirror file"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -571,10 +587,20 @@ jobs:
 
       - name: Assemble immutable prerelease assets
         shell: pwsh
+        env:
+          MIRROR_URL: ${{ inputs.mirror_url }}
+          MIRROR_PASSWORD: ${{ inputs.mirror_password }}
+          MIRROR_FILE_NAME: ${{ inputs.mirror_file_name }}
+          MIRROR_SHA256: ${{ inputs.mirror_sha256 }}
         run: |
           $assetsJson = & ./scripts/release/package-community-beta-assets.ps1 `
             -ReleaseTag $env:RELEASE_TAG `
             -SourceCommit $env:GITHUB_SHA `
+            -RepositorySlug $env:GITHUB_REPOSITORY `
+            -MirrorUrl $env:MIRROR_URL `
+            -MirrorPassword $env:MIRROR_PASSWORD `
+            -MirrorFileName $env:MIRROR_FILE_NAME `
+            -MirrorSha256 $env:MIRROR_SHA256 `
             -InstallerPath $env:BETA_INSTALLER `
             -FfmpegPackageRoot $env:FFMPEG_PACKAGE_ROOT `
             -FfmpegArchivePath $env:BETA_FFMPEG_ARCHIVE `
@@ -714,7 +740,7 @@ jobs:
           gh release create "$RELEASE_TAG" "${assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
-            --title "VALOFRAME unsigned community beta $RELEASE_TAG" \
+            --title "瓦刻（VALOFRAME）$RELEASE_TAG · Community Beta" \
             --notes-file RELEASE-NOTES.md \
             --prerelease \
             --latest=false

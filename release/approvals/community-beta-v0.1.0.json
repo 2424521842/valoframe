@@ -8,6 +8,7 @@
   "strictPublicReleaseApproval": false,
   "releaseOwnerConfirmations": {
     "gameImagesMayBeDistributedInThisChannel": true,
+    "gameContentScreenshotMayBePublishedInRepositoryReadme": true,
     "projectBrandIconMayBeDistributedInThisChannel": true,
     "unofficialProjectDisclaimerApprovedForThisChannel": true,
     "ffmpegMinimalBuildMayBeDistributedInThisChannel": true,
@@ -31,6 +32,7 @@
   },
   "gameContentRecord": "release/approvals/game-content-rights.json",
   "gameContentChannelScopeRecord": "release/approvals/community-beta-v0.1.0-game-content-scope.json",
+  "publishedScreenshotManifest": "docs/images/manifest.json",
   "userDocumentation": "docs/COMMUNITY_BETA.md",
   "nonAssertions": [
     "This record is not an approval by Riot Games, Tencent, or any other third party.",
