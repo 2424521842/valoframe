@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "images": [
     {
       "path": "docs/images/valoframe-library.png",
@@ -21,10 +21,11 @@
       "gameAssetManifest": "src/data/valorantAssets.json",
       "gameAssetManifestSha256": "f647a04eb7879d9cb191136026220a26addc09e789f60ee21665b7512dfa8e8e",
       "gameAssetCollectionFingerprint": "26c4c77a5a13d3ca1a84f4616b0cba1f251462882a0e86f9592d5fc8ef2e1c13",
-      "authorizationReference": "release/approvals/game-content-rights.json",
+      "authorizationReference": "release/approvals/community-beta-v0.1.0-game-content-scope.json",
+      "publicationDecisionReference": "release/approvals/community-beta-v0.1.0.json",
       "operationalAssumptionScope": "github-project-marketing",
-      "publicationApproved": false,
-      "manualScopeReviewRequired": true,
+      "publicationApproved": true,
+      "manualScopeReviewRequired": false,
       "renderingOperations": [
         "display-scaling",
         "css-cropping-and-masking",
@@ -36,7 +37,7 @@
         "maps/756da597-416b-c0f2-f47b-afbdf28670bc.png",
         "maps/7eaecc1b-4337-bbf6-6ab9-04b8f06b3319.png"
       ],
-      "publicationNote": "Prepared local preview only. Do not publish this screenshot until a reviewer compares the source authorization with the github-project-marketing scope and rendering operations. The image bytes are fixed by SHA-256; re-capture if the rendered UI or included asset bytes change."
+      "publicationNote": "The repository release owner explicitly approved this hash-locked synthetic-data screenshot for github-project-marketing on 2026-07-22. This is a channel publication decision, not evidence of Riot Games, Tencent, or another third party approving or endorsing the project. Re-capture and re-approve if the rendered UI or included asset bytes change."
     }
   ]
 }

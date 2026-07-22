@@ -3191,6 +3191,23 @@ h1 {
   text-align: center;
 }
 
+.match-library-state-icon {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 4px;
+  border: 1px solid rgba(255, 70, 85, 0.22);
+  border-radius: 50%;
+  color: #ff4655;
+  background: rgba(255, 70, 85, 0.08);
+}
+
+.match-library-state-icon svg {
+  width: 28px;
+  height: 28px;
+}
+
 .match-library-state h2 {
   margin: 0;
 }

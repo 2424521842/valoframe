@@ -9,6 +9,8 @@ Community Beta 是面向社区测试者的早期 Windows 版本。它用于收�
 - Community Beta 没有自动更新。安装后不会自行获取新版本；请手动查看项目发布页和版本说明。
 - Beta 可能包含兼容性、性能或数据处理缺陷。首次使用前应备份应用数据；测试永久删除时只使用另外复制、可以丢弃的视频。
 
+当前 `v0.1.0-beta.1` 的主安装包是 [GitHub 上的 `VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.1.0-beta.1/VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe)，SHA-256 为 `a4993e5152cddc42623b4fe7dc308100f142617765ddad36aab66ae8aeb40d08`。备用入口是[蓝奏云 `瓦刻_0.1.0_x64-setup.exe`](https://wwbfc.lanzoue.com/iLyG73xzgj8f)（密码 `4reb`），SHA-256 为 `3e7d798ba1242c7598673febe2931369d5c2a2645c0a93923459182ea075fed0`。两个入口对应不同文件，必须按所选入口分别核验，不能混用校验值。
+
 ## 游戏图片与非官方声明
 
 发布负责人已确认，当前清单锁定的游戏图片可以随 v0.1.0 Community Beta 发布。该确认是项目发布负责人的渠道决定，不声称 Riot Games、腾讯或其他第三方已经批准本项目，也不声称独立法律审核已经完成。
@@ -40,8 +42,9 @@ Community Beta 只允许从默认分支手动发布，不能通过 push、PR 或
 1. 确认目标提交已经进入 GitHub 默认分支，CI 全部通过，并复制该提交的完整 40 位小写 SHA。
 2. 在 GitHub Actions 中选择 `Unsigned community beta`。
 3. 输入新标签，例如 `v0.1.0-beta.1`，并把完整 SHA 填入 `approved_source_commit`。首次发布不要预先创建标签；若上一次发布上传阶段失败，工作流只允许复用精确指向该 SHA 且没有同名 Release 的重试标签。
-4. 在确认框输入 `UNSIGNED-COMMUNITY-BETA v0.1.0-beta.1 <完整 SHA>`；标签和 SHA 必须与前两项输入逐字一致。
-5. 工作流会重新构建并在原生 Windows 上验证最小 FFmpeg，生成对应源码和许可材料，构建未签名 NSIS，运行 bundle 门禁与启动烟测，再创建 GitHub **Prerelease**。
+4. 如需在发布说明中展示备用镜像，必须同时填写 `mirror_url`、`mirror_password`、`mirror_file_name` 和 `mirror_sha256`；没有已核验镜像时四项全部留空。镜像哈希必须来自实际下载后的文件，不能复用 GitHub 安装包哈希。
+5. 在确认框输入 `UNSIGNED-COMMUNITY-BETA v0.1.0-beta.1 <完整 SHA>`；标签和 SHA 必须与前两项输入逐字一致。
+6. 工作流会重新构建并在原生 Windows 上验证最小 FFmpeg，生成对应源码和许可材料，构建未签名 NSIS，运行 bundle 门禁与启动烟测，再创建带直接安装链接、哈希、安装提示和技术附件说明的 GitHub **Prerelease**。
 
 发布集合固定包含未签名安装器、`SHA256SUMS.txt`、最小 FFmpeg 二进制/构建证据、`ffmpeg-corresponding-source.tar.xz`、许可归档及门禁报告。工作流拒绝覆盖任何已有 Release；若发布上传失败后留下标签，只有标签仍精确指向已批准 SHA 且 Release 查询明确返回不存在时才能安全重试。它不会创建稳定版，并明确禁止生成 updater 的 `latest.json` 或 `.sig`。
 

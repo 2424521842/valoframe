@@ -13,6 +13,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 
 const REQUIRED_CONFIRMATIONS = [
   "gameImagesMayBeDistributedInThisChannel",
+  "gameContentScreenshotMayBePublishedInRepositoryReadme",
   "projectBrandIconMayBeDistributedInThisChannel",
   "unofficialProjectDisclaimerApprovedForThisChannel",
   "ffmpegMinimalBuildMayBeDistributedInThisChannel",
@@ -32,6 +33,7 @@ const REQUIRED_DISTRIBUTION_REQUIREMENTS = [
 ];
 const GAME_CONTENT_DISTRIBUTION_SCOPES = [
   "github-public-prerelease",
+  "github-project-marketing",
   "public-release-artifact-download",
   "public-windows-installer",
   "in-app-display",

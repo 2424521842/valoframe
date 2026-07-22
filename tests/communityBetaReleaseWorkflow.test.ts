@@ -31,6 +31,14 @@ test("community beta workflow can only create an acknowledged prerelease", () =>
   assert.match(workflow, /workflow_dispatch:/u);
   assert.doesNotMatch(workflow, /\n\s+(?:push|pull_request|schedule):/u);
   assert.match(workflow, /approved_source_commit:/u);
+  for (const mirrorInput of [
+    "mirror_url",
+    "mirror_password",
+    "mirror_file_name",
+    "mirror_sha256",
+  ]) {
+    assert.match(workflow, new RegExp(`${mirrorInput}:`, "u"));
+  }
   assert.match(
     workflow,
     /expected_confirmation="UNSIGNED-COMMUNITY-BETA \$RELEASE_TAG \$APPROVED_SOURCE_COMMIT"/u,
@@ -50,6 +58,10 @@ test("community beta workflow can only create an acknowledged prerelease", () =>
   assert.match(workflow, /Existing tag .* points to .* expected/u);
   assert.match(workflow, /Reusing exact retry tag/u);
   assert.match(workflow, /--verify-tag/u);
+  assert.match(
+    workflow,
+    /--title "瓦刻（VALOFRAME）\$RELEASE_TAG · Community Beta"/u,
+  );
   assert.doesNotMatch(workflow, /gh release create[\s\S]*?--target "\$GITHUB_SHA"/u);
   assert.match(workflow, /environment: community-beta-publish/u);
   assert.match(
@@ -90,6 +102,27 @@ test("community beta workflow is unsigned, updater-free, and visibly labeled", (
   );
   assert.match(workflow, /-name 'latest\.json'/u);
   assert.doesNotMatch(workflow, /createUpdaterArtifacts:\s*true/u);
+});
+
+test("release notes lead users to the installer and explain technical attachments", () => {
+  for (const marker of [
+    "## 下载",
+    "GitHub（推荐）",
+    "普通用户只需下载本节列出的",
+    "Source code",
+    "SmartScreen",
+    "更多信息",
+    "主要功能",
+    "技术合规附件",
+  ]) {
+    assert.match(packageAssets, new RegExp(marker, "u"));
+  }
+  assert.match(
+    packageAssets,
+    /releases\/download\/\$ReleaseTag\/\$installerOutputName/u,
+  );
+  assert.match(packageAssets, /Mirror metadata must be entirely empty or fully specified/u);
+  assert.match(packageAssets, /MirrorSha256 -cmatch '\^\[0-9a-f\]\{64\}\$'/u);
 });
 
 test("minimal FFmpeg binary, source, licenses, and hashes travel together", () => {

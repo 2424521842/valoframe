@@ -76,6 +76,27 @@ function createLibraryProps(
 }
 
 describe("MatchLibrary card behavior", () => {
+  it("shows a dedicated empty state when the recycle bin has no videos", () => {
+    const onOpenScan = vi.fn();
+    const { container } = render(
+      <MatchLibrary
+        {...createLibraryProps(mockClips[0], {
+          isTrashMode: true,
+          matchGroups: [],
+          onOpenScan,
+          totalClipCount: 0,
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "回收站里没有视频" })).toBeInTheDocument();
+    expect(screen.getByText("移入回收站的视频会显示在这里。")).toBeInTheDocument();
+    expect(container.querySelector(".match-library-state-icon svg")).toBeInTheDocument();
+    expect(screen.queryByText("还没有本地高光")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "前往扫描" })).not.toBeInTheDocument();
+    expect(onOpenScan).not.toHaveBeenCalled();
+  });
+
   it("renders bundled agent and map artwork with resilient local fallbacks", () => {
     const clip = {
       ...mockClips[0],

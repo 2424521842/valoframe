@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type RefObject,
 } from "react";
 import { m, useReducedMotion } from "motion/react";
@@ -236,6 +237,15 @@ export const MatchLibrary = memo(function MatchLibrary({
   }
 
   if (matchGroups.length === 0 && totalClipCount === 0) {
+    if (isTrashMode) {
+      return (
+        <LibraryState
+          icon={<Trash aria-hidden="true" weight="duotone" />}
+          title="回收站里没有视频"
+          detail="移入回收站的视频会显示在这里。"
+        />
+      );
+    }
     return <LibraryState title="还没有本地高光" detail="先添加录像目录并完成扫描，系统会按对局自动整理素材。" action="前往扫描" onAction={onOpenScan} />;
   }
 
@@ -825,12 +835,25 @@ function MapSlice({ name }: { name: string }) {
   );
 }
 
-function LibraryState({ title, detail, action, onAction }: { title: string; detail: string; action: string; onAction: () => void }) {
+function LibraryState({
+  title,
+  detail,
+  action,
+  icon,
+  onAction,
+}: {
+  title: string;
+  detail: string;
+  action?: string;
+  icon?: ReactNode;
+  onAction?: () => void;
+}) {
   return (
     <section className="match-library-state">
+      {icon ? <span className="match-library-state-icon">{icon}</span> : null}
       <h2>{title}</h2>
       <p>{detail}</p>
-      <button type="button" onClick={onAction}>{action}</button>
+      {action && onAction ? <button type="button" onClick={onAction}>{action}</button> : null}
     </section>
   );
 }

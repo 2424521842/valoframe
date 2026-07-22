@@ -10,8 +10,26 @@
   <a href="https://github.com/2424521842/valoframe/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/2424521842/valoframe/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2ea44f"></a>
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4">
-  <img alt="Status: Development Preview" src="https://img.shields.io/badge/status-development%20preview-f59e0b">
+  <a href="https://github.com/2424521842/valoframe/releases/tag/v0.1.0-beta.1"><img alt="Status: Community Beta" src="https://img.shields.io/badge/status-Community%20Beta-ff4655"></a>
 </p>
+
+<p align="center">
+  <a href="https://github.com/2424521842/valoframe/releases/download/v0.1.0-beta.1/VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe"><strong>下载 Windows 安装包</strong></a>
+  ·
+  <a href="https://github.com/2424521842/valoframe/releases/tag/v0.1.0-beta.1">查看 v0.1.0-beta.1 发布说明</a>
+</p>
+
+## 下载
+
+当前版本：[`v0.1.0-beta.1`](https://github.com/2424521842/valoframe/releases/tag/v0.1.0-beta.1) · Windows 10/11 x64 · Community Beta
+
+- **GitHub（推荐）**：[下载 `VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.1.0-beta.1/VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe)（6.84 MB）
+  - SHA-256：`a4993e5152cddc42623b4fe7dc308100f142617765ddad36aab66ae8aeb40d08`
+- **蓝奏云（备用）**：[下载 `瓦刻_0.1.0_x64-setup.exe`](https://wwbfc.lanzoue.com/iLyG73xzgj8f)（密码：`4reb`，39.8 MB）
+  - SHA-256：`3e7d798ba1242c7598673febe2931369d5c2a2645c0a93923459182ea075fed0`
+
+> [!IMPORTANT]
+> 普通用户只需下载上面列出的 `.exe` 安装包。Release 页中的 `Source code`、FFmpeg 压缩包、许可归档、JSON 报告、校验清单等是源码或技术合规附件，不是安装包。两个下载入口目前对应不同文件，请按所选入口的文件名和 SHA-256 分别核验，不要混用校验值。
 
 > [!WARNING]
 > v0.1.0 Community Beta 是未签名的早期测试版本，Windows 可能显示“未知发布者”或 SmartScreen 警告。只从项目明确公布的入口下载并核对 SHA-256；该版本没有自动更新，也不等于严格正式发布批准。安装前请阅读 [Community Beta 说明](docs/COMMUNITY_BETA.md)。
@@ -19,14 +37,10 @@
 > [!NOTE]
 > 这是非官方社区项目，与 Riot Games、腾讯及其关联公司不存在隶属、赞助或认可关系。发布负责人已确认当前清单锁定的游戏图片可以随 v0.1.0 Community Beta 发布；这是项目负责人的渠道决定，不声称第三方批准或独立法律审核已经完成。记录见 [Community Beta 决定](release/approvals/community-beta-v0.1.0.json)、[本版本素材范围](release/approvals/community-beta-v0.1.0-game-content-scope.json)和[原有游戏素材记录](release/approvals/game-content-rights.json)。
 
-> 界面预览图已经在本地准备并完成脱敏/哈希记录；因其中包含游戏素材，在 `github-project-marketing` 范围完成人工核对前不嵌入公开 README。
-
-<!-- GitHub publication gate: only enable after manual source-authorization scope review.
 <p align="center">
   <img src="docs/images/valoframe-library.png" width="1280" alt="瓦刻素材库界面，使用 FixtureAlpha 合成对局数据">
 </p>
 <p align="center"><sub>合成账号与对局数据 · 不含真实玩家信息或本地路径</sub></p>
--->
 
 ## 它解决什么问题
 
@@ -45,12 +59,17 @@
 | --- | --- | --- |
 | 浏览器界面预览 | 可用 | 使用合成 mock 数据体验素材库、扫描、标签和详情；不访问真实本地素材 |
 | 桌面源码运行 | 内部测试 | 可验证真实扫描与本地预览；必须从干净提交构建并记录 commit |
-| Community Beta | 发布流程已准备 | 工作流通过后以 GitHub Prerelease 提供；未签名、无自动更新，下载后需核对 SHA-256 |
+| Community Beta | [v0.1.0-beta.1 已发布](https://github.com/2424521842/valoframe/releases/tag/v0.1.0-beta.1) | GitHub Prerelease；未签名、无自动更新，下载后需核对对应 SHA-256 |
 | 严格正式发布 | 阻断 | 代码签名、可信时间戳、完整许可审阅、干净 VM 与数据安全证据等门禁尚未全部闭合 |
 
-本轮改动正在 Draft PR [#1](https://github.com/2424521842/valoframe/pull/1) 的后续候选中准备；在新 commit 推送且对应 CI 通过前，旧 PR run 不代表当前工作树。默认分支在合并前仍可能展示较早的仓库快照。
-
 Community Beta 的下载要求、Windows 警告、手动更新方式、游戏图片说明及 FFmpeg 许可/对应源码要求见 [Community Beta 说明](docs/COMMUNITY_BETA.md)。FFmpeg 只用于生成缩略图；发布集合必须同时提供其许可证材料与对应源码。
+
+## 安装
+
+1. 从上方任一明确入口下载对应的 `.exe`，不要把 `Source code` 或技术附件当作安装程序。
+2. 在 PowerShell 中运行 `Get-FileHash -Algorithm SHA256 -LiteralPath '.\安装包文件名.exe'`，确认结果与该入口公布的 SHA-256 完全一致。
+3. 双击安装。如果 Windows 显示“Windows 已保护你的电脑”，先确认来源和哈希，再选择“更多信息”→“仍要运行”；无法确认时请取消安装。
+4. 首次扫描前建议备份重要数据。此版本不会自动更新，新版本需要手动下载安装。
 
 ## 快速体验
 
