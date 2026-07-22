@@ -9,7 +9,7 @@ Community Beta 是面向社区测试者的早期 Windows 版本。它用于收�
 - Community Beta 没有自动更新。安装后不会自行获取新版本；请手动查看项目发布页和版本说明。
 - Beta 可能包含兼容性、性能或数据处理缺陷。首次使用前应备份应用数据；测试永久删除时只使用另外复制、可以丢弃的视频。
 
-当前 `v0.1.0-beta.1` 的主安装包是 [GitHub 上的 `VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.1.0-beta.1/VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe)，SHA-256 为 `a4993e5152cddc42623b4fe7dc308100f142617765ddad36aab66ae8aeb40d08`。备用入口是[蓝奏云 `瓦刻_0.1.0_x64-setup.exe`](https://wwbfc.lanzoue.com/iLyG73xzgj8f)（密码 `4reb`），SHA-256 为 `3e7d798ba1242c7598673febe2931369d5c2a2645c0a93923459182ea075fed0`。两个入口对应不同文件，必须按所选入口分别核验，不能混用校验值。
+当前 `v0.1.0-beta.1` 的主安装包是 [GitHub 上的 `VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.1.0-beta.1/VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe)，SHA-256 为 `a4993e5152cddc42623b4fe7dc308100f142617765ddad36aab66ae8aeb40d08`。备用入口是[蓝奏云 `瓦刻_0.1.0_x64-setup.exe`](https://wwbfc.lanzoue.com/iYmie3y080ef)（密码 `4sj6`），SHA-256 为 `3e8bc3692119a8f2c2e32fc4c46928e37cbfa40e6efeeafbc0060c7aac79ef74`。两个入口对应不同文件，必须按所选入口分别核验，不能混用校验值。
 
 ## 游戏图片与非官方声明
 
