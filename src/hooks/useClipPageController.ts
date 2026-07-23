@@ -8,6 +8,7 @@ import type { ClipListQuery, ClipSummary } from "../types";
 
 export type LoadClipPageOptions = {
   preserveActivity?: boolean;
+  preserveItems?: boolean;
 };
 
 export type UseClipPageControllerOptions = {
@@ -98,18 +99,24 @@ export function useClipPageController({
     pageQuery: ClipListQuery,
     requestGeneration: number,
     mode: "initial" | "more",
-    { preserveActivity = false }: LoadClipPageOptions = {},
+    {
+      preserveActivity = false,
+      preserveItems = false,
+    }: LoadClipPageOptions = {},
   ): Promise<boolean> => {
     const offset = pageQuery.offset ?? 0;
     if (requestedOffsetsRef.current.has(offset)) {
       return false;
     }
     requestedOffsetsRef.current.add(offset);
+    const keepCurrentItemsVisible = mode === "initial"
+      && preserveItems
+      && itemsRef.current.length > 0;
 
     if (mode === "initial") {
       loadingInitialRef.current = true;
       if (mountedRef.current) {
-        setIsLoading(true);
+        if (!keepCurrentItemsVisible) setIsLoading(true);
         setError(null);
       }
     } else {
@@ -179,6 +186,9 @@ export function useClipPageController({
   const reload = useCallback((
     options: LoadClipPageOptions = {},
   ): Promise<boolean> => {
+    const keepCurrentItemsVisible = Boolean(
+      options.preserveItems && itemsRef.current.length > 0,
+    );
     const nextGeneration = generationRef.current + 1;
     generationRef.current = nextGeneration;
     requestedOffsetsRef.current = new Set();
@@ -189,15 +199,19 @@ export function useClipPageController({
     };
     appliedQueryKeyRef.current = queryKeyRef.current;
     queryRef.current = firstPageQuery;
-    hasMoreRef.current = false;
-    nextOffsetRef.current = null;
     loadingMoreRef.current = false;
-    replaceItems([]);
+    if (!keepCurrentItemsVisible) {
+      hasMoreRef.current = false;
+      nextOffsetRef.current = null;
+      replaceItems([]);
+    }
     if (mountedRef.current) {
       setGeneration(nextGeneration);
-      setTotalCount(0);
-      setHasMore(false);
-      setNextOffset(null);
+      if (!keepCurrentItemsVisible) {
+        setTotalCount(0);
+        setHasMore(false);
+        setNextOffset(null);
+      }
       setError(null);
       setLoadMoreError(null);
       setIsLoadingMore(false);

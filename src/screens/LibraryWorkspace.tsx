@@ -59,6 +59,7 @@ type LibraryWorkspaceProps = {
   loadMoreError: string | null;
   hasMore: boolean;
   listGeneration: number;
+  scrollResetKey: string;
   query: string;
   accountId: string;
   agentNames: string[];
@@ -409,9 +410,9 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
           isLoadingMore={props.isLoadingMore}
           isTrashMode={isTrashMode}
           hasMore={props.hasMore}
-          listGeneration={props.listGeneration}
           loadMoreError={props.loadMoreError}
           matchGroups={props.matchGroups}
+          scrollResetKey={props.scrollResetKey}
           selectedClipId={props.selectedClipId}
           selectedClipIds={selectedClipIds}
           tags={props.tags}

@@ -1,7 +1,7 @@
 {
   "name": "valorant-highlight-manager",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "瓦刻（VALOFRAME）——本地无畏契约高光素材管理器",
   "license": "MIT",
   "packageManager": "npm@11.9.0",

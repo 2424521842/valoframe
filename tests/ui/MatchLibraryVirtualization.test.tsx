@@ -80,6 +80,47 @@ describe("match-level virtualized production library", () => {
     });
   });
 
+  it("keeps the shared scroll offset for same-query data refreshes and resets it for a new query", async () => {
+    const initialGroups = groups(100);
+    const view = render(
+      <ScrollHarness
+        libraryProps={propsFor(initialGroups)}
+        width={1_200}
+      />,
+    );
+    const scrollHost = screen.getByTestId("virtual-scroll-host");
+    scrollHost.scrollTop = 920;
+    const scrollTo = vi.fn((options: ScrollToOptions | number, y?: number) => {
+      scrollHost.scrollTop = typeof options === "number"
+        ? y ?? 0
+        : options.top ?? scrollHost.scrollTop;
+    });
+    Object.defineProperty(scrollHost, "scrollTo", {
+      configurable: true,
+      value: scrollTo,
+    });
+
+    view.rerender(
+      <ScrollHarness
+        libraryProps={propsFor([...initialGroups])}
+        width={1_200}
+      />,
+    );
+
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(scrollHost.scrollTop).toBe(920);
+
+    view.rerender(
+      <ScrollHarness
+        libraryProps={propsFor(initialGroups, { scrollResetKey: "query:filtered" })}
+        width={1_200}
+      />,
+    );
+
+    await waitFor(() => expect(scrollHost.scrollTop).toBe(0));
+    expect(scrollTo).toHaveBeenCalled();
+  });
+
   it("reflows virtual rows for the real width and grid/list mode", async () => {
     mockVirtualContentGeometry();
     const matchGroups = [singleGroup(1_000)];
@@ -151,6 +192,7 @@ function propsFor(matchGroups: ClipMatchGroup[], overrides: Partial<Props> = {})
     tags: [],
     totalClipCount: matchGroups.reduce((total, group) => total + group.clips.length, 0),
     viewMode: "grid",
+    scrollResetKey: "query:default",
     isLoading: false,
     errorMessage: null,
     onClearFilters: vi.fn(),

@@ -219,6 +219,33 @@ describe("useClipPageController", () => {
     expect(onActivityMessage).not.toHaveBeenCalled();
   });
 
+  it("keeps the current page visible while a preserving reload is pending", async () => {
+    const refresh = deferred<ClipPage>();
+    const { result } = renderController();
+    await waitFor(() => expect(result.current.items).toHaveLength(2));
+    mocks.listClipPage.mockReturnValueOnce(refresh.promise);
+
+    let reload!: Promise<boolean>;
+    act(() => {
+      reload = result.current.reload({
+        preserveActivity: true,
+        preserveItems: true,
+      });
+    });
+
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.items.map((clip) => clip.id)).toEqual(["a", "b"]);
+    expect(result.current.totalCount).toBe(2);
+
+    await act(async () => {
+      refresh.resolve(page([clipC], 1));
+      await reload;
+    });
+
+    expect(result.current.items.map((clip) => clip.id)).toEqual(["c"]);
+    expect(result.current.totalCount).toBe(1);
+  });
+
   it("completes its initial request under StrictMode effect replay", async () => {
     const { result } = renderController({ reactStrictMode: true });
 
