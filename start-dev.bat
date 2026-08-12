@@ -19,6 +19,25 @@ set "CARGO_INCREMENTAL=0"
 echo Rust incremental compilation disabled for this dev session.
 echo.
 
+if defined VALOFRAME_UPDATER_PUBLIC_KEY (
+  echo Using updater public key from the current environment.
+) else (
+  set "UPDATER_PUBLIC_KEY_FILE=%ROOT%release-secrets\valoframe-updater.key.pub"
+  if exist "!UPDATER_PUBLIC_KEY_FILE!" (
+    set /p "VALOFRAME_UPDATER_PUBLIC_KEY="<"!UPDATER_PUBLIC_KEY_FILE!"
+    if not defined VALOFRAME_UPDATER_PUBLIC_KEY (
+      echo Local updater public key is empty: !UPDATER_PUBLIC_KEY_FILE!
+      set "EXIT_CODE=1"
+      goto finish
+    )
+    echo Loaded the local updater public key for this dev build.
+  ) else (
+    echo Local updater public key was not found; updater will remain disabled.
+    echo Expected: !UPDATER_PUBLIC_KEY_FILE!
+  )
+)
+echo.
+
 if not exist "node_modules\" (
   echo Dependencies are missing: node_modules was not found.
   echo Run "npm install" first, then start this script again.

@@ -41,6 +41,20 @@ describe("useTagController", () => {
     expect(controller.result.current.error).toBeNull();
   });
 
+  it("can report a refresh failure without replacing an owning activity message", async () => {
+    const controller = renderController();
+    await waitFor(() => expect(controller.result.current.tags).toEqual([tagA]));
+    controller.activity.mockClear();
+    mocks.listTags.mockRejectedValueOnce(new Error("offline"));
+
+    await act(async () => {
+      expect(await controller.result.current.refresh({ preserveActivity: true })).toBe(false);
+    });
+
+    expect(controller.result.current.error).toBe("offline");
+    expect(controller.activity).not.toHaveBeenCalled();
+  });
+
   it("lets the newest refresh win and keeps last-known-good tags on failure", async () => {
     const oldRequest = deferred<Tag[]>();
     const newRequest = deferred<Tag[]>();

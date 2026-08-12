@@ -6,6 +6,8 @@ Runs an isolated Windows startup and clean-shutdown smoke test for a freshly bui
 Starts the unpacked application executable without installing an NSIS bundle. The test creates a
 uniquely named, marker-gated runtime root and supplies VHM_RELEASE_SMOKE_ROOT so Tauri's database
 and thumbnail cache are redirected away from the signed-in user's real Known Folder locations.
+WEBVIEW2_USER_DATA_FOLDER is also set below that root so WebView2 is isolated before any Tauri setup
+callback runs; the application independently applies the same path to its explicit window builder.
 TEMP and TMP live in a separate marker-gated sibling. Windows Known Folder APIs do not provide a
 safe isolation boundary through APPDATA, LOCALAPPDATA, USERPROFILE, HOME, HOMEDRIVE, or HOMEPATH,
 so those variables are inherited unchanged. The explicit Rust smoke root remains authoritative for
@@ -14,7 +16,7 @@ the database, thumbnail cache, and WebView2 data directory.
 The executable is created suspended, assigned to a Windows Job configured with KILL_ON_JOB_CLOSE,
 and only then resumed. An explicit inherited-handle list redirects child stdout and stderr into the
 marker-gated environment root; failures include a bounded tail of both streams. The test fails
-closed unless it can prove Job containment, path containment, database schema v13 (including empty
+closed unless it can prove Job containment, path containment, database schema v16 (including empty
 trash-snapshot and delete-intent journals), an empty fresh custom-tag catalog, absence of scans, single-instance
 handoff to the original visible window, UI process survival, graceful exit code 0, an empty Job
 after shutdown, unchanged real application data/cache trees, and safe cleanup.
@@ -105,7 +107,7 @@ $SmokeMarkerContent = 'vhm-release-smoke-root-v1'
 $EnvironmentRootPrefix = 'vhm-release-smoke-env-'
 $EnvironmentMarkerName = '.vhm-release-smoke-env-root'
 $EnvironmentMarkerContent = 'vhm-release-smoke-env-root-v1'
-$ExpectedSchemaVersion = 13
+$ExpectedSchemaVersion = 16
 $RequiredTables = @(
     'source_dirs',
     'clip_groups',
@@ -124,6 +126,15 @@ $RequiredTables = @(
     'clip_trash_snapshots',
     'clip_delete_intents'
 )
+$RequiredColumns = [ordered]@{
+    clips = @(
+        'file_volume_serial',
+        'file_index_high',
+        'file_index_low'
+    )
+    clip_events = @('killed_is_me')
+    scan_runs = @('summary_available')
+}
 function Test-IsWindows {
     return [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
         [System.Runtime.InteropServices.OSPlatform]::Windows
@@ -1775,6 +1786,10 @@ try:
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         )
     )
+    columns = {
+        table: sorted(row[1] for row in connection.execute(f"PRAGMA table_info({table})"))
+        for table in ("clips", "clip_events", "scan_runs")
+    }
     tags = [row[0] for row in connection.execute("SELECT name FROM tags ORDER BY name")]
     counts = {
         table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -1793,6 +1808,7 @@ print(json.dumps({
     "schemaVersion": schema_version,
     "quickCheck": quick_check,
     "tables": tables,
+    "columns": columns,
     "tags": tags,
     "counts": counts,
 }, ensure_ascii=True))
@@ -1864,6 +1880,23 @@ function Assert-DatabaseInspection {
     $missingTables = @($RequiredTables | Where-Object { -not $actualTables.Contains($_) })
     if ($missingTables.Count -gt 0) {
         throw "Database is missing required tables: $([string]::Join(', ', $missingTables))."
+    }
+
+    foreach ($table in $RequiredColumns.Keys) {
+        $property = $Inspection.columns.PSObject.Properties[$table]
+        if ($null -eq $property) {
+            throw "SQLite inspection did not report columns for '$table'."
+        }
+        $actualColumns = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::Ordinal
+        )
+        foreach ($column in @($property.Value)) {
+            [void] $actualColumns.Add([string] $column)
+        }
+        $missingColumns = @($RequiredColumns[$table] | Where-Object { -not $actualColumns.Contains($_) })
+        if ($missingColumns.Count -gt 0) {
+            throw "Database table '$table' is missing required columns: $([string]::Join(', ', $missingColumns))."
+        }
     }
 
     if (@($Inspection.tags).Count -ne 0) {
@@ -2025,8 +2058,16 @@ try {
         Assert-PeFile -LiteralPath $ffmpegPath -Description 'bundled FFmpeg executable'
     }
 
+    $databasePath = Join-Path $smokeRoot 'data\highlight-index.sqlite3'
+    $thumbnailCachePath = Join-Path $smokeRoot 'cache\thumbnails'
+    $webView2Path = Join-Path $smokeRoot 'webview2'
+
     $childEnvironment = @{
         'VHM_RELEASE_SMOKE_ROOT' = $smokeRoot
+        # WebView2 environment/registry overrides take precedence over the userDataFolder argument
+        # passed by Wry. Supplying the same marker-gated path here protects pre-setup and secondary
+        # launches while the Rust window builder remains an independent, matching constraint.
+        'WEBVIEW2_USER_DATA_FOLDER' = $webView2Path
         'TEMP' = $environmentPaths.temp
         'TMP' = $environmentPaths.temp
         'VHM_FFMPEG_PATH' = $ffmpegPath
@@ -2056,9 +2097,6 @@ try {
         throw "Windows Job did not report its live root process $($jobProcess.ProcessId)."
     }
 
-    $databasePath = Join-Path $smokeRoot 'data\highlight-index.sqlite3'
-    $thumbnailCachePath = Join-Path $smokeRoot 'cache\thumbnails'
-    $webView2Path = Join-Path $smokeRoot 'webview2'
     $startupDeadline = [datetime]::UtcNow.AddSeconds($StartupTimeoutSeconds)
     $startupReady = $false
     do {
@@ -2118,8 +2156,9 @@ try {
     if (-not $windowBeforeSecondInstance.Visible -or -not $windowBeforeSecondInstance.Minimized) {
         throw 'The original main window was expected to be visible but minimized before the second launch; restore handoff cannot be proved.'
     }
-    if (([string] $childEnvironment['VHM_RELEASE_SMOKE_ROOT']) -cne $smokeRoot) {
-        throw 'The second launch environment does not reference the original marker-gated smoke root.'
+    if (([string] $childEnvironment['VHM_RELEASE_SMOKE_ROOT']) -cne $smokeRoot -or
+        ([string] $childEnvironment['WEBVIEW2_USER_DATA_FOLDER']) -cne $webView2Path) {
+        throw 'The second launch environment does not reference the original marker-gated smoke and WebView2 roots.'
     }
     if ($jobProcess.RootHasExited()) {
         throw "The original application exited immediately before the second launch with code $($jobProcess.GetRootExitCode())."
@@ -2233,6 +2272,7 @@ try {
             workingDirectory = [System.IO.Path]::GetDirectoryName($executable)
             environmentOverrides = [ordered]@{
                 VHM_RELEASE_SMOKE_ROOT = [string] $childEnvironment['VHM_RELEASE_SMOKE_ROOT']
+                WEBVIEW2_USER_DATA_FOLDER = [string] $childEnvironment['WEBVIEW2_USER_DATA_FOLDER']
                 TEMP = [string] $childEnvironment['TEMP']
                 TMP = [string] $childEnvironment['TMP']
                 VHM_FFMPEG_PATH = [string] $childEnvironment['VHM_FFMPEG_PATH']
@@ -2425,6 +2465,8 @@ try {
             requiredTableCount = $RequiredTables.Count
             requiredTables = @($RequiredTables)
             actualTables = @($inspection.tables)
+            requiredColumns = $RequiredColumns
+            actualColumns = $inspection.columns
             customTagCount = @($inspection.tags).Count
             customTagVerification = 'fresh-database-empty-user-tag-catalog'
             scanRunCount = [long] $inspection.counts.scan_runs

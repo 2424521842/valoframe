@@ -4,6 +4,8 @@ import { afterEach } from "vitest";
 
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
+  delete document.documentElement.dataset.motion;
 });
 
 Object.defineProperty(window, "matchMedia", {

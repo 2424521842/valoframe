@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
   addTagToClip: vi.fn(),
   addTagToClips: vi.fn(),
   deleteClipsPermanently: vi.fn(),
-  removeClipFromIndex: vi.fn(),
+  removeClipsFromIndex: vi.fn(),
   removeTagFromClip: vi.fn(),
   removeTagFromClips: vi.fn(),
   setClipFavorite: vi.fn(),
@@ -29,7 +29,7 @@ vi.mock("../../src/api/backend", async (importOriginal) => {
     addTagToClip: mocks.addTagToClip,
     addTagToClips: mocks.addTagToClips,
     deleteClipsPermanently: mocks.deleteClipsPermanently,
-    removeClipFromIndex: mocks.removeClipFromIndex,
+    removeClipsFromIndex: mocks.removeClipsFromIndex,
     removeTagFromClip: mocks.removeTagFromClip,
     removeTagFromClips: mocks.removeTagFromClips,
     setClipFavorite: mocks.setClipFavorite,
@@ -69,7 +69,13 @@ describe("useClipMutationController", () => {
       blocked: [],
       failures: [],
     });
-    mocks.removeClipFromIndex.mockResolvedValue(undefined);
+    mocks.removeClipsFromIndex.mockResolvedValue({
+      requested: 2,
+      removedIds: ["a", "b"],
+      missingIds: [],
+      blocked: [],
+      failures: [],
+    });
     mocks.updateClipNote.mockResolvedValue({ ...clipA, note: "new note" });
     mocks.addTagToClip.mockResolvedValue({ ...clipA, tags: ["tag-a"] });
     mocks.removeTagFromClip.mockResolvedValue(clipA);
@@ -195,22 +201,29 @@ describe("useClipMutationController", () => {
   });
 
   it("keeps partial remove-from-index semantics and removes only successful ids locally", async () => {
-    mocks.removeClipFromIndex
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error("locked"));
+    mocks.removeClipsFromIndex.mockResolvedValueOnce({
+      requested: 2,
+      removedIds: ["a"],
+      missingIds: [],
+      blocked: [{ clipId: "b", code: "delete-pending", message: "已进入永久删除队列" }],
+      failures: [],
+    });
     const harness = renderController();
 
     await act(async () => {
       expect(await harness.result.current.removeClipsFromIndex(["a", "b"]))
-        .toBe(false);
+        .toEqual(expect.objectContaining({ removedIds: ["a"] }));
     });
 
-    expect(mocks.removeClipFromIndex).toHaveBeenCalledTimes(2);
+    expect(mocks.removeClipsFromIndex).toHaveBeenCalledTimes(1);
+    expect(mocks.removeClipsFromIndex).toHaveBeenCalledWith(["a", "b"]);
     expect(harness.allSummaries().map((clip) => clip.id)).toEqual(["b"]);
     expect(harness.removeDetail).toHaveBeenCalledWith("a");
     expect(harness.removeDetail).not.toHaveBeenCalledWith("b");
     expect(harness.clearSelectedClip).toHaveBeenCalledWith(new Set(["a"]));
-    expect(harness.activity).toHaveBeenCalledWith("已移除 1 条，失败 1 条：locked");
+    expect(harness.activity).toHaveBeenCalledWith(
+      "仅移除索引部分完成：成功 1 条，失败 1 条：已进入永久删除队列",
+    );
   });
 
   it("permanently deletes successful recycle-bin clips and reports per-file failures", async () => {

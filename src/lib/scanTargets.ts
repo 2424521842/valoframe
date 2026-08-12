@@ -21,7 +21,7 @@ export function mergeScanTargets(
   const byPath = new Map<string, ScanTarget>();
 
   for (const source of sourceDirs) {
-    const scanRoot = scanRootFromSourcePath(source.path);
+    const scanRoot = scanTargetPathForSource(source);
     const key = pathKey(scanRoot);
     if (!key || excludedPaths.has(key)) continue;
     byPath.set(key, {
@@ -39,6 +39,24 @@ export function mergeScanTargets(
   }
 
   return [...byPath.values()];
+}
+
+export function scanTargetPathForSource(source: SourceDir): string {
+  const configuredRoot = source.scanRootPath.trim().replace(/[\\/]+$/, "");
+  const sourcePath = source.path.trim().replace(/[\\/]+$/, "");
+
+  // Schema-v14 backfills old ACLOS rows with scan_root_path = path. The
+  // legacy scan_roots command still expects the directory containing the
+  // wonderfulVideos* folders, while persistent and recursive sources are
+  // scanned from their configured root verbatim.
+  if (
+    source.scanMode === "aclos-structured" &&
+    pathKey(configuredRoot) === pathKey(sourcePath)
+  ) {
+    return scanRootFromSourcePath(sourcePath);
+  }
+
+  return configuredRoot || sourcePath;
 }
 
 export function scanRootFromSourcePath(sourcePath: string): string {

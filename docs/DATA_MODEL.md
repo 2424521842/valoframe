@@ -1,6 +1,6 @@
 # Data Model
 
-当前 SQLite schema 版本为 v13，数据库文件名为 `highlight-index.sqlite3`，位于 Tauri app data 目录。本文只描述当前落地表，不再保留早期 `sources/assets/asset_metadata` 草案。
+当前 SQLite schema 版本为 v16，数据库文件名为 `highlight-index.sqlite3`，位于 Tauri app data 目录。本文只描述当前落地表，不再保留早期 `sources/assets/asset_metadata` 草案。
 
 ## 1. 生命周期与连接
 
@@ -16,9 +16,10 @@
 
 | 表 | 所有权与用途 |
 | --- | --- |
-| `source_dirs` | 真实素材来源路径、名称、启用状态、最近错误和扫描时间 |
+| `source_dirs` | 真实素材来源路径、来源类型、扫描模式/根、名称、启用状态、最近错误和扫描时间 |
 | `clip_groups` | 某来源内的对局/目录分组；`(source_dir_id, group_key)` 唯一 |
-| `clips` | 本地 MP4 身份、路径、文件状态、已有封面引用以及收藏/备注/回收状态 |
+| `clips` | 本地 MP4 路径与可空 Windows 稳定文件身份、来源相对目录、文件状态、已有封面引用以及收藏/审核/备注/回收状态 |
+| `clip_trash_snapshots` | 用户进入回收站时捕获的不可变文件/来源身份授权快照 |
 | `clip_delete_intents` | 用户已确认的永久删除意图、目标快照、执行状态、租约与稳定错误；用于崩溃后幂等恢复 |
 | `clip_thumbnails` | 独立于源封面的生成指纹、持久队列状态、安全缓存 basename、重试与缓存大小 |
 | `clip_metadata` | 单个视频的展示字段、官方分类、解析状态、来源和详情文本 |
@@ -38,9 +39,11 @@
 
 ### 3.1 `source_dirs` 与 `clip_groups`
 
-`source_dirs.path` 是来源的唯一真实路径。来源 DTO 直接从该表返回，因此零素材来源和失败来源也能出现在前端，不再依赖视频路径反推来源。
+`source_dirs.path` 是来源记录的唯一真实路径；`scan_root_path` 是扫描器的授权边界根。`source_kind` 只接受 `aclos`、`nvidia`、`tracker`、`generic`，`scan_mode` 只接受 `aclos-structured`、`recursive-mp4`。ACLOS 使用结构化扫描器；NVIDIA、Tracker 和 generic 使用只读递归 MP4 适配器。`enabled` 控制启动同步，禁用不删除索引且不参与全局新鲜度提醒。来源 DTO 直接从该表返回，因此零素材、离线和 partial 来源也能出现在前端，不再依赖视频路径反推来源。
 
 `clip_groups` 以来源 + `group_key` 唯一；来源根目录直接 MP4 可以没有 group，`来源/对局/MP4` 使用直接子目录作为 group。
+
+来源注册按规范化根检查完全重复和父子重叠。完全重复来源会复用已有行；重叠来源需要用户确认，但 `clips.normalized_path` 的唯一身份与入库前归属检查仍禁止两个来源认领同一文件。完整同步才能标记 missing 并刷新 `last_scanned_at`；来源离线、权限/枚举部分失败、文件仍在变化、扫描 partial/failed 或取消时保留历史 clip 状态和上一次成功扫描时间，同时更新 `status`、`last_error`。前端将 ISO UTC 时间按本地自然日映射为首次/今天/N 天状态。
 
 ### 3.2 `clips`
 
@@ -51,13 +54,20 @@
 | `file_path` / `normalized_path` | 原路径和大小写无关规范化路径，均有唯一约束 |
 | `source_dir_id` / `clip_group_id` | 来源和可空对局组 |
 | `file_name` / `extension` / `size_bytes` / `modified_at` | 文件摘要 |
+| `file_volume_serial` / `file_index_high` / `file_index_low` | Windows 稳定文件身份；必须全空或全非空，读取失败仍允许正常索引 |
 | `duration_ms` / `recorded_at` | 可空媒体/录制时间；当前扫描不会主动探测视频时长 |
+| `source_relative_dir` | 视频父目录相对 `scan_root_path` 的 `/` 分隔路径；根目录视频为空字符串 |
 | `cover_path` / `cover_source` | 已有封面引用和来源状态 |
 | `file_status` | `available`、`missing` 或 `trashed` 等状态 |
 | `is_favorite` / `note` | 用户数据，重扫不得覆盖 |
+| `review_decision` / `reviewed_at` | `unreviewed`、`liked`、`disliked` 及可空审核时间；用于后续卡片筛选 |
 | `first_indexed_at` / `last_seen_at` / `updated_at` | 索引生命周期 |
 
-`trashed` 本身只是应用数据库状态，不会移动或删除视频。`remove_clip_from_index` 只删除索引行及级联数据，也不触碰原视频。用户在回收站明确二次确认 `delete_clips_permanently` 后，应用先持久化 `clip_delete_intents`，再触碰本地文件，最后在一个短事务内同时移除 intent 与 clip；非 `trashed` 记录会被后端拒绝。
+v13 升级到 v14 的历史步骤会把现有来源回填为 `aclos + aclos-structured`，`scan_root_path = path`；相对目录优先由文件父目录与来源根做大小写无关的词法计算，无法计算时退回已有 group key。已有收藏回填为 `liked`，`reviewed_at` 使用该 clip 的 `updated_at`；非收藏保持 `unreviewed`。
+
+v14→v15 只增加稳定身份、事件本人死亡和扫描摘要可用性字段/索引，不在迁移中遍历磁盘；既有 clip 的三个文件身份字段保持 `NULL`，由后续扫描惰性填充。v16 随后统一普通与 Win32 verbatim 路径键，并只合并同来源、完整身份相同、去前缀路径等价且授权状态无歧义的双行配对。升级在同一事务中最终一次写入 `user_version = 16`，并保留文件状态、普通路径 clip ID、收藏、评审、备注、标签、元数据、时间轴、最佳缩略图、回收快照、删除 intent 和原始 JSON。
+
+`trashed` 本身只是应用数据库状态，不会移动或删除视频。`remove_clip_from_index` / `remove_clips_from_index` 只允许普通库中 missing 或来源不可用、且没有删除 intent 的记录；它删除索引行及级联的标签/备注等应用状态，不触碰原视频，批量操作逐项报告结果。用户在回收站明确二次确认 `delete_clips_permanently` 后，应用先持久化 `clip_delete_intents`，再触碰本地文件，最后在一个短事务内同时移除 intent 与 clip；非 `trashed` 记录会被后端拒绝。
 
 ### 3.3 `clip_trash_snapshots`
 
@@ -104,22 +114,22 @@ ready 行必须同时具有 `cache_file`、`revision` 和 `byte_size`；`cache_f
 ```text
 matches + match_stats + match_events = 整场所有权
 clips + clip_metadata              = 官方视频身份和分类
-clip_segments + clip_events        = 单个视频的组装区间和相对事件
+clip_segments + clip_events        = 单个视频的组装区间和归一化事件时间
 ```
 
 `clip_events.segment_id` 若非空，必须引用同一 `clip_id` 的 segment。三个数据库触发器阻止跨 clip 插入、更新或移动已引用 segment。
 
-`clip_events` 以 `(clip_id, event_key)` 唯一；`clip_metadata.kill_count` 只统计同一 clip 下 `event_type = 'kill' AND killer_is_me = 1` 的事件。整场 `match_events` 或其他视频事件不得累加到当前视频。
+`clip_events` 以 `(clip_id, event_key)` 唯一；`killer_is_me` 标记本人击杀，schema v15 的 `killed_is_me` 标记本人死亡。普通高光按 `segmentStart + eventStart` 归一化，击杀/死亡集锦把 `eventStart` 当作视频绝对时间；超出 `[0, duration]` 的值不裁剪并保存为空/警告。`clip_metadata.kill_count` 只统计同一 clip 下 `event_type = 'kill' AND killer_is_me = 1` 的事件。整场 `match_events` 或其他视频事件不得累加到当前视频。
 
 ### 3.8 标签与扫描批次
 
 `tags.name` 唯一；`clip_tags` 以 `(clip_id, tag_id)` 为主键并在任一端删除时级联。扫描器不创建标签，视频类型只写入 `clip_metadata`。v10 会把旧版自动多杀/集锦标签回填为视频类型元数据后移除，其他用户标签保持不变。
 
-`scan_runs` 保存 `job_id`、root、状态、来源/分组/新增/更新/missing/封面/元数据统计、有限错误 JSON、兼容性的省略计数和用户消息。状态终态包括 `completed`、`partial`、`failed`、`cancelled`。
+`scan_runs` 保存 `job_id`、root、状态、来源/分组/新增/更新/missing/封面/元数据统计、有限错误 JSON、兼容性的省略计数和用户消息。状态终态包括 `completed`、`partial`、`failed`、`cancelled`。schema v15 的 `summary_available` 明确区分真实持久化摘要与终态兜底行；只有值为 1 时才能把 `new_clip_count = 0` 展示为“新增 0 个”，否则显示新增数量不可用。
 
 ## 4. 稳定身份
 
-素材文件身份是 `normalized_path`，不是文件名。
+正常扫描首先以 `normalized_path` 识别现有素材；路径已消失时，schema v15 才在同一来源内使用双侧唯一的 Windows 稳定文件身份进行重连。旧库身份全空时可以退回双侧唯一的“文件名 + 大小 + 修改时间”指纹。稳定身份索引故意不是唯一索引，因为硬链接共享身份；任何复制、硬链接、重复身份或重复指纹都安全地不合并。只有 `symlink_metadata` 明确返回 `NotFound` 才把旧路径视为消失。
 
 账号分组身份按以下顺序派生：
 
@@ -163,6 +173,16 @@ clip_segments + clip_events        = 单个视频的组装区间和相对事件
 | `suppressed` | 已有源封面，或素材当前不是 available |
 | `evicted` | 缓存预算清理了文件；再次 ensure 时可重新排队 |
 
+### 5.4 卡片审核状态
+
+| 值 | 含义 |
+| --- | --- |
+| `unreviewed` | 尚未在快速筛选中作出决定 |
+| `liked` | 保留候选；v13 的已有收藏在迁移时进入该状态 |
+| `disliked` | 剔除候选；只改变审核维度，不删除文件或索引 |
+
+`review_decision` 与 `is_favorite` 自 v14 起是可分别查询的字段。迁移只做一次历史映射；后续“喜欢”事务同步收藏，“不喜欢”取消收藏但不修改文件状态。
+
 ## 6. 读模型
 
 ### 6.1 `ClipSummary` / `ClipPage`
@@ -171,10 +191,10 @@ clip_segments + clip_events        = 单个视频的组装区间和相对事件
 
 摘要保留：
 
-- 来源真实路径和分组。
+- 来源真实路径、来源类型、扫描模式/根、相对目录和分组。
 - 稳定账号 key、展示名和来源类型。
 - 英雄、地图、模式、比分、KDA、战斗分、胜负和官方分类。
-- 文件状态、收藏、源/生成封面可用性、`thumbnailStatus`、`thumbnailRevision` 及 tag IDs。
+- 文件状态、收藏、卡片审核结果/时间、源/生成封面可用性、`thumbnailStatus`、`thumbnailRevision` 及 tag IDs。
 
 摘要不返回备注、OCR/提取详情、raw JSON、完整 Tag 对象或事件。`ClipPage` 同时返回 offset、limit、total、hasMore 和 nextOffset。
 
@@ -188,7 +208,9 @@ facets 针对整个索引计算总量、活跃量、收藏、回收、自定义�
 
 ## 7. 写入和事务
 
-- 文件 upsert 以规范化路径匹配；更新文件摘要时保留收藏、备注和标签。
+- 文件 upsert 以规范化路径匹配；更新文件摘要和来源相对目录时保留收藏、审核结果/时间、备注和标签。
+- 同源重连先在 SQLite TEMP 表完成来源级候选唯一性统计，再分页 apply；可信匹配原地更新 clip 路径并保留 ID/用户状态，同时重置缩略图指纹。歧义候选作为新素材写入，旧行只在完整枚举后收敛 missing。
+- 来源根重新定位先只读预览，提交时重新验证；路径更新在单事务中使用两阶段占位以支持大小写变化/目录互换，并同步来源根、clip 路径/相对目录、分组和根内封面/元数据引用。回收素材、删除 intent 或关键任务冲突会阻断提交。
 - 一次扫描由多个可恢复短事务组成，不承诺整个多根批次原子提交。
 - 单个官方 clip 的视频类型元数据与时间线各有事务边界；重扫按权威来源幂等修复，且不改动用户标签。
 - 批量收藏、标签和回收在单个事务中完成；任何一行失败则整批回滚。
@@ -206,5 +228,9 @@ v7 在既有来源、状态、日期和事件索引之外增加：
 所有排序追加 ID tie-breaker，确保 offset 分页无重复或缺口。count、页面和标签读取处于同一只读事务快照。
 
 v8 新增 `clip_thumbnails(status, next_attempt_at, clip_id)` 队列索引，以及非空 `cache_file` 的唯一部分索引。队列 claim、ready 提交和失效更新使用绑定参数与条件 UPDATE；ready 提交同时验证当前 clip 行，避免扫描和生成并发时提交陈旧缓存。
+
+v14 新增来源同步索引 `(enabled, scan_mode, scan_root_path)`、相对目录索引 `(source_dir_id, source_relative_dir)`，以及以审核结果和文件状态开头的卡片队列索引。列表筛选通过绑定参数读取 `review_decision`。
+
+v15 新增来源内非唯一稳定身份索引、来源 + 旧文件名/大小/修改时间候选索引，以及 `summary_available`/`killed_is_me` 所需字段约束。身份索引不得改为 UNIQUE；歧义必须由来源级匹配计划显式处理。
 
 v9 版本号继续保留以兼容已经升级的本地数据库。早期开发库中可能残留未使用的 `diagnostic_events` 表；当前应用不会创建、写入、读取或导出该表，也不会对已有数据库执行破坏性删除。

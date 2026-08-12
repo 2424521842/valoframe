@@ -66,6 +66,7 @@ function createLibraryProps(
     onCopyPath: vi.fn(),
     onOpenOriginal: vi.fn(),
     isTrashMode: false,
+    removableFromIndexIds: new Set(),
     onSelectionGesture: vi.fn(),
     onRequestTrash: vi.fn(),
     onRequestPermanentDelete: vi.fn(),
@@ -95,6 +96,33 @@ describe("MatchLibrary card behavior", () => {
     expect(screen.queryByText("还没有本地高光")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "前往扫描" })).not.toBeInTheDocument();
     expect(onOpenScan).not.toHaveBeenCalled();
+  });
+
+  it("shows index-only cleanup on an eligible ordinary-library card", async () => {
+    const user = userEvent.setup();
+    const clip = { ...mockClips[0], fileStatus: "missing" };
+    const onRequestPermanentRemove = vi.fn();
+    const { container } = render(
+      <MatchLibrary
+        {...createLibraryProps(clip, {
+          onRequestPermanentRemove,
+          removableFromIndexIds: new Set([clip.id]),
+        })}
+      />,
+    );
+
+    fireEvent.contextMenu(container.querySelector(".match-clip-card") as HTMLElement);
+    await user.click(await screen.findByText("仅移除失联索引"));
+    expect(onRequestPermanentRemove).toHaveBeenCalledWith(clip.id);
+  });
+
+  it("does not expose index-only cleanup for an available ordinary-library card", async () => {
+    const clip = { ...mockClips[0], fileStatus: "available" };
+    const { container } = render(<MatchLibrary {...createLibraryProps(clip)} />);
+
+    fireEvent.contextMenu(container.querySelector(".match-clip-card") as HTMLElement);
+    expect(await screen.findByText("移入回收站")).toBeVisible();
+    expect(screen.queryByText("仅移除失联索引")).not.toBeInTheDocument();
   });
 
   it("renders bundled agent and map artwork with resilient local fallbacks", () => {
@@ -198,6 +226,29 @@ describe("MatchLibrary card behavior", () => {
       "match-clip-score",
       "match-clip-score--unavailable",
     );
+  });
+
+  it("keeps source directory names out of cards and shows favorite independently of legacy review data", () => {
+    const clip = {
+      ...mockClips[0],
+      sourceDirName: "wonderfulVideos94985665477093",
+      sourceRelativeDir: "wonderfulVideos94985665477093",
+      reviewDecision: "liked" as const,
+      isFavorite: true,
+      thumbnailUrl: null,
+    };
+    const { container } = render(
+      <MatchLibrary {...createLibraryProps(clip, { viewMode: "grid" })} />,
+    );
+
+    expect(screen.queryByText(/wonderfulVideos94985665477093/)).not.toBeInTheDocument();
+    expect(screen.queryByText("喜欢")).not.toBeInTheDocument();
+    expect(container.querySelector(".match-clip-review")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "取消收藏" })).toHaveClass(
+      "match-clip-favorite",
+      "match-clip-favorite--active",
+    );
+    expect(container.querySelector(".match-clip-source-context")).not.toBeInTheDocument();
   });
 
   it("omits score placeholders for official non-scoring videos but keeps real scores", () => {

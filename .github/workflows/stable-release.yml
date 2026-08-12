@@ -1,0 +1,659 @@
+name: Stable signed release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stable-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, verify, and atomically publish stable release
+    runs-on: windows-2025
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+      RELEASE_TAG: ${{ github.ref_name }}
+      EXPECTED_REPOSITORY: 2424521842/valoframe
+    steps:
+      - name: Configure isolated release paths
+        shell: pwsh
+        run: |
+          "CARGO_TARGET_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-stable-target')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_ASSET_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-stable-assets')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_REMOTE_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-stable-remote-proof')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_PUBLIC_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-stable-public-proof')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Check out the tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind repository, tag, source, and versions
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -cne 'push' -or $env:GITHUB_REF_TYPE -cne 'tag') {
+            throw 'Stable publishing only accepts a pushed tag.'
+          }
+          if ($env:GITHUB_REPOSITORY -cne $env:EXPECTED_REPOSITORY) {
+            throw "Stable publishing is restricted to $env:EXPECTED_REPOSITORY."
+          }
+          if ($env:RELEASE_TAG -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -or
+              $env:GITHUB_REF -cne "refs/tags/$env:RELEASE_TAG") {
+            throw 'Stable release tags must use canonical vMAJOR.MINOR.PATCH syntax.'
+          }
+          $head = ((& git rev-parse HEAD) -join '').Trim().ToLowerInvariant()
+          $tagType = ((& git cat-file -t "refs/tags/$env:RELEASE_TAG") -join '').Trim()
+          $tagCommit = ((& git rev-list -n 1 "refs/tags/$env:RELEASE_TAG") -join '').Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or $tagType -cne 'commit' -or
+              $head -cnotmatch '^[0-9a-f]{40}$' -or $tagCommit -cne $head) {
+            throw 'The pushed tag must be a lightweight tag pointing at the checked-out source commit.'
+          }
+
+          $package = Get-Content -Raw -LiteralPath package.json -Encoding UTF8 | ConvertFrom-Json
+          $tauri = Get-Content -Raw -LiteralPath src-tauri/tauri.conf.json -Encoding UTF8 | ConvertFrom-Json
+          $cargo = Get-Content -Raw -LiteralPath src-tauri/Cargo.toml -Encoding UTF8
+          $cargoMatch = [regex]::Match($cargo, '(?ms)^\[package\].*?^version\s*=\s*"(?<version>[^"]+)"')
+          if (-not $cargoMatch.Success) {
+            throw 'Could not read the Cargo package version.'
+          }
+          $version = [string] $package.version
+          if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -or
+              [string] $tauri.version -cne $version -or
+              [string] $cargoMatch.Groups['version'].Value -cne $version -or
+              $env:RELEASE_TAG -cne "v$version") {
+            throw "package, Tauri, Cargo, and stable tag versions must agree: $version."
+          }
+          $notes = Join-Path $env:GITHUB_WORKSPACE "release\notes\$env:RELEASE_TAG.md"
+          if (-not (Test-Path -LiteralPath $notes -PathType Leaf)) {
+            $notes = Join-Path $env:RUNNER_TEMP 'vhm-default-release-notes.md'
+            @(
+              "# 瓦刻（VALOFRAME）$env:RELEASE_TAG"
+              ''
+              '本版本包含功能改进、错误修复与自动更新支持。'
+            ) | Set-Content -LiteralPath $notes -Encoding utf8
+          }
+          "SOURCE_COMMIT=$head" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_NOTES=$notes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Require repository updater signing material
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VALOFRAME_UPDATER_PUBLIC_KEY: ${{ vars.VALOFRAME_UPDATER_PUBLIC_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw 'Repository secret TAURI_SIGNING_PRIVATE_KEY is missing.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            throw 'Repository secret TAURI_SIGNING_PRIVATE_KEY_PASSWORD is missing.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:VALOFRAME_UPDATER_PUBLIC_KEY)) {
+            throw 'Repository variable VALOFRAME_UPDATER_PUBLIC_KEY is missing.'
+          }
+
+      - name: Reject duplicate or non-increasing releases before building
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $existingOutput = @(& gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json id 2>&1)
+          $existingExitCode = $LASTEXITCODE
+          if ($existingExitCode -eq 0) {
+            throw "Refusing to overwrite existing release $env:RELEASE_TAG; inspect or remove the draft before retrying."
+          }
+          if (($existingOutput -join "`n") -notmatch '(?i)(HTTP 404|release not found|not found)') {
+            throw 'Could not safely prove that a release with this tag does not exist.'
+          }
+
+          function ConvertFrom-StableReleaseTag {
+            param([Parameter(Mandatory)] [string] $Tag)
+            $match = [regex]::Match(
+              $Tag,
+              '^v(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)$'
+            )
+            if (-not $match.Success) { return $null }
+            return [pscustomobject]@{
+              tag = $Tag
+              major = [System.Numerics.BigInteger]::Parse($match.Groups['major'].Value)
+              minor = [System.Numerics.BigInteger]::Parse($match.Groups['minor'].Value)
+              patch = [System.Numerics.BigInteger]::Parse($match.Groups['patch'].Value)
+            }
+          }
+
+          function Compare-StableReleaseVersion {
+            param(
+              [Parameter(Mandatory)] $Left,
+              [Parameter(Mandatory)] $Right
+            )
+            foreach ($component in @('major', 'minor', 'patch')) {
+              $comparison = $Left.$component.CompareTo($Right.$component)
+              if ($comparison -ne 0) { return $comparison }
+            }
+            return 0
+          }
+
+          $publishedStableTags = @(& gh api --paginate "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" `
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not enumerate existing published releases before stable publication.'
+          }
+          $candidate = ConvertFrom-StableReleaseTag -Tag $env:RELEASE_TAG
+          if ($null -eq $candidate) { throw 'The stable candidate version is not canonical SemVer.' }
+          $highestStable = $null
+          foreach ($publishedTag in $publishedStableTags) {
+            $publishedVersion = ConvertFrom-StableReleaseTag -Tag ([string] $publishedTag).Trim()
+            if ($null -ne $publishedVersion -and
+                ($null -eq $highestStable -or
+                 (Compare-StableReleaseVersion -Left $publishedVersion -Right $highestStable) -gt 0)) {
+              $highestStable = $publishedVersion
+            }
+          }
+          if ($null -ne $highestStable -and
+              (Compare-StableReleaseVersion -Left $candidate -Right $highestStable) -le 0) {
+            throw "Stable candidate $($candidate.tag) must be newer than highest published stable release $($highestStable.tag)."
+          }
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Python for packaged startup inspection
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.96.1 --profile minimal --component clippy --component rustfmt
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Run complete automated baseline
+        shell: pwsh
+        run: |
+          npm test
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend or release tests failed.' }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Rust formatting check failed.' }
+          cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Rust Clippy failed.' }
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features
+          if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Git whitespace validation failed.' }
+
+          [ordered]@{
+            schemaVersion = 1
+            sourceCommit = $env:SOURCE_COMMIT
+            github = [ordered]@{
+              repository = $env:GITHUB_REPOSITORY
+              runId = $env:GITHUB_RUN_ID
+              runAttempt = $env:GITHUB_RUN_ATTEMPT
+            }
+            tools = [ordered]@{
+              node = ((& node --version) -join '').Trim()
+              npm = ((& npm --version) -join '').Trim()
+              rustc = ((& rustc --version) -join '').Trim()
+              cargo = ((& cargo --version) -join '').Trim()
+              tauri = ((& npm exec tauri -- --version) -join '').Trim()
+            }
+          } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'vhm-stable-toolchain.json') -Encoding utf8
+
+      - name: Prepare and verify bundled FFmpeg
+        shell: pwsh
+        run: |
+          & ./scripts/release/prepare-ffmpeg.ps1 -CacheDirectory (Join-Path $env:RUNNER_TEMP 'vhm-ffmpeg-cache')
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled FFmpeg preparation failed.' }
+          & ./scripts/release/verify-ffmpeg.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled FFmpeg verification failed.' }
+
+      - name: Build Tauri-signed updater artifacts
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VALOFRAME_UPDATER_PUBLIC_KEY: ${{ vars.VALOFRAME_UPDATER_PUBLIC_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -or
+              [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) -or
+              [string]::IsNullOrWhiteSpace($env:VALOFRAME_UPDATER_PUBLIC_KEY)) {
+            throw 'Repository updater signing material is missing.'
+          }
+          npm exec tauri -- build --bundles nsis --ci `
+            --config src-tauri/tauri.stable.conf.json
+          if ($LASTEXITCODE -ne 0) { throw 'Signed stable Tauri build failed.' }
+
+      - name: Verify bundle shape, updater signature, and tamper rejection
+        shell: pwsh
+        env:
+          VALOFRAME_UPDATER_PUBLIC_KEY: ${{ vars.VALOFRAME_UPDATER_PUBLIC_KEY }}
+        run: |
+          $releaseRoot = Join-Path $env:CARGO_TARGET_DIR 'release'
+          $nsisRoot = Join-Path $releaseRoot 'bundle\nsis'
+          $main = Join-Path $releaseRoot 'valorant-highlight-manager.exe'
+          $installers = @(Get-ChildItem -LiteralPath $nsisRoot -Filter '*.exe' -File)
+          $updaterPackages = @(Get-ChildItem -LiteralPath $nsisRoot -Filter '*.nsis.zip' -File)
+          if ($installers.Count -ne 1 -or $updaterPackages.Count -ne 1 -or
+              -not (Test-Path -LiteralPath $main -PathType Leaf)) {
+            throw "Expected one installer, one updater package, and the unpacked application executable."
+          }
+          $signaturePath = "$($updaterPackages[0].FullName).sig"
+          if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+            throw 'Tauri did not produce the updater .sig file.'
+          }
+          if (@(Get-ChildItem -LiteralPath (Join-Path $releaseRoot 'bundle') -Filter 'latest.json' -File -Recurse).Count -ne 0) {
+            throw 'Only the controlled manifest step may create latest.json.'
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $expectedUpdaterInstaller = "瓦刻_$env:APP_VERSION`_x64-setup.exe"
+          if ([string] $installers[0].Name -cne $expectedUpdaterInstaller -or
+              [long] $installers[0].Length -le 0 -or [long] $installers[0].Length -gt 536870912 -or
+              [long] $updaterPackages[0].Length -le 0 -or [long] $updaterPackages[0].Length -gt 536870912) {
+            throw 'Installer names or sizes do not match the bounded stable runtime contract.'
+          }
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($updaterPackages[0].FullName)
+          try {
+            $entries = @($archive.Entries)
+            if ($entries.Count -ne 1 -or
+                [string] $entries[0].FullName -cne $expectedUpdaterInstaller -or
+                [string] $entries[0].Name -cne $expectedUpdaterInstaller -or
+                [long] $entries[0].Length -le 0 -or
+                [long] $entries[0].Length -gt 536870912) {
+              throw 'Updater ZIP does not contain exactly the bounded root installer expected by the runtime.'
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
+
+          cargo run --quiet --locked --manifest-path src-tauri/Cargo.toml --example verify_updater_signature -- `
+            $updaterPackages[0].FullName $signaturePath $env:VALOFRAME_UPDATER_PUBLIC_KEY
+          if ($LASTEXITCODE -ne 0) { throw 'Valid updater signature was rejected.' }
+
+          $tamperedPackage = Join-Path $env:RUNNER_TEMP $updaterPackages[0].Name
+          Copy-Item -LiteralPath $updaterPackages[0].FullName -Destination $tamperedPackage
+          $stream = [System.IO.File]::Open($tamperedPackage, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+          try { $stream.WriteByte(0) } finally { $stream.Dispose() }
+          cargo run --quiet --locked --manifest-path src-tauri/Cargo.toml --example verify_updater_signature -- `
+            $tamperedPackage $signaturePath $env:VALOFRAME_UPDATER_PUBLIC_KEY 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'A one-byte updater-package mutation unexpectedly verified.' }
+
+          $wrongKeyText = "untrusted comment: minisign public key E7620F1842B4E81F`nRWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3"
+          $wrongKey = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($wrongKeyText))
+          if ([string]::Equals($wrongKey, $env:VALOFRAME_UPDATER_PUBLIC_KEY, [System.StringComparison]::Ordinal)) {
+            throw 'The negative-test public key unexpectedly equals the production public key.'
+          }
+          cargo run --quiet --locked --manifest-path src-tauri/Cargo.toml --example verify_updater_signature -- `
+            $updaterPackages[0].FullName $signaturePath $wrongKey 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'A wrong updater public key unexpectedly verified.' }
+
+          [ordered]@{
+            schemaVersion = 1
+            status = 'passed'
+            sourceCommit = $env:SOURCE_COMMIT
+            validSignatureAccepted = $true
+            oneByteMutationRejected = $true
+            wrongPublicKeyRejected = $true
+            artifactSha256 = (Get-FileHash -LiteralPath $updaterPackages[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            signatureSha256 = (Get-FileHash -LiteralPath $signaturePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'vhm-stable-updater-verification.json') -Encoding utf8
+
+          $smokeJson = & ./scripts/release/windows-release-smoke.ps1 `
+            -ExecutablePath $main `
+            -ResourceDirectory $releaseRoot `
+            -FfmpegMode ResourceOverride `
+            -IsolationParent $env:RUNNER_TEMP `
+            -ExpectedExecutableSha256 ((Get-FileHash -LiteralPath $main -Algorithm SHA256).Hash)
+          $smokeReportJson = $smokeJson -join "`n"
+          $smokeReportJson | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'vhm-stable-startup-smoke.json') -Encoding utf8
+          $smoke = $smokeReportJson | ConvertFrom-Json -Depth 30
+          if ($smoke.status -cne 'passed') { throw 'Packaged stable startup smoke failed.' }
+
+          "STABLE_INSTALLER=$($installers[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_UPDATER_PACKAGE=$($updaterPackages[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_UPDATER_SIGNATURE=$signaturePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Assemble and independently verify stable release assets
+        shell: pwsh
+        env:
+          VALOFRAME_UPDATER_PUBLIC_KEY: ${{ vars.VALOFRAME_UPDATER_PUBLIC_KEY }}
+        run: |
+          [void] (New-Item -ItemType Directory -Path $env:STABLE_ASSET_DIR)
+          Copy-Item -LiteralPath $env:STABLE_INSTALLER -Destination $env:STABLE_ASSET_DIR
+          Copy-Item -LiteralPath $env:STABLE_UPDATER_PACKAGE -Destination $env:STABLE_ASSET_DIR
+          Copy-Item -LiteralPath $env:STABLE_UPDATER_SIGNATURE -Destination $env:STABLE_ASSET_DIR
+          Copy-Item -LiteralPath $env:STABLE_NOTES -Destination (Join-Path $env:STABLE_ASSET_DIR 'RELEASE-NOTES.md')
+          $package = Join-Path $env:STABLE_ASSET_DIR ([System.IO.Path]::GetFileName($env:STABLE_UPDATER_PACKAGE))
+          $signature = "$package.sig"
+          $publishedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'")
+          $manifest = Join-Path $env:STABLE_ASSET_DIR 'latest.json'
+          node ./scripts/release/create-updater-manifest.mjs `
+            --artifact $package `
+            --signature $signature `
+            --version $env:APP_VERSION `
+            --tag $env:RELEASE_TAG `
+            --repository $env:EXPECTED_REPOSITORY `
+            --notes-file (Join-Path $env:STABLE_ASSET_DIR 'RELEASE-NOTES.md') `
+            --published-at $publishedAt `
+            --output $manifest
+          if ($LASTEXITCODE -ne 0) { throw 'Stable updater manifest creation failed.' }
+          node ./scripts/release/create-updater-manifest.mjs `
+            --artifact $package `
+            --signature $signature `
+            --version $env:APP_VERSION `
+            --tag $env:RELEASE_TAG `
+            --repository $env:EXPECTED_REPOSITORY `
+            --notes-file (Join-Path $env:STABLE_ASSET_DIR 'RELEASE-NOTES.md') `
+            --published-at $publishedAt `
+            --verify $manifest
+          if ($LASTEXITCODE -ne 0) { throw 'Staged updater manifest verification failed.' }
+          cargo run --quiet --locked --manifest-path src-tauri/Cargo.toml --example verify_updater_signature -- `
+            $package $signature $env:VALOFRAME_UPDATER_PUBLIC_KEY
+          if ($LASTEXITCODE -ne 0) { throw 'Staged updater assets failed signature verification.' }
+
+          $assets = @(Get-ChildItem -LiteralPath $env:STABLE_ASSET_DIR -File | Sort-Object Name)
+          $hashLines = @($assets | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
+          })
+          $hashLines | Set-Content -LiteralPath (Join-Path $env:STABLE_ASSET_DIR 'SHA256SUMS.txt') -Encoding ascii
+
+      - name: Create an invisible draft release with all verified assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = @(Get-ChildItem -LiteralPath $env:STABLE_ASSET_DIR -File | Sort-Object Name | ForEach-Object FullName)
+          gh release create $env:RELEASE_TAG @assets `
+            --repo $env:GITHUB_REPOSITORY `
+            --verify-tag `
+            --title "瓦刻（VALOFRAME）$env:RELEASE_TAG" `
+            --notes-file $env:STABLE_NOTES `
+            --draft
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the stable draft release.' }
+
+      - name: Redownload and verify every remote draft asset before publication
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALOFRAME_UPDATER_PUBLIC_KEY: ${{ vars.VALOFRAME_UPDATER_PUBLIC_KEY }}
+        run: |
+          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json id,isDraft,isPrerelease,tagName,targetCommitish,assets | ConvertFrom-Json -Depth 20
+          if ($release.isDraft -ne $true -or $release.isPrerelease -ne $false -or $release.tagName -cne $env:RELEASE_TAG) {
+            throw 'Remote release must remain a stable-channel draft during verification.'
+          }
+          $tagRef = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG" | ConvertFrom-Json -Depth 10
+          if ([string] $tagRef.object.type -cne 'commit' -or [string] $tagRef.object.sha -cne $env:SOURCE_COMMIT) {
+            throw 'Stable lightweight tag does not point to the checked-out source commit.'
+          }
+          $expectedNames = @(Get-ChildItem -LiteralPath $env:STABLE_ASSET_DIR -File | Sort-Object Name | ForEach-Object Name)
+          $remoteNames = @($release.assets | Sort-Object name | ForEach-Object name)
+          if (($expectedNames -join "`n") -cne ($remoteNames -join "`n")) {
+            throw 'Remote draft assets do not exactly match the verified local asset set.'
+          }
+          [void] (New-Item -ItemType Directory -Path $env:STABLE_REMOTE_DIR)
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir $env:STABLE_REMOTE_DIR
+          if ($LASTEXITCODE -ne 0) { throw 'Could not redownload remote draft assets.' }
+          foreach ($name in $expectedNames) {
+            $local = Join-Path $env:STABLE_ASSET_DIR $name
+            $remote = Join-Path $env:STABLE_REMOTE_DIR $name
+            if (-not (Test-Path -LiteralPath $remote -PathType Leaf) -or
+                (Get-FileHash -LiteralPath $local -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $remote -Algorithm SHA256).Hash) {
+              throw "Remote draft asset differs from the verified local file: $name"
+            }
+          }
+          $manifest = Get-Content -Raw -LiteralPath (Join-Path $env:STABLE_REMOTE_DIR 'latest.json') -Encoding UTF8 | ConvertFrom-Json -Depth 10
+          $publishedAt = [string] $manifest.pub_date
+          $packagePath = [uri]::UnescapeDataString(([uri] $manifest.platforms.'windows-x86_64'.url).AbsolutePath)
+          $packageName = [System.IO.Path]::GetFileName($packagePath)
+          node ./scripts/release/create-updater-manifest.mjs `
+            --artifact (Join-Path $env:STABLE_REMOTE_DIR $packageName) `
+            --signature (Join-Path $env:STABLE_REMOTE_DIR "$packageName.sig") `
+            --version $env:APP_VERSION `
+            --tag $env:RELEASE_TAG `
+            --repository $env:EXPECTED_REPOSITORY `
+            --notes-file (Join-Path $env:STABLE_REMOTE_DIR 'RELEASE-NOTES.md') `
+            --published-at $publishedAt `
+            --verify (Join-Path $env:STABLE_REMOTE_DIR 'latest.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Remote updater manifest verification failed.' }
+          cargo run --quiet --locked --manifest-path src-tauri/Cargo.toml --example verify_updater_signature -- `
+            (Join-Path $env:STABLE_REMOTE_DIR $packageName) `
+            (Join-Path $env:STABLE_REMOTE_DIR "$packageName.sig") `
+            $env:VALOFRAME_UPDATER_PUBLIC_KEY
+          if ($LASTEXITCODE -ne 0) { throw 'Remote updater signature verification failed.' }
+
+          [ordered]@{
+            schemaVersion = 1
+            status = 'passed'
+            phase = 'remote-draft'
+            sourceCommit = $env:SOURCE_COMMIT
+            releaseId = [long] $release.id
+            tag = $env:RELEASE_TAG
+            assets = @($expectedNames | ForEach-Object {
+              [ordered]@{
+                name = $_
+                sha256 = (Get-FileHash -LiteralPath (Join-Path $env:STABLE_REMOTE_DIR $_) -Algorithm SHA256).Hash.ToLowerInvariant()
+              }
+            })
+          } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'vhm-stable-remote-draft-verification.json') -Encoding utf8
+
+      - name: Publish the complete draft as the stable latest release
+        id: publish_stable_release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit $env:RELEASE_TAG `
+            --repo $env:GITHUB_REPOSITORY `
+            --draft=false `
+            --prerelease=false `
+            --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Stable draft publication failed.' }
+
+      - name: Redownload and verify the public latest endpoint and signed assets
+        id: verify_public_release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALOFRAME_UPDATER_PUBLIC_KEY: ${{ vars.VALOFRAME_UPDATER_PUBLIC_KEY }}
+        run: |
+          [void] (New-Item -ItemType Directory -Path $env:STABLE_PUBLIC_DIR)
+          $published = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json id,isDraft,isPrerelease,tagName,assets | ConvertFrom-Json -Depth 20
+          $latest = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" | ConvertFrom-Json -Depth 20
+          if ($published.isDraft -ne $false -or $published.isPrerelease -ne $false -or
+              [long] $latest.id -ne [long] $published.id) {
+            throw 'The public release is not the non-prerelease GitHub latest release.'
+          }
+
+          $releaseDownload = Join-Path $env:STABLE_PUBLIC_DIR 'release-assets'
+          [void] (New-Item -ItemType Directory -Path $releaseDownload)
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir $releaseDownload
+          if ($LASTEXITCODE -ne 0) { throw 'Could not redownload assets after stable publication.' }
+          $expectedNames = @(Get-ChildItem -LiteralPath $env:STABLE_ASSET_DIR -File | Sort-Object Name | ForEach-Object Name)
+          $publicNames = @(Get-ChildItem -LiteralPath $releaseDownload -File | Sort-Object Name | ForEach-Object Name)
+          if (($expectedNames -join "`n") -cne ($publicNames -join "`n")) {
+            throw 'Public release assets do not exactly match the verified asset set.'
+          }
+          foreach ($name in $expectedNames) {
+            $localHash = (Get-FileHash -LiteralPath (Join-Path $env:STABLE_ASSET_DIR $name) -Algorithm SHA256).Hash
+            $publicHash = (Get-FileHash -LiteralPath (Join-Path $releaseDownload $name) -Algorithm SHA256).Hash
+            if ($localHash -cne $publicHash) { throw "Published asset hash mismatch: $name" }
+          }
+
+          function Receive-PublicFile {
+            param(
+              [Parameter(Mandatory)] [uri] $Uri,
+              [Parameter(Mandatory)] [string] $Destination,
+              [Parameter(Mandatory)] [string] $ExpectedSha256
+            )
+            if ($Uri.Scheme -cne 'https') { throw "Public verification URL is not HTTPS: $Uri" }
+            $lastFailure = $null
+            for ($attempt = 1; $attempt -le 6; $attempt++) {
+              try {
+                if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
+                $response = Invoke-WebRequest -Uri $Uri -MaximumRedirection 5 -OutFile $Destination -PassThru
+                if ($response.BaseResponse.RequestMessage.RequestUri.Scheme -cne 'https') {
+                  throw 'Public download redirected to a non-HTTPS URL.'
+                }
+                $actual = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($actual -cne $ExpectedSha256.ToLowerInvariant()) {
+                  throw "Public download SHA-256 mismatch: expected $ExpectedSha256, found $actual."
+                }
+                return
+              }
+              catch {
+                $lastFailure = $_
+                if ($attempt -lt 6) { Start-Sleep -Seconds 5 }
+              }
+            }
+            throw $lastFailure
+          }
+
+          $publicManifest = Join-Path $env:STABLE_PUBLIC_DIR 'latest.json'
+          $localManifest = Join-Path $env:STABLE_ASSET_DIR 'latest.json'
+          Receive-PublicFile `
+            -Uri ([uri] 'https://github.com/2424521842/valoframe/releases/latest/download/latest.json') `
+            -Destination $publicManifest `
+            -ExpectedSha256 ((Get-FileHash -LiteralPath $localManifest -Algorithm SHA256).Hash)
+          $manifest = Get-Content -Raw -LiteralPath $publicManifest -Encoding UTF8 | ConvertFrom-Json -Depth 10
+          $packageUri = [uri] $manifest.platforms.'windows-x86_64'.url
+          $expectedPrefix = "/$env:EXPECTED_REPOSITORY/releases/download/$env:RELEASE_TAG/"
+          if ($packageUri.Scheme -cne 'https' -or $packageUri.Host -cne 'github.com' -or
+              -not $packageUri.AbsolutePath.StartsWith($expectedPrefix, [System.StringComparison]::Ordinal)) {
+            throw 'Public latest.json updater URL escaped the approved repository and tag.'
+          }
+          $packageName = [System.IO.Path]::GetFileName([uri]::UnescapeDataString($packageUri.AbsolutePath))
+          $directPackage = Join-Path $env:STABLE_PUBLIC_DIR $packageName
+          $directSignature = "$directPackage.sig"
+          Receive-PublicFile `
+            -Uri $packageUri `
+            -Destination $directPackage `
+            -ExpectedSha256 ((Get-FileHash -LiteralPath (Join-Path $env:STABLE_ASSET_DIR $packageName) -Algorithm SHA256).Hash)
+          Receive-PublicFile `
+            -Uri ([uri] "$($packageUri.AbsoluteUri).sig") `
+            -Destination $directSignature `
+            -ExpectedSha256 ((Get-FileHash -LiteralPath (Join-Path $env:STABLE_ASSET_DIR "$packageName.sig") -Algorithm SHA256).Hash)
+          node ./scripts/release/create-updater-manifest.mjs `
+            --artifact $directPackage `
+            --signature $directSignature `
+            --version $env:APP_VERSION `
+            --tag $env:RELEASE_TAG `
+            --repository $env:EXPECTED_REPOSITORY `
+            --notes-file (Join-Path $releaseDownload 'RELEASE-NOTES.md') `
+            --published-at ([string] $manifest.pub_date) `
+            --verify $publicManifest
+          if ($LASTEXITCODE -ne 0) { throw 'Public updater manifest verification failed.' }
+          cargo run --quiet --locked --manifest-path src-tauri/Cargo.toml --example verify_updater_signature -- `
+            $directPackage $directSignature $env:VALOFRAME_UPDATER_PUBLIC_KEY
+          if ($LASTEXITCODE -ne 0) { throw 'Public updater package signature verification failed.' }
+
+          [ordered]@{
+            schemaVersion = 1
+            status = 'passed'
+            phase = 'public-latest'
+            checkedAtUtc = [DateTime]::UtcNow.ToString('o')
+            sourceCommit = $env:SOURCE_COMMIT
+            releaseId = [long] $published.id
+            tag = $env:RELEASE_TAG
+            latestManifestSha256 = (Get-FileHash -LiteralPath $publicManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+            updaterPackageSha256 = (Get-FileHash -LiteralPath $directPackage -Algorithm SHA256).Hash.ToLowerInvariant()
+            updaterSignatureSha256 = (Get-FileHash -LiteralPath $directSignature -Algorithm SHA256).Hash.ToLowerInvariant()
+            everyReleaseAssetMatched = $true
+            updaterSignatureVerified = $true
+          } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'vhm-stable-public-verification.json') -Encoding utf8
+
+      - name: Restore the release to draft if public verification fails
+        if: ${{ failure() && steps.publish_stable_release.outcome == 'success' && steps.verify_public_release.outcome == 'failure' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne $env:EXPECTED_REPOSITORY -or
+              $env:RELEASE_TAG -cne "v$env:APP_VERSION") {
+            throw 'Stable release rollback scope does not match the approved repository and tag.'
+          }
+
+          $releaseJson = & gh release view $env:RELEASE_TAG `
+            --repo $env:GITHUB_REPOSITORY `
+            --json id,isDraft,isPrerelease,tagName
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the exact release for rollback.' }
+          $release = ($releaseJson -join "`n") | ConvertFrom-Json
+          if ([string] $release.tagName -cne $env:RELEASE_TAG -or [long] $release.id -le 0) {
+            throw 'Resolved rollback release does not match the exact approved tag.'
+          }
+          $releaseId = [long] $release.id
+
+          gh release edit $env:RELEASE_TAG `
+            --repo $env:GITHUB_REPOSITORY `
+            --draft=true `
+            --latest=false
+          if ($LASTEXITCODE -ne 0) { throw 'Could not restore the failed public release to draft.' }
+
+          $rolledBackJson = & gh release view $env:RELEASE_TAG `
+            --repo $env:GITHUB_REPOSITORY `
+            --json id,isDraft,isPrerelease,tagName
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify the rolled-back release.' }
+          $rolledBack = ($rolledBackJson -join "`n") | ConvertFrom-Json
+          if ([long] $rolledBack.id -ne $releaseId -or
+              [string] $rolledBack.tagName -cne $env:RELEASE_TAG -or
+              $rolledBack.isDraft -ne $true -or
+              $rolledBack.isPrerelease -ne $false) {
+            throw 'Failed public release did not return to the exact stable draft state.'
+          }
+
+          $latestOutput = @(& gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" 2>&1)
+          $latestExitCode = $LASTEXITCODE
+          $latestReleaseId = $null
+          if ($latestExitCode -eq 0) {
+            $latest = ($latestOutput -join "`n") | ConvertFrom-Json
+            $latestReleaseId = [long] $latest.id
+            if ($latestReleaseId -eq $releaseId) {
+              throw 'Rolled-back draft is still exposed as the GitHub latest release.'
+            }
+          }
+          elseif (($latestOutput -join "`n") -notmatch '(?i)(HTTP 404|Not Found)') {
+            throw 'Could not verify that the rolled-back release is no longer GitHub latest.'
+          }
+
+          [ordered]@{
+            schemaVersion = 1
+            status = 'rolled-back-to-draft'
+            phase = 'public-verification-recovery'
+            checkedAtUtc = [DateTime]::UtcNow.ToString('o')
+            sourceCommit = $env:SOURCE_COMMIT
+            releaseId = $releaseId
+            tag = $env:RELEASE_TAG
+            isDraft = $true
+            latestReleaseId = $latestReleaseId
+          } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'vhm-stable-public-rollback.json') -Encoding utf8
+
+      - name: Retain stable release evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: stable-release-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}\vhm-stable-*.json
+            ${{ runner.temp }}\vhm-stable-assets\**
+          if-no-files-found: warn
+          retention-days: 90
+          compression-level: 0

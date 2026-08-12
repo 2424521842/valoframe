@@ -402,15 +402,16 @@ jobs:
           if ($smokeReport.status -cne 'passed') {
             throw 'Release startup smoke report did not finish with passed status.'
           }
-          if ([int] $smokeReport.database.schemaVersion -ne 13 -or
+          if ([int] $smokeReport.database.schemaVersion -ne 16 -or
               [int] $smokeReport.database.requiredTableCount -ne 16 -or
               [long] $smokeReport.database.trashSnapshotCount -ne 0 -or
               [long] $smokeReport.database.deleteIntentCount -ne 0) {
-            throw 'Release startup smoke did not prove a fresh schema-v13 database with empty trash-snapshot and delete-intent journals.'
+            throw 'Release startup smoke did not prove a fresh schema-v16 database with empty trash-snapshot and delete-intent journals.'
           }
           $singleInstance = $smokeReport.runtime.singleInstance
           if ($singleInstance.verified -ne $true -or
               -not [string]::Equals([string] $singleInstance.sharedLaunchConfiguration.environmentOverrides.VHM_RELEASE_SMOKE_ROOT, [string] $smokeReport.runtime.isolationRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+              -not [string]::Equals([string] $singleInstance.sharedLaunchConfiguration.environmentOverrides.WEBVIEW2_USER_DATA_FOLDER, [string] $smokeReport.runtime.webView2UserDataPath, [System.StringComparison]::OrdinalIgnoreCase) -or
               [int] $singleInstance.secondInstanceExitCode -ne 0 -or
               [uint32] $singleInstance.secondInstanceJobActiveProcessesAfterExit -ne 0 -or
               $singleInstance.onlyPrimaryNamedRootAfterHandoff -ne $true -or

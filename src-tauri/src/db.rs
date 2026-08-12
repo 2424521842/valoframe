@@ -13,40 +13,60 @@ use std::{
 use rusqlite::{backup::Backup, params, Connection, OpenFlags};
 use tauri::{AppHandle, Manager};
 
+pub use crate::file_identity::StableFileIdentity;
 pub use migrations::initialize_schema;
 #[cfg(test)]
 use migrations::SCHEMA_VERSION;
 pub use models::{
     AccountIdentitySource, AccountNameHint, BatchClipMutationResult, Clip, ClipAgentAssetHint,
     ClipDetail, ClipEvent, ClipEventInput, ClipGroup, ClipGroupInput, ClipInput, ClipListQuery,
-    ClipMetadataInput, ClipPage, ClipSaveOutcome, ClipSegmentInput, ClipSort, ClipSummary,
-    FavoriteFilter, HighlightFilter, LibraryAccountFacet, LibraryFacetValue, LibraryFacets,
-    LibrarySourceFacet, LibraryTagFacet, SavedClip, Source, SourceDir, SourceDirInput, Tag,
-    ThumbnailCacheRef, ThumbnailEnsureResult, ThumbnailJob, ThumbnailQueueStatus,
-    ThumbnailReconcileResult, ThumbnailStatus,
+    ClipMetadataInput, ClipPage, ClipReviewMutationResult, ClipReviewState, ClipSaveOutcome,
+    ClipSegmentInput, ClipSort, ClipSummary, FavoriteFilter, HighlightFilter, LibraryAccountFacet,
+    LibraryFacetValue, LibraryFacets, LibrarySourceFacet, LibraryTagFacet, ReviewClipPage,
+    ReviewDecision, ReviewQueueQuery, SavedClip, ScanMode, Source, SourceDir, SourceDirInput,
+    SourceKind, SourceProfileInput, Tag, ThumbnailCacheRef, ThumbnailEnsureResult, ThumbnailJob,
+    ThumbnailQueueStatus, ThumbnailReconcileResult, ThumbnailStatus,
 };
 pub(crate) use models::{ClipFileTarget, ClipMediaPaths};
 #[cfg(test)]
 use repositories::clips::empty_batch_clip_mutation_result;
 pub use repositories::clips::{
     add_tag_to_clips, delete_clip_from_index, find_clip_by_id, find_clip_detail_by_id,
-    list_active_clip_paths_for_source, mark_clip_missing_by_normalized_path, remove_tag_from_clips,
-    set_clips_favorite, set_clips_trashed, update_clip_favorite, update_clip_note,
-    update_clip_trashed,
+    find_clip_source_id_by_normalized_path, list_active_clip_paths_for_source,
+    mark_clip_missing_by_normalized_path, remove_tag_from_clips, set_clips_favorite,
+    set_clips_trashed, update_clip_favorite, update_clip_note, update_clip_trashed,
 };
 use repositories::clips::{find_clip_by_normalized_path, find_optional_clip_by_normalized_path};
 pub(crate) use repositories::clips::{find_clip_file_target_by_id, find_clip_media_paths_by_id};
 pub(crate) use repositories::deletions::{
     delete_clip_from_index_guarded, delete_clip_permanently, recover_pending_clip_deletions,
-    set_clips_trashed_guarded, ClipDeleteItemOutcome,
+    set_clips_trashed_guarded, ClipDeleteItemOutcome, ClipIndexRemovalOutcome,
 };
 pub(in crate::db) use repositories::library::{attach_clip_events, map_clip, CLIP_SELECT_SQL};
 pub use repositories::library::{
     get_library_facets, list_clip_events_for_clip, list_clip_page, list_clips,
 };
+pub(crate) use repositories::reconnect::{
+    apply_planned_scan_reconnect, begin_scan_reconnect_plan, clear_scan_reconnect_plan,
+    finalize_scan_reconnect_plan, list_staged_scan_reconnect_candidates,
+    resolve_scan_reconnect_candidate, stage_scan_reconnect_candidate, ApplyScanReconnectOutcome,
+    ScanReconnectCandidate, ScanReconnectCandidateInput, ScanReconnectDecision,
+    ScanReconnectWarning, ScanReconnectWarningKind, StageScanReconnectCandidateOutcome,
+};
+pub use repositories::relocations::{
+    commit_scan_source_relocation, preview_scan_source_relocation, AffectedRelocationSource,
+    CommittedSourceRelocation, ScanSourceRelocationPreview, SourceRelocationBlocker,
+    SourceRelocationConflict,
+};
+pub use repositories::reviews::{
+    list_review_clip_page, reset_clip_review_decision, restore_clip_review_state,
+    set_clip_review_decision,
+};
 pub use repositories::sources::{
-    list_sources, mark_source_dir_scan_error, mark_source_dir_scanned, upsert_clip_group,
-    upsert_source_dir,
+    find_source_dir_by_id, find_source_dir_by_normalized_path, list_enabled_source_dirs,
+    list_source_dirs, list_sources, mark_source_dir_scan_error, mark_source_dir_scan_succeeded,
+    mark_source_dir_scanned, mark_source_dirs_scan_completed, register_source_dir,
+    set_source_dir_enabled, upsert_clip_group, upsert_source_dir, upsert_source_dir_with_profile,
 };
 use repositories::tags::list_tags_for_clip;
 pub use repositories::tags::{
@@ -384,20 +404,78 @@ pub fn upsert_clip(connection: &Connection, input: ClipInput<'_>) -> DbResult<Cl
 }
 
 pub fn upsert_scanned_clip(connection: &Connection, input: ClipInput<'_>) -> DbResult<SavedClip> {
-    let video_path = require_non_empty(input.video_path, "clip video path")?;
+    upsert_scanned_clip_with_identity_policy(
+        connection,
+        input,
+        FileIdentityWritePolicy::PreserveExisting,
+    )
+}
+
+/// Saves a scanned clip together with an optional stable Windows file identity.
+///
+/// The legacy wrapper above preserves an existing identity on conflict and inserts new rows with
+/// no identity. New scanning and relocation paths must call this function explicitly:
+/// `Some(identity)` persists a complete identity and `None` clears all three nullable columns
+/// atomically.
+pub fn upsert_scanned_clip_with_file_identity(
+    connection: &Connection,
+    input: ClipInput<'_>,
+    file_identity: Option<StableFileIdentity>,
+) -> DbResult<SavedClip> {
+    upsert_scanned_clip_with_identity_policy(
+        connection,
+        input,
+        FileIdentityWritePolicy::Replace(file_identity),
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FileIdentityWritePolicy {
+    PreserveExisting,
+    Replace(Option<StableFileIdentity>),
+}
+
+fn upsert_scanned_clip_with_identity_policy(
+    connection: &Connection,
+    input: ClipInput<'_>,
+    identity_policy: FileIdentityWritePolicy,
+) -> DbResult<SavedClip> {
+    let video_path =
+        stable_path_for_storage(require_non_empty(input.video_path, "clip video path")?);
     let file_name = require_non_empty(input.file_name, "clip file name")?;
     let cover_source = require_non_empty(input.cover_source, "cover source")?;
-    let normalized_path = normalize_path(video_path);
+    let normalized_path = normalize_path(&video_path);
+    let source_relative_dir = source_relative_directory_for_clip(connection, &input, &video_path)?;
     let extension = extension_from_file_name(file_name);
-    let normalized_cover_path = normalize_optional(input.cover_path);
+    let normalized_cover_path = normalize_optional(input.cover_path).map(stable_path_for_storage);
     let existing = find_optional_clip_by_normalized_path(connection, &normalized_path)?;
     let modified_at = input.modified_at.map(str::to_string);
-    let cover_path = normalized_cover_path.map(str::to_string);
+    let cover_path = normalized_cover_path.clone();
+    let (replace_file_identity, file_identity) = match identity_policy {
+        FileIdentityWritePolicy::PreserveExisting => (false, None),
+        FileIdentityWritePolicy::Replace(file_identity) => (true, file_identity),
+    };
+    let (file_volume_serial, file_index_high, file_index_low) = file_identity
+        .map(StableFileIdentity::database_parts)
+        .map_or(
+            (None, None, None),
+            |(volume_serial, index_high, index_low)| {
+                (Some(volume_serial), Some(index_high), Some(index_low))
+            },
+        );
 
     let outcome = match &existing {
         None => ClipSaveOutcome::Inserted,
         Some(existing)
-            if scanned_clip_changed(existing, &input, &extension, &modified_at, &cover_path) =>
+            if scanned_clip_changed(
+                existing,
+                &input,
+                &video_path,
+                &extension,
+                &modified_at,
+                &cover_path,
+                &source_relative_dir,
+            ) =>
         {
             ClipSaveOutcome::Updated
         }
@@ -416,13 +494,20 @@ pub fn upsert_scanned_clip(connection: &Connection, input: ClipInput<'_>) -> DbR
                 extension,
                 size_bytes,
                 modified_at,
+                file_volume_serial,
+                file_index_high,
+                file_index_low,
                 duration_ms,
                 recorded_at,
+                source_relative_dir,
                 cover_path,
                 cover_source,
                 file_status
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'available')
+            VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                'available'
+            )
             ON CONFLICT(normalized_path) DO UPDATE SET
                 source_dir_id = excluded.source_dir_id,
                 clip_group_id = excluded.clip_group_id,
@@ -431,6 +516,18 @@ pub fn upsert_scanned_clip(connection: &Connection, input: ClipInput<'_>) -> DbR
                 extension = excluded.extension,
                 size_bytes = excluded.size_bytes,
                 modified_at = excluded.modified_at,
+                file_volume_serial = CASE
+                    WHEN ?17 != 0 THEN excluded.file_volume_serial
+                    ELSE clips.file_volume_serial
+                END,
+                file_index_high = CASE
+                    WHEN ?17 != 0 THEN excluded.file_index_high
+                    ELSE clips.file_index_high
+                END,
+                file_index_low = CASE
+                    WHEN ?17 != 0 THEN excluded.file_index_low
+                    ELSE clips.file_index_low
+                END,
                 duration_ms = CASE
                     WHEN excluded.duration_ms IS NULL
                         AND EXISTS (
@@ -453,6 +550,7 @@ pub fn upsert_scanned_clip(connection: &Connection, input: ClipInput<'_>) -> DbR
                     THEN clips.recorded_at
                     ELSE excluded.recorded_at
                 END,
+                source_relative_dir = excluded.source_relative_dir,
                 cover_path = excluded.cover_path,
                 cover_source = excluded.cover_source,
                 file_status = CASE
@@ -465,16 +563,21 @@ pub fn upsert_scanned_clip(connection: &Connection, input: ClipInput<'_>) -> DbR
             params![
                 input.source_dir_id,
                 input.clip_group_id,
-                video_path,
+                &video_path,
                 normalized_path,
                 file_name,
                 extension,
                 input.file_size,
                 input.modified_at,
+                file_volume_serial,
+                file_index_high,
+                file_index_low,
                 input.duration_ms,
                 input.recorded_at,
-                normalized_cover_path,
+                source_relative_dir,
+                normalized_cover_path.as_deref(),
                 cover_source,
+                bool_to_integer(replace_file_identity),
             ],
         )
         .map_err(|error| readable_error("saving clip", error))?;
@@ -662,11 +765,12 @@ pub fn replace_clip_timeline(
                     killer_name,
                     killed_name,
                     killer_is_me,
+                    killed_is_me,
                     raw_json
                 )
                 VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7,
-                    ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                    ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
                 )
                 ",
                 params![
@@ -683,6 +787,7 @@ pub fn replace_clip_timeline(
                     event.killer_name,
                     event.killed_name,
                     bool_to_integer(event.killer_is_me),
+                    event.killed_is_me.map(bool_to_integer).unwrap_or(0),
                     event.raw_json,
                 ],
             )
@@ -1303,19 +1408,22 @@ fn propagate_account_name_hints_with_authority(
 fn scanned_clip_changed(
     existing: &Clip,
     input: &ClipInput<'_>,
+    video_path: &str,
     extension: &str,
     modified_at: &Option<String>,
     cover_path: &Option<String>,
+    source_relative_dir: &str,
 ) -> bool {
     existing.source_dir_id != input.source_dir_id
         || existing.clip_group_id != input.clip_group_id
-        || existing.video_path != input.video_path
+        || existing.video_path != video_path
         || existing.file_name != input.file_name
         || existing.extension != extension
         || existing.file_size != input.file_size
         || &existing.modified_at != modified_at
         || existing.duration_ms != input.duration_ms
         || existing.recorded_at.as_deref() != input.recorded_at
+        || existing.source_relative_dir != source_relative_dir
         || &existing.cover_path != cover_path
         || existing.cover_source != input.cover_source
         || existing.status != "available"
@@ -1329,7 +1437,7 @@ fn ensure_row_changed(changed: usize, action: &str, clip_id: i64) -> DbResult<()
     }
 }
 
-fn require_non_empty<'a>(value: &'a str, label: &str) -> DbResult<&'a str> {
+pub(in crate::db) fn require_non_empty<'a>(value: &'a str, label: &str) -> DbResult<&'a str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         Err(format!("{label} cannot be empty"))
@@ -1338,7 +1446,7 @@ fn require_non_empty<'a>(value: &'a str, label: &str) -> DbResult<&'a str> {
     }
 }
 
-fn normalize_optional(value: Option<&str>) -> Option<&str> {
+pub(in crate::db) fn normalize_optional(value: Option<&str>) -> Option<&str> {
     value.and_then(|value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -1356,7 +1464,152 @@ fn looks_like_source_account_id(value: &str) -> bool {
 }
 
 pub fn normalize_path(path: &str) -> String {
-    path.trim().replace('\\', "/").to_lowercase()
+    stable_path_for_storage(path)
+        .replace('\\', "/")
+        .to_lowercase()
+}
+
+/// Removes the Win32 verbatim namespace from ordinary drive and UNC paths before persistence.
+///
+/// `Path::canonicalize` returns `\\?\C:\...` (or `\\?\UNC\server\share\...`) on Windows.
+/// Those spellings address the same files as ordinary drive and UNC paths and must never create a
+/// second database identity. The returned spelling remains a normal Windows path so UI and shell
+/// integrations do not expose the implementation-only namespace prefix. Other namespace forms
+/// such as Volume GUID and GLOBALROOT paths remain unchanged; stripping those prefixes would turn
+/// them into invalid relative paths.
+pub(crate) fn stable_path_for_storage(path: &str) -> String {
+    let trimmed = path.trim();
+    let comparable = trimmed.replace('\\', "/");
+    if comparable
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/UNC/"))
+    {
+        return format!("\\\\{}", comparable[8..].replace('/', "\\"));
+    }
+    let is_verbatim_drive_path = comparable.as_bytes().get(4..7).is_some_and(|prefix| {
+        prefix[0].is_ascii_alphabetic() && prefix[1] == b':' && prefix[2] == b'/'
+    });
+    if comparable
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/"))
+        && is_verbatim_drive_path
+    {
+        return comparable[4..].replace('/', "\\");
+    }
+    trimmed.to_string()
+}
+
+pub(crate) fn has_windows_verbatim_prefix(path: &str) -> bool {
+    path.trim()
+        .replace('\\', "/")
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/"))
+}
+
+pub(in crate::db) fn source_relative_directory_for_clip(
+    connection: &Connection,
+    input: &ClipInput<'_>,
+    video_path: &str,
+) -> DbResult<String> {
+    let (scan_root_path, source_path, group_key) = connection
+        .query_row(
+            "
+            SELECT
+                source_dirs.scan_root_path,
+                source_dirs.path,
+                clip_groups.group_key
+            FROM source_dirs
+            LEFT JOIN clip_groups
+                ON clip_groups.id = ?2
+                AND clip_groups.source_dir_id = source_dirs.id
+            WHERE source_dirs.id = ?1
+            ",
+            params![input.source_dir_id, input.clip_group_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .map_err(|error| readable_error("reading clip source profile", error))?;
+
+    Ok(source_relative_directory(
+        video_path,
+        &scan_root_path,
+        &source_path,
+        group_key.as_deref(),
+    ))
+}
+
+fn source_relative_directory(
+    video_path: &str,
+    scan_root_path: &str,
+    source_path: &str,
+    fallback_group: Option<&str>,
+) -> String {
+    relative_parent_from_root(video_path, scan_root_path)
+        .or_else(|| relative_parent_from_root(video_path, source_path))
+        .unwrap_or_else(|| normalize_relative_directory(fallback_group.unwrap_or_default()))
+}
+
+fn relative_parent_from_root(video_path: &str, root_path: &str) -> Option<String> {
+    let video_components = path_components(video_path);
+    let root_components = path_components(root_path);
+    if root_components.is_empty() || video_components.len() <= root_components.len() {
+        return None;
+    }
+    if !root_components
+        .iter()
+        .zip(&video_components)
+        .all(|(root, video)| root.eq_ignore_ascii_case(video))
+    {
+        return None;
+    }
+
+    let parent_end = video_components.len() - 1;
+    if parent_end < root_components.len() {
+        return None;
+    }
+    Some(video_components[root_components.len()..parent_end].join("/"))
+}
+
+fn path_components(path: &str) -> Vec<String> {
+    let mut components = Vec::new();
+    for component in raw_path_components(path) {
+        if component == ".." {
+            if components
+                .last()
+                .is_some_and(|parent: &String| !parent.ends_with(':') && parent != "..")
+            {
+                components.pop();
+            } else {
+                components.push(component);
+            }
+        } else {
+            components.push(component);
+        }
+    }
+    components
+}
+
+fn raw_path_components(path: &str) -> Vec<String> {
+    path.trim()
+        .replace('\\', "/")
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .map(str::to_string)
+        .collect()
+}
+
+fn normalize_relative_directory(path: &str) -> String {
+    let components = raw_path_components(path);
+    if components.iter().any(|component| component == "..") {
+        String::new()
+    } else {
+        components.join("/")
+    }
 }
 
 fn source_root_match_patterns(source_root: Option<&Path>) -> Option<(String, String)> {
@@ -1385,7 +1638,7 @@ fn escape_like_pattern(value: &str) -> String {
     escaped
 }
 
-fn extension_from_file_name(file_name: &str) -> String {
+pub(in crate::db) fn extension_from_file_name(file_name: &str) -> String {
     file_name
         .rsplit_once('.')
         .map(|(_, extension)| extension.trim().to_lowercase())
@@ -1572,6 +1825,694 @@ mod tests {
             )
             .expect("backup schema should be inspectable");
         assert_eq!(backup_has_trash_snapshots, 0);
+
+        drop(backup);
+        drop(connection);
+        fs::remove_dir_all(root).expect("database fixture should be removed");
+    }
+
+    #[test]
+    fn migrate_database_upgrades_v13_with_source_profiles_and_review_state() {
+        let root = unique_database_temp_dir();
+        fs::create_dir_all(&root).expect("database fixture root should be created");
+        let source_path = root.join("wonderfulVideos-main");
+        let group_path = source_path.join("group-a");
+        fs::create_dir_all(&group_path).expect("legacy source fixture should be created");
+        let clip_path = group_path.join("ace.mp4");
+        let unreviewed_clip_path = source_path.join("ordinary.mp4");
+        fs::write(&clip_path, b"legacy v13 clip").expect("legacy clip should be created");
+        fs::write(&unreviewed_clip_path, b"legacy unreviewed clip")
+            .expect("legacy unreviewed clip should be created");
+        let database_path = root.join("v13.sqlite3");
+        let connection = Connection::open(&database_path).expect("v13 database should open");
+        initialize_schema(&connection).expect("current schema fixture should initialize");
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: source_path.to_string_lossy().as_ref(),
+                name: "Legacy ACLOS source",
+            },
+        )
+        .expect("legacy source should seed");
+        let group = upsert_clip_group(
+            &connection,
+            ClipGroupInput {
+                source_dir_id: source.id,
+                group_key: "group-a",
+                display_name: "Group A",
+            },
+        )
+        .expect("legacy group should seed");
+        let clip = upsert_clip(
+            &connection,
+            ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: Some(group.id),
+                video_path: clip_path.to_string_lossy().as_ref(),
+                file_name: "ace.mp4",
+                file_size: 15,
+                modified_at: Some("1782634272"),
+                duration_ms: Some(12_000),
+                recorded_at: Some("2026-06-28T08:00:00Z"),
+                cover_path: None,
+                cover_source: "missing",
+            },
+        )
+        .expect("legacy clip should seed");
+        let unreviewed_clip = upsert_clip(
+            &connection,
+            ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: None,
+                video_path: unreviewed_clip_path.to_string_lossy().as_ref(),
+                file_name: "ordinary.mp4",
+                file_size: 22,
+                modified_at: Some("1782634273"),
+                duration_ms: None,
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+        )
+        .expect("legacy unreviewed clip should seed");
+        let tag =
+            create_tag(&connection, "保留标签", Some("teal")).expect("legacy user tag should seed");
+        assign_tag_to_clip(&connection, clip.id, tag.id).expect("legacy tag should link");
+        seed_test_trash_snapshot(&connection, clip.id);
+        connection
+            .execute(
+                "
+                UPDATE clips
+                SET file_status = 'trashed',
+                    is_favorite = 1,
+                    note = 'keep v13 state',
+                    updated_at = '2026-07-01T12:34:56Z'
+                WHERE id = ?1
+                ",
+                [clip.id],
+            )
+            .expect("legacy clip state should seed");
+        connection
+            .execute(
+                "
+                INSERT INTO clip_thumbnails (
+                    clip_id,
+                    fingerprint,
+                    status,
+                    attempt_count,
+                    last_error
+                )
+                VALUES (?1, 'legacy-fingerprint', 'failed', 2, 'keep thumbnail state')
+                ",
+                [clip.id],
+            )
+            .expect("legacy thumbnail state should seed");
+        connection
+            .execute(
+                "
+                INSERT INTO clip_delete_intents (
+                    clip_id,
+                    state,
+                    video_path,
+                    source_dir_path,
+                    extension,
+                    file_existed,
+                    last_error_code
+                )
+                VALUES (?1, 'blocked', ?2, ?3, 'mp4', 0, 'keep-intent')
+                ",
+                params![
+                    clip.id,
+                    clip_path.to_string_lossy(),
+                    source_path.to_string_lossy()
+                ],
+            )
+            .expect("legacy delete intent should seed");
+        connection
+            .execute_batch(
+                "
+                DROP INDEX idx_source_dirs_sync_profile;
+                DROP INDEX idx_clips_source_relative_dir;
+                DROP INDEX idx_clips_review_queue;
+                ALTER TABLE source_dirs DROP COLUMN source_kind;
+                ALTER TABLE source_dirs DROP COLUMN scan_mode;
+                ALTER TABLE source_dirs DROP COLUMN scan_root_path;
+                ALTER TABLE clips DROP COLUMN source_relative_dir;
+                ALTER TABLE clips DROP COLUMN review_decision;
+                ALTER TABLE clips DROP COLUMN reviewed_at;
+                PRAGMA user_version = 13;
+                ",
+            )
+            .expect("fixture should emulate schema v13");
+        drop(connection);
+
+        migrate_database(&database_path).expect("v13 database should migrate");
+
+        let connection = open_database_read_only(&database_path)
+            .expect("migrated v13 database should open read-only");
+        assert_eq!(schema_user_version(&connection), SCHEMA_VERSION);
+        for column in ["file_volume_serial", "file_index_high", "file_index_low"] {
+            assert!(table_columns(&connection, "clips")
+                .iter()
+                .any(|existing| existing == column));
+        }
+        assert!(table_columns(&connection, "clip_events")
+            .iter()
+            .any(|column| column == "killed_is_me"));
+        assert!(table_columns(&connection, "scan_runs")
+            .iter()
+            .any(|column| column == "summary_available"));
+        let source_profile: (String, String, String) = connection
+            .query_row(
+                "SELECT source_kind, scan_mode, scan_root_path FROM source_dirs WHERE id = ?1",
+                [source.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("migrated source profile should be readable");
+        assert_eq!(
+            source_profile,
+            (
+                "aclos".to_string(),
+                "aclos-structured".to_string(),
+                source_path.to_string_lossy().into_owned(),
+            )
+        );
+        let clip_state: (String, String, Option<String>, i64, String, String) = connection
+            .query_row(
+                "
+                SELECT
+                    source_relative_dir,
+                    review_decision,
+                    reviewed_at,
+                    is_favorite,
+                    note,
+                    file_status
+                FROM clips
+                WHERE id = ?1
+                ",
+                [clip.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("migrated clip state should be readable");
+        assert_eq!(
+            clip_state,
+            (
+                "group-a".to_string(),
+                "liked".to_string(),
+                Some("2026-07-01T12:34:56Z".to_string()),
+                1,
+                "keep v13 state".to_string(),
+                "trashed".to_string(),
+            )
+        );
+        let unreviewed_state: (String, String, Option<String>) = connection
+            .query_row(
+                "
+                SELECT source_relative_dir, review_decision, reviewed_at
+                FROM clips
+                WHERE id = ?1
+                ",
+                [unreviewed_clip.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("migrated unreviewed state should be readable");
+        assert_eq!(
+            unreviewed_state,
+            ("".to_string(), "unreviewed".to_string(), None)
+        );
+        let preserved_state: (i64, String, i64, i64, String) = connection
+            .query_row(
+                "
+                SELECT
+                    (SELECT COUNT(*) FROM clip_tags WHERE clip_id = ?1),
+                    (SELECT status FROM clip_thumbnails WHERE clip_id = ?1),
+                    (SELECT COUNT(*) FROM clip_trash_snapshots WHERE clip_id = ?1),
+                    (SELECT COUNT(*) FROM clip_delete_intents WHERE clip_id = ?1),
+                    (SELECT last_error_code FROM clip_delete_intents WHERE clip_id = ?1)
+                ",
+                [clip.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("preserved v13 state should be readable");
+        assert_eq!(
+            preserved_state,
+            (1, "failed".to_string(), 1, 1, "keep-intent".to_string())
+        );
+        assert_eq!(
+            fs::read(&clip_path).expect("v13 migration must not touch the source video"),
+            b"legacy v13 clip"
+        );
+
+        let backup_path = fs::read_dir(root.join("backups"))
+            .expect("v13 backup directory should exist")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "sqlite3")
+            })
+            .expect("v13 migration should create a backup");
+        let backup = open_database_read_only(&backup_path).expect("v13 backup should be readable");
+        assert!(backup_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains("pre-v13-to-v16")));
+        assert_eq!(schema_user_version(&backup), 13);
+        assert!(!table_columns(&backup, "clips")
+            .iter()
+            .any(|column| column == "review_decision"));
+
+        drop(backup);
+        drop(connection);
+        fs::remove_dir_all(root).expect("database fixture should be removed");
+    }
+
+    #[test]
+    fn migrate_database_upgrades_real_v14_to_v16_with_backup_and_user_state() {
+        let root = unique_database_temp_dir();
+        fs::create_dir_all(&root).expect("database fixture root should be created");
+        let database_path = root.join("v14.sqlite3");
+        let connection = Connection::open(&database_path).expect("v14 database should open");
+        connection
+            .execute_batch(
+                r#"
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE source_dirs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    source_kind TEXT NOT NULL DEFAULT 'aclos' CHECK (
+                        source_kind IN ('aclos', 'nvidia', 'tracker', 'generic')
+                    ),
+                    scan_mode TEXT NOT NULL DEFAULT 'aclos-structured' CHECK (
+                        scan_mode IN ('aclos-structured', 'recursive-mp4')
+                    ),
+                    scan_root_path TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                    status TEXT NOT NULL DEFAULT 'available',
+                    last_error TEXT,
+                    last_scanned_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE clip_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_dir_id INTEGER NOT NULL,
+                    group_key TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (source_dir_id, group_key),
+                    FOREIGN KEY (source_dir_id) REFERENCES source_dirs(id) ON DELETE CASCADE
+                );
+                CREATE TABLE clips (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_dir_id INTEGER NOT NULL,
+                    clip_group_id INTEGER,
+                    file_path TEXT NOT NULL UNIQUE,
+                    normalized_path TEXT NOT NULL UNIQUE,
+                    file_name TEXT NOT NULL,
+                    extension TEXT NOT NULL DEFAULT 'mp4',
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    modified_at TEXT,
+                    duration_ms INTEGER,
+                    recorded_at TEXT,
+                    source_relative_dir TEXT NOT NULL DEFAULT '',
+                    cover_path TEXT,
+                    cover_source TEXT NOT NULL DEFAULT 'missing',
+                    file_status TEXT NOT NULL DEFAULT 'available',
+                    is_favorite INTEGER NOT NULL DEFAULT 0 CHECK (is_favorite IN (0, 1)),
+                    review_decision TEXT NOT NULL DEFAULT 'unreviewed' CHECK (
+                        review_decision IN ('unreviewed', 'liked', 'disliked')
+                    ),
+                    reviewed_at TEXT,
+                    note TEXT,
+                    first_indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (source_dir_id) REFERENCES source_dirs(id) ON DELETE CASCADE,
+                    FOREIGN KEY (clip_group_id) REFERENCES clip_groups(id) ON DELETE SET NULL
+                );
+                CREATE TABLE clip_segments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+                    segment_key TEXT NOT NULL,
+                    round_id INTEGER,
+                    start_ms INTEGER NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    game_start_ms INTEGER,
+                    game_end_ms INTEGER,
+                    UNIQUE (clip_id, segment_key)
+                );
+                CREATE TABLE clip_metadata (
+                    clip_id INTEGER PRIMARY KEY,
+                    metadata_status TEXT NOT NULL DEFAULT 'not_found',
+                    json_path TEXT,
+                    account_name TEXT,
+                    player_name TEXT,
+                    agent_name TEXT,
+                    map_name TEXT,
+                    game_mode TEXT,
+                    match_id TEXT,
+                    round_label TEXT,
+                    scoreline TEXT,
+                    kda TEXT,
+                    weapon_name TEXT,
+                    kill_count INTEGER,
+                    official_video_id TEXT,
+                    official_video_name TEXT,
+                    official_video_type TEXT,
+                    highlight_type TEXT,
+                    round_score TEXT,
+                    round_score_source TEXT,
+                    metadata_source TEXT,
+                    raw_title TEXT,
+                    extracted_text TEXT,
+                    extra_json TEXT,
+                    parse_error TEXT,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (clip_id) REFERENCES clips(id) ON DELETE CASCADE
+                );
+                CREATE TABLE clip_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+                    segment_id INTEGER REFERENCES clip_segments(id) ON DELETE SET NULL,
+                    event_key TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    video_time_ms INTEGER,
+                    event_time TEXT,
+                    round_id INTEGER,
+                    player_name TEXT,
+                    agent_name TEXT,
+                    weapon_name TEXT,
+                    killer_name TEXT,
+                    killed_name TEXT,
+                    killer_is_me INTEGER NOT NULL DEFAULT 0 CHECK (killer_is_me IN (0, 1)),
+                    raw_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (clip_id, event_key)
+                );
+                CREATE TABLE tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    color TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE clip_tags (
+                    clip_id INTEGER NOT NULL,
+                    tag_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (clip_id, tag_id),
+                    FOREIGN KEY (clip_id) REFERENCES clips(id) ON DELETE CASCADE,
+                    FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+                );
+                CREATE TABLE scan_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT,
+                    root_path TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'completed',
+                    source_dir_count INTEGER NOT NULL DEFAULT 0,
+                    clip_group_count INTEGER NOT NULL DEFAULT 0,
+                    new_clip_count INTEGER NOT NULL DEFAULT 0,
+                    updated_clip_count INTEGER NOT NULL DEFAULT 0,
+                    missing_clip_count INTEGER NOT NULL DEFAULT 0,
+                    cover_missing_count INTEGER NOT NULL DEFAULT 0,
+                    metadata_match_count INTEGER NOT NULL DEFAULT 0,
+                    metadata_enriched_clip_count INTEGER NOT NULL DEFAULT 0,
+                    metadata_event_count INTEGER NOT NULL DEFAULT 0,
+                    metadata_warning_count INTEGER NOT NULL DEFAULT 0,
+                    diagnostic_omitted_count INTEGER NOT NULL DEFAULT 0,
+                    errors_json TEXT NOT NULL DEFAULT '[]',
+                    message TEXT,
+                    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    finished_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                INSERT INTO source_dirs (
+                    id, path, name, source_kind, scan_mode, scan_root_path, enabled, status
+                ) VALUES (
+                    1, 'C:/Captures', 'Keep source', 'generic', 'recursive-mp4',
+                    'C:/Captures', 1, 'available'
+                );
+                INSERT INTO clips (
+                    id, source_dir_id, file_path, normalized_path, file_name, size_bytes,
+                    modified_at, duration_ms, recorded_at, source_relative_dir, is_favorite,
+                    review_decision, reviewed_at, note
+                ) VALUES (
+                    42, 1, 'C:/Captures/keep.mp4', 'c:/captures/keep.mp4', 'keep.mp4', 1234,
+                    '1786200000', 9000, '2026-08-08T00:00:00Z', '', 1, 'liked',
+                    '2026-08-08T01:00:00Z', 'keep v14 note'
+                );
+                INSERT INTO clips (
+                    id, source_dir_id, file_path, normalized_path, file_name, size_bytes,
+                    duration_ms, source_relative_dir
+                ) VALUES
+                    (43, 1, 'C:/Captures/kill.mp4', 'c:/captures/kill.mp4', 'kill.mp4', 10, 9000, ''),
+                    (44, 1, 'C:/Captures/death.mp4', 'c:/captures/death.mp4', 'death.mp4', 10, 9000, ''),
+                    (45, 1, 'C:/Captures/ordinary.mp4', 'c:/captures/ordinary.mp4', 'ordinary.mp4', 10, 9000, ''),
+                    (46, 1, 'C:/Captures/unknown.mp4', 'c:/captures/unknown.mp4', 'unknown.mp4', 10, 9000, ''),
+                    (47, 1, 'C:/Captures/late.mp4', 'c:/captures/late.mp4', 'late.mp4', 10, 1000, ''),
+                    (48, 1, 'C:/Captures/no-duration.mp4', 'c:/captures/no-duration.mp4', 'no-duration.mp4', 10, NULL, ''),
+                    (49, 1, 'C:/Captures/no-raw.mp4', 'c:/captures/no-raw.mp4', 'no-raw.mp4', 10, 9000, ''),
+                    (50, 1, 'C:/Captures/invalid-ext.mp4', 'c:/captures/invalid-ext.mp4', 'invalid-ext.mp4', 10, 9000, ''),
+                    (51, 1, 'C:/Captures/invalid-top.mp4', 'c:/captures/invalid-top.mp4', 'invalid-top.mp4', 10, 9000, ''),
+                    (52, 1, 'C:/Captures/zero.mp4', 'c:/captures/zero.mp4', 'zero.mp4', 10, 9000, '');
+                INSERT INTO clip_metadata (
+                    clip_id, official_video_name, official_video_type, highlight_type,
+                    metadata_source
+                ) VALUES
+                    (42, '死亡集锦', '死亡集锦', '3', 'wonderful_db'),
+                    (43, '击杀集锦', '击杀集锦', '2', 'wonderful_db'),
+                    (44, '死亡集锦', 'death compilation', NULL, 'wonderful_db'),
+                    (45, '普通高光', '普通高光', '1', 'wonderful_db'),
+                    (47, '击杀集锦', '击杀集锦', '2', 'wonderful_db'),
+                    (48, '击杀集锦', '击杀集锦', '2', 'wonderful_db'),
+                    (49, '击杀集锦', '击杀集锦', '2', 'wonderful_db'),
+                    (50, '击杀集锦', '击杀集锦', '2', 'wonderful_db'),
+                    (51, '击杀集锦', '击杀集锦', '2', 'wonderful_db'),
+                    (52, '击杀集锦', '击杀集锦', '2', 'wonderful_db');
+                INSERT INTO tags (id, name, color) VALUES (7, '保留 v14 标签', 'purple');
+                INSERT INTO clip_tags (clip_id, tag_id) VALUES (42, 7);
+                INSERT INTO clip_events (
+                    id, clip_id, event_key, event_type, video_time_ms, killer_is_me, raw_json
+                ) VALUES
+                    (9, 42, 'legacy-event', 'death', 1200, 0, '{"event_ext":{"unknown":true}}'),
+                    (10, 43, 'kill', 'kill', 9999, 1, '{"event_sTime":2500,"KilledIsMe":1}'),
+                    (11, 44, 'death', 'death', 9999, 0, '{"eventStart":"3000","event_ext":{"killedIsMe":"1"}}'),
+                    (12, 45, 'ordinary', 'kill', 1250, 1, '{"event_sTime":250,"KilledIsMe":true}'),
+                    (13, 46, 'unknown', 'kill', 777, 1, '{"event_sTime":500,"killedIsMe":true}'),
+                    (14, 47, 'too-late', 'kill', 1000, 0, '{"event_sTime":1500,"KilledIsMe":false}'),
+                    (15, 48, 'no-duration', 'kill', 500, 0, '{"event_sTime":500,"KilledIsMe":"0"}'),
+                    (16, 49, 'no-raw', 'kill', 500, 0, 'not-json'),
+                    (17, 50, 'invalid-ext', 'death', 500, 0, '{"event_sTime":500,"KilledIsMe":true,"event_ext":{"KilledIsMe":2}}'),
+                    (18, 51, 'invalid-top', 'death', 500, 0, '{"event_sTime":500,"KilledIsMe":"true"}'),
+                    (19, 52, 'zero', 'kill', 9999, 0, '{"event_sTime":0,"KilledIsMe":1}');
+                INSERT INTO scan_runs (id, job_id, root_path, status, new_clip_count)
+                    VALUES (1, 'completed-job', 'C:/Captures', 'completed', 3);
+                INSERT INTO scan_runs (id, job_id, root_path, status, new_clip_count)
+                    VALUES (2, 'partial-job', 'C:/Captures', 'partial', 2);
+                INSERT INTO scan_runs (id, job_id, root_path, status, new_clip_count)
+                    VALUES (3, 'cancelled-job', 'C:/Captures', 'cancelled', 0);
+                INSERT INTO scan_runs (id, job_id, root_path, status, new_clip_count)
+                    VALUES (4, 'failed-job', 'C:/Captures', 'failed', 0);
+                PRAGMA user_version = 14;
+                "#,
+            )
+            .expect("real v14 fixture should seed");
+        drop(connection);
+
+        migrate_database(&database_path).expect("v14 database should migrate to v16");
+        migrate_database(&database_path).expect("v16 migration should be idempotent");
+
+        let connection =
+            open_database(&database_path).expect("migrated v16 database should open read/write");
+        assert_eq!(schema_user_version(&connection), SCHEMA_VERSION);
+        #[derive(Debug, PartialEq, Eq)]
+        struct MigratedV14ClipState {
+            note: String,
+            favorite: i64,
+            review_decision: String,
+            reviewed_at: Option<String>,
+            volume_serial: Option<i64>,
+            file_index_high: Option<i64>,
+            file_index_low: Option<i64>,
+            tag_count: i64,
+        }
+        let clip_state = connection
+            .query_row(
+                "
+                SELECT
+                    note,
+                    is_favorite,
+                    review_decision,
+                    reviewed_at,
+                    file_volume_serial,
+                    file_index_high,
+                    file_index_low,
+                    (SELECT COUNT(*) FROM clip_tags WHERE clip_id = clips.id)
+                FROM clips
+                WHERE id = 42
+                ",
+                [],
+                |row| {
+                    Ok(MigratedV14ClipState {
+                        note: row.get(0)?,
+                        favorite: row.get(1)?,
+                        review_decision: row.get(2)?,
+                        reviewed_at: row.get(3)?,
+                        volume_serial: row.get(4)?,
+                        file_index_high: row.get(5)?,
+                        file_index_low: row.get(6)?,
+                        tag_count: row.get(7)?,
+                    })
+                },
+            )
+            .expect("v14 user state should survive");
+        assert_eq!(
+            clip_state,
+            MigratedV14ClipState {
+                note: "keep v14 note".to_string(),
+                favorite: 1,
+                review_decision: "liked".to_string(),
+                reviewed_at: Some("2026-08-08T01:00:00Z".to_string()),
+                volume_serial: None,
+                file_index_high: None,
+                file_index_low: None,
+                tag_count: 1,
+            }
+        );
+        let event_state: (Option<i64>, Option<i64>, String) = connection
+            .query_row(
+                "SELECT video_time_ms, killed_is_me, raw_json FROM clip_events WHERE id = 9",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("legacy event should remain readable");
+        assert_eq!(
+            event_state,
+            (
+                None,
+                Some(0),
+                "{\"event_ext\":{\"unknown\":true}}".to_string()
+            )
+        );
+        let migrated_timeline = connection
+            .prepare(
+                "
+                SELECT id, video_time_ms, killed_is_me
+                FROM clip_events
+                WHERE id BETWEEN 10 AND 19
+                ORDER BY id
+                ",
+            )
+            .expect("migrated timeline query should prepare")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .expect("migrated timeline query should run")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("migrated timeline should load");
+        assert_eq!(
+            migrated_timeline,
+            vec![
+                (10, Some(2_500), 1),
+                (11, Some(3_000), 1),
+                // Relative and unknown clips retain their already-correct v14 values.
+                (12, Some(1_250), 1),
+                (13, Some(777), 1),
+                // Confirmed compilations with unsafe timing evidence are cleared.
+                (14, None, 0),
+                (15, None, 0),
+                (16, None, 0),
+                // Explicit invalid event_ext never falls back to a valid top-level flag.
+                (17, Some(500), 0),
+                (18, Some(500), 0),
+                // Zero is an inclusive valid boundary.
+                (19, Some(0), 1),
+            ]
+        );
+        let summary_availability = connection
+            .prepare("SELECT status, summary_available FROM scan_runs ORDER BY id")
+            .expect("summary query should prepare")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .expect("summary query should run")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("summary availability should load");
+        assert_eq!(
+            summary_availability,
+            vec![
+                ("completed".to_string(), 1),
+                ("partial".to_string(), 1),
+                ("cancelled".to_string(), 0),
+                ("failed".to_string(), 0),
+            ]
+        );
+        assert!(connection
+            .execute("UPDATE clips SET file_volume_serial = 7 WHERE id = 42", [],)
+            .is_err());
+        connection
+            .execute(
+                "UPDATE clips SET file_volume_serial = 7, file_index_high = 8, file_index_low = 9 WHERE id = 42",
+                [],
+            )
+            .expect("upgraded v14 row should accept a complete identity");
+        assert!(connection
+            .execute("UPDATE clips SET file_index_low = NULL WHERE id = 42", [])
+            .is_err());
+
+        let backups = fs::read_dir(root.join("backups"))
+            .expect("v14 backup directory should exist")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            backups.len(),
+            1,
+            "idempotent v16 open must not add a backup"
+        );
+        assert!(backups[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains("pre-v14-to-v16")));
+        let backup = open_database_read_only(&backups[0]).expect("v14 backup should be readable");
+        assert_eq!(schema_user_version(&backup), 14);
+        assert!(!table_columns(&backup, "clips")
+            .iter()
+            .any(|column| column == "file_volume_serial"));
+        assert!(!table_columns(&backup, "clip_events")
+            .iter()
+            .any(|column| column == "killed_is_me"));
+        assert!(!table_columns(&backup, "scan_runs")
+            .iter()
+            .any(|column| column == "summary_available"));
+        let backup_note: String = backup
+            .query_row("SELECT note FROM clips WHERE id = 42", [], |row| row.get(0))
+            .expect("backup user state should remain readable");
+        assert_eq!(backup_note, "keep v14 note");
 
         drop(backup);
         drop(connection);
@@ -1814,6 +2755,131 @@ mod tests {
         );
     }
 
+    fn install_late_v15_migration_failure(connection: &Connection) {
+        connection
+            .execute_batch(
+                "
+                DROP INDEX idx_clips_source_file_identity;
+                CREATE TABLE idx_clips_source_file_identity (sentinel TEXT);
+                ",
+            )
+            .expect("late migration conflict should install");
+    }
+
+    #[test]
+    fn initialize_schema_rolls_back_v14_to_v15_when_a_late_step_fails() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("current schema fixture should initialize");
+        connection
+            .execute(
+                "
+                INSERT INTO scan_runs (job_id, root_path, status, summary_available)
+                VALUES ('rollback-v14', 'C:/captures', 'completed', 0)
+                ",
+                [],
+            )
+            .expect("legacy summary fixture should seed");
+        connection
+            .pragma_update(None, "user_version", 14)
+            .expect("fixture schema version should downgrade");
+        install_late_v15_migration_failure(&connection);
+
+        let error = initialize_schema(&connection)
+            .expect_err("the late index conflict should abort v14 to v16 migration");
+
+        assert!(error.contains("creating schema indexes"));
+        assert_eq!(schema_user_version(&connection), 14);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT summary_available FROM scan_runs WHERE job_id = 'rollback-v14'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("rolled-back summary should remain readable"),
+            0,
+            "the v15 summary backfill before the failing index must roll back"
+        );
+    }
+
+    #[test]
+    fn initialize_schema_rolls_back_v13_through_v15_when_a_late_step_fails() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("current schema fixture should initialize");
+        let clip = insert_test_clip_with_file_name(&connection, "rollback-v13.mp4");
+        connection
+            .execute(
+                "
+                UPDATE source_dirs
+                SET source_kind = 'generic',
+                    scan_mode = 'recursive-mp4',
+                    scan_root_path = 'legacy-root'
+                WHERE id = (SELECT source_dir_id FROM clips WHERE id = ?1)
+                ",
+                [clip.id],
+            )
+            .expect("legacy source profile should seed");
+        connection
+            .execute(
+                "
+                UPDATE clips
+                SET is_favorite = 1,
+                    review_decision = 'unreviewed',
+                    reviewed_at = NULL,
+                    source_relative_dir = 'legacy-relative'
+                WHERE id = ?1
+                ",
+                [clip.id],
+            )
+            .expect("legacy review state should seed");
+        connection
+            .pragma_update(None, "user_version", 13)
+            .expect("fixture schema version should downgrade");
+        install_late_v15_migration_failure(&connection);
+
+        let error = initialize_schema(&connection)
+            .expect_err("the late index conflict should abort the combined migration");
+
+        assert!(error.contains("creating schema indexes"));
+        assert_eq!(schema_user_version(&connection), 13);
+        let state: (String, String, String, String, Option<String>) = connection
+            .query_row(
+                "
+                SELECT
+                    source_dirs.source_kind,
+                    source_dirs.scan_mode,
+                    source_dirs.scan_root_path,
+                    clips.review_decision,
+                    clips.reviewed_at
+                FROM clips
+                JOIN source_dirs ON source_dirs.id = clips.source_dir_id
+                WHERE clips.id = ?1
+                ",
+                [clip.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("rolled-back v13 state should remain readable");
+        assert_eq!(
+            state,
+            (
+                "generic".to_string(),
+                "recursive-mp4".to_string(),
+                "legacy-root".to_string(),
+                "unreviewed".to_string(),
+                None,
+            ),
+            "v14 and v15 backfills before the failing index must roll back together"
+        );
+    }
+
     #[test]
     fn ordinary_connections_do_not_run_schema_initialization_side_effects() {
         let root = unique_database_temp_dir();
@@ -1931,6 +2997,1040 @@ mod tests {
         );
 
         assert_eq!(schema_user_version(&connection), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn schema_v16_creates_source_review_identity_event_and_summary_contracts() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+
+        for column in ["source_kind", "scan_mode", "scan_root_path"] {
+            assert!(
+                table_columns(&connection, "source_dirs")
+                    .iter()
+                    .any(|existing| existing == column),
+                "source_dirs should include {column}"
+            );
+        }
+        for column in [
+            "source_relative_dir",
+            "review_decision",
+            "reviewed_at",
+            "file_volume_serial",
+            "file_index_high",
+            "file_index_low",
+        ] {
+            assert!(
+                table_columns(&connection, "clips")
+                    .iter()
+                    .any(|existing| existing == column),
+                "clips should include {column}"
+            );
+        }
+        for index in [
+            "idx_source_dirs_sync_profile",
+            "idx_clips_source_relative_dir",
+            "idx_clips_source_file_identity",
+            "idx_clips_source_legacy_fingerprint",
+            "idx_clips_review_queue",
+        ] {
+            assert_index_exists(&connection, index);
+        }
+
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: "C:\\ACLOS\\aclos-highlight",
+                name: "Default ACLOS",
+            },
+        )
+        .expect("default ACLOS source should upsert");
+        let clip = upsert_clip(
+            &connection,
+            ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: None,
+                video_path: "C:\\ACLOS\\aclos-highlight\\nested\\ace.mp4",
+                file_name: "ace.mp4",
+                file_size: 42,
+                modified_at: None,
+                duration_ms: None,
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+        )
+        .expect("ACLOS clip should upsert");
+
+        assert_eq!(source.source_kind, SourceKind::Aclos);
+        assert_eq!(source.scan_mode, ScanMode::AclosStructured);
+        assert_eq!(source.scan_root_path, "C:\\ACLOS\\aclos-highlight");
+        assert_eq!(clip.source_relative_dir, "nested");
+        assert_eq!(clip.review_decision, ReviewDecision::Unreviewed);
+        assert_eq!(clip.reviewed_at, None);
+        assert!(table_columns(&connection, "clip_events")
+            .iter()
+            .any(|column| column == "killed_is_me"));
+        assert!(table_columns(&connection, "scan_runs")
+            .iter()
+            .any(|column| column == "summary_available"));
+        assert!(connection
+            .execute(
+                "UPDATE source_dirs SET source_kind = 'unsupported' WHERE id = ?1",
+                [source.id]
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE clips SET review_decision = 'maybe' WHERE id = ?1",
+                [clip.id]
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE clips SET file_volume_serial = 1 WHERE id = ?1",
+                [clip.id]
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE clips SET file_volume_serial = -1, file_index_high = 2, file_index_low = 3 WHERE id = ?1",
+                [clip.id]
+            )
+            .is_err());
+
+        upsert_scanned_clip_with_file_identity(
+            &connection,
+            ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: None,
+                video_path: "C:\\ACLOS\\aclos-highlight\\nested\\ace.mp4",
+                file_name: "ace.mp4",
+                file_size: 42,
+                modified_at: None,
+                duration_ms: None,
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+            Some(StableFileIdentity {
+                volume_serial: 11,
+                file_index_high: 22,
+                file_index_low: 33,
+            }),
+        )
+        .expect("complete stable identity should save");
+        let stored_identity: (Option<i64>, Option<i64>, Option<i64>) = connection
+            .query_row(
+                "SELECT file_volume_serial, file_index_high, file_index_low FROM clips WHERE id = ?1",
+                [clip.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("stable identity should be readable");
+        assert_eq!(stored_identity, (Some(11), Some(22), Some(33)));
+        upsert_scanned_clip(
+            &connection,
+            ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: None,
+                video_path: "C:\\ACLOS\\aclos-highlight\\nested\\ace.mp4",
+                file_name: "ace.mp4",
+                file_size: 42,
+                modified_at: None,
+                duration_ms: None,
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+        )
+        .expect("legacy wrapper should remain compatible");
+        let preserved_identity: (Option<i64>, Option<i64>, Option<i64>) = connection
+            .query_row(
+                "SELECT file_volume_serial, file_index_high, file_index_low FROM clips WHERE id = ?1",
+                [clip.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("preserved stable identity should be readable");
+        assert_eq!(preserved_identity, (Some(11), Some(22), Some(33)));
+        upsert_scanned_clip_with_file_identity(
+            &connection,
+            ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: None,
+                video_path: "C:\\ACLOS\\aclos-highlight\\nested\\ace.mp4",
+                file_name: "ace.mp4",
+                file_size: 42,
+                modified_at: None,
+                duration_ms: None,
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+            None,
+        )
+        .expect("explicit missing identity should clear stale identity");
+        let cleared_identity: (Option<i64>, Option<i64>, Option<i64>) = connection
+            .query_row(
+                "SELECT file_volume_serial, file_index_high, file_index_low FROM clips WHERE id = ?1",
+                [clip.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("cleared stable identity should be readable");
+        assert_eq!(cleared_identity, (None, None, None));
+
+        replace_clip_timeline(
+            &connection,
+            clip.id,
+            &[],
+            &[ClipEventInput {
+                segment_key: None,
+                event_key: "death-event",
+                event_type: "death",
+                video_time_ms: Some(500),
+                event_time: None,
+                round_id: None,
+                player_name: None,
+                agent_name: None,
+                weapon_name: None,
+                killer_name: Some("Enemy"),
+                killed_name: Some("Tester"),
+                killer_is_me: false,
+                killed_is_me: Some(true),
+                raw_json: None,
+            }],
+        )
+        .expect("nullable killed identity should save");
+        assert_eq!(
+            list_clip_events_for_clip(&connection, clip.id).expect("event should load")[0]
+                .killed_is_me,
+            Some(true)
+        );
+        assert!(connection
+            .execute(
+                "UPDATE clip_events SET killed_is_me = 2 WHERE clip_id = ?1",
+                [clip.id]
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE clip_events SET killed_is_me = NULL WHERE clip_id = ?1",
+                [clip.id]
+            )
+            .is_err());
+
+        connection
+            .execute(
+                "INSERT INTO scan_runs (root_path, status) VALUES ('C:/scan', 'failed')",
+                [],
+            )
+            .expect("scan run should use unavailable summary default");
+        let summary_available: i64 = connection
+            .query_row(
+                "SELECT summary_available FROM scan_runs ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("summary availability should load");
+        assert_eq!(summary_available, 0);
+        assert!(connection
+            .execute("UPDATE scan_runs SET summary_available = 2", [])
+            .is_err());
+
+        connection
+            .execute(
+                "
+                UPDATE clips
+                SET is_favorite = 1,
+                    review_decision = 'disliked',
+                    reviewed_at = '2026-08-08T00:00:00Z'
+                WHERE id = ?1
+                ",
+                [clip.id],
+            )
+            .expect("current review state should update");
+        initialize_schema(&connection).expect("schema v16 initialization should be idempotent");
+        let current_review: (i64, String, Option<String>) = connection
+            .query_row(
+                "SELECT is_favorite, review_decision, reviewed_at FROM clips WHERE id = ?1",
+                [clip.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("current review state should remain readable");
+        assert_eq!(
+            current_review,
+            (
+                1,
+                "disliked".to_string(),
+                Some("2026-08-08T00:00:00Z".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn source_relative_directory_is_lexical_case_insensitive_and_safe() {
+        assert_eq!(
+            source_relative_directory(
+                "C:\\Captures\\Match A\\Round 1\\ace.mp4",
+                "c:/captures",
+                "C:\\Captures",
+                None,
+            ),
+            "Match A/Round 1"
+        );
+        assert_eq!(
+            source_relative_directory(
+                "D:\\ACLOS\\wonderfulVideos-main\\root.mp4",
+                "D:\\ACLOS\\wonderfulVideos-main",
+                "D:\\ACLOS\\wonderfulVideos-main",
+                Some("ignored-group"),
+            ),
+            ""
+        );
+        assert_eq!(
+            source_relative_directory(
+                "E:\\Imported\\ace.mp4",
+                "D:\\ACLOS",
+                "D:\\ACLOS\\wonderfulVideos-main",
+                Some("group-a\\round-2"),
+            ),
+            "group-a/round-2"
+        );
+        assert_eq!(
+            source_relative_directory(
+                "E:\\Imported\\ace.mp4",
+                "D:\\ACLOS",
+                "D:\\ACLOS\\wonderfulVideos-main",
+                Some("../escape"),
+            ),
+            ""
+        );
+        assert_eq!(
+            source_relative_directory(
+                "D:\\ACLOS\\..\\Outside\\ace.mp4",
+                "D:\\ACLOS",
+                "D:\\ACLOS\\wonderfulVideos-main",
+                Some("safe-fallback"),
+            ),
+            "safe-fallback"
+        );
+    }
+
+    #[test]
+    fn windows_verbatim_and_ordinary_paths_share_one_database_key() {
+        assert_eq!(
+            normalize_path(r"D:\Captures\VALORANT\ace.mp4"),
+            normalize_path(r"\\?\D:\Captures\VALORANT\ace.mp4")
+        );
+        assert_eq!(
+            normalize_path(r"\\server\share\VALORANT\ace.mp4"),
+            normalize_path(r"\\?\UNC\server\share\VALORANT\ace.mp4")
+        );
+        assert_eq!(
+            stable_path_for_storage(r"\\?\D:\Captures\ace.mp4"),
+            r"D:\Captures\ace.mp4"
+        );
+        assert_eq!(
+            stable_path_for_storage(r"\\?\UNC\server\share\ace.mp4"),
+            r"\\server\share\ace.mp4"
+        );
+        assert_eq!(
+            stable_path_for_storage(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\ace.mp4"),
+            r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\ace.mp4"
+        );
+        assert_eq!(
+            stable_path_for_storage(r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\ace.mp4"),
+            r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\ace.mp4"
+        );
+    }
+
+    #[test]
+    fn source_lookup_reuses_ordinary_and_verbatim_aliases_in_both_directions() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+        let legacy = register_source_dir(
+            &connection,
+            SourceDirInput {
+                path: r"D:\LegacyCaptures",
+                name: "Legacy captures",
+            },
+            SourceProfileInput {
+                source_kind: SourceKind::Generic,
+                scan_mode: SourceKind::Generic.default_scan_mode(),
+                scan_root_path: r"D:\LegacyCaptures",
+            },
+            true,
+        )
+        .expect("legacy source should register");
+        connection
+            .execute(
+                "UPDATE source_dirs SET path = ?2, scan_root_path = ?2 WHERE id = ?1",
+                params![legacy.id, r"\\?\D:\LegacyCaptures"],
+            )
+            .expect("fixture should emulate a legacy verbatim source");
+
+        let repaired = register_source_dir(
+            &connection,
+            SourceDirInput {
+                path: r"D:\LegacyCaptures",
+                name: "Legacy captures",
+            },
+            SourceProfileInput {
+                source_kind: SourceKind::Generic,
+                scan_mode: SourceKind::Generic.default_scan_mode(),
+                scan_root_path: r"D:\LegacyCaptures",
+            },
+            true,
+        )
+        .expect("ordinary lookup should reuse the legacy verbatim row");
+        assert_eq!(repaired.id, legacy.id);
+        assert_eq!(repaired.path, r"D:\LegacyCaptures");
+        assert_eq!(repaired.scan_root_path, r"D:\LegacyCaptures");
+
+        let ordinary = register_source_dir(
+            &connection,
+            SourceDirInput {
+                path: r"\\server\share\CurrentCaptures",
+                name: "Current captures",
+            },
+            SourceProfileInput {
+                source_kind: SourceKind::Generic,
+                scan_mode: SourceKind::Generic.default_scan_mode(),
+                scan_root_path: r"\\server\share\CurrentCaptures",
+            },
+            true,
+        )
+        .expect("ordinary UNC source should register");
+        let reused = register_source_dir(
+            &connection,
+            SourceDirInput {
+                path: r"\\?\UNC\server\share\CurrentCaptures",
+                name: "Current captures",
+            },
+            SourceProfileInput {
+                source_kind: SourceKind::Generic,
+                scan_mode: SourceKind::Generic.default_scan_mode(),
+                scan_root_path: r"\\?\UNC\server\share\CurrentCaptures",
+            },
+            true,
+        )
+        .expect("verbatim lookup should reuse the ordinary UNC row");
+        assert_eq!(reused.id, ordinary.id);
+        assert_eq!(reused.path, r"\\server\share\CurrentCaptures");
+        assert_eq!(reused.scan_root_path, r"\\server\share\CurrentCaptures");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM source_dirs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn schema_v16_normalizes_unambiguous_sources_but_keeps_duplicate_aliases_fail_closed() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO source_dirs (
+                    id, path, name, source_kind, scan_mode, scan_root_path
+                ) VALUES
+                    (94001, '\\?\E:\SingleSource', 'single', 'generic', 'recursive-mp4',
+                     '\\?\E:\SingleSource'),
+                    (94002, 'D:\DuplicateSource', 'ordinary', 'generic', 'recursive-mp4',
+                     'D:\DuplicateSource'),
+                    (94003, '\\?\D:\DuplicateSource', 'verbatim', 'generic', 'recursive-mp4',
+                     '\\?\D:\DuplicateSource');
+                PRAGMA user_version = 15;
+                "#,
+            )
+            .expect("legacy source fixtures should insert");
+
+        initialize_schema(&connection).expect("schema v16 migration should finish safely");
+
+        let single: (String, String) = connection
+            .query_row(
+                "SELECT path, scan_root_path FROM source_dirs WHERE id = 94001",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            single,
+            (
+                r"E:\SingleSource".to_string(),
+                r"E:\SingleSource".to_string()
+            )
+        );
+        let duplicates = connection
+            .prepare("SELECT path FROM source_dirs WHERE id IN (94002, 94003) ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            duplicates,
+            vec![
+                r"D:\DuplicateSource".to_string(),
+                r"\\?\D:\DuplicateSource".to_string(),
+            ]
+        );
+        let error = find_source_dir_by_normalized_path(&connection, r"D:\DuplicateSource")
+            .expect_err("ambiguous legacy source aliases must fail closed");
+        assert!(error.contains("Multiple source directories"), "{error}");
+        let registration = register_source_dir(
+            &connection,
+            SourceDirInput {
+                path: r"D:\DuplicateSource",
+                name: "must not create",
+            },
+            SourceProfileInput {
+                source_kind: SourceKind::Generic,
+                scan_mode: SourceKind::Generic.default_scan_mode(),
+                scan_root_path: r"D:\DuplicateSource",
+            },
+            true,
+        );
+        assert!(registration.is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM source_dirs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn scanned_clip_persistence_never_stores_a_windows_verbatim_prefix() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: r"D:\Captures",
+                name: "Captures",
+            },
+        )
+        .expect("source should insert");
+
+        let saved = upsert_clip(
+            &connection,
+            ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: None,
+                video_path: r"\\?\D:\Captures\ace.mp4",
+                file_name: "ace.mp4",
+                file_size: 42,
+                modified_at: Some("42"),
+                duration_ms: None,
+                recorded_at: None,
+                cover_path: Some(r"\\?\D:\Captures\cover.jpg"),
+                cover_source: "file",
+            },
+        )
+        .expect("clip should insert");
+
+        assert_eq!(saved.video_path, r"D:\Captures\ace.mp4");
+        assert_eq!(saved.normalized_path, "d:/captures/ace.mp4");
+        assert_eq!(saved.cover_path.as_deref(), Some(r"D:\Captures\cover.jpg"));
+    }
+
+    #[test]
+    fn schema_v16_merges_only_deterministic_verbatim_duplicates_and_preserves_state() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: r"D:\Captures",
+                name: "Captures",
+            },
+        )
+        .expect("source should insert");
+        let keeper_id = 90_001_i64;
+        let duplicate_id = 90_002_i64;
+        connection
+            .execute(
+                "
+                INSERT INTO clips (
+                    id, source_dir_id, file_path, normalized_path, file_name, size_bytes,
+                    modified_at, file_status, is_favorite, note, review_decision, reviewed_at,
+                    file_volume_serial, file_index_high, file_index_low
+                ) VALUES (?1, ?2, ?3, ?4, 'ace.mp4', 4242, '42', 'trashed', 0, ?5,
+                          'disliked', '2026-08-09 01:00:00', 7, 8, 9)
+                ",
+                params![
+                    keeper_id,
+                    source.id,
+                    r"D:\Captures\ace.mp4",
+                    "d:/captures/ace.mp4",
+                    "keeper note",
+                ],
+            )
+            .expect("ordinary keeper should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO clips (
+                    id, source_dir_id, file_path, normalized_path, file_name, size_bytes,
+                    modified_at, file_status, is_favorite, note, review_decision,
+                    file_volume_serial, file_index_high, file_index_low
+                ) VALUES (?1, ?2, ?3, ?4, 'ace.mp4', 4242, '42', 'missing', 1, ?5,
+                          'unreviewed', 7, 8, 9)
+                ",
+                params![
+                    duplicate_id,
+                    source.id,
+                    r"\\?\D:\Captures\ace.mp4",
+                    "//?/d:/captures/ace.mp4",
+                    "duplicate note",
+                ],
+            )
+            .expect("verbatim duplicate should insert");
+
+        connection
+            .execute(
+                "
+                INSERT INTO clip_trash_snapshots (
+                    clip_id, video_path, canonical_video_path, source_dir_path,
+                    canonical_source_dir_path, extension, file_existed
+                ) VALUES (?1, ?2, ?2, ?3, ?3, 'mp4', 0)
+                ",
+                params![keeper_id, r"D:\Captures\ace.mp4", r"D:\Captures"],
+            )
+            .expect("keeper trash authorization should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO clip_delete_intents (
+                    clip_id, state, video_path, canonical_video_path, source_dir_path,
+                    canonical_source_dir_path, extension, file_existed
+                ) VALUES (?1, 'pending', ?2, ?2, ?3, ?3, 'mp4', 0)
+                ",
+                params![keeper_id, r"D:\Captures\ace.mp4", r"D:\Captures"],
+            )
+            .expect("keeper delete intent should insert");
+        connection
+            .execute(
+                "INSERT INTO tags (id, name) VALUES (901, 'keeper-tag'), (902, 'duplicate-tag')",
+                [],
+            )
+            .expect("tags should insert");
+        connection
+            .execute(
+                "INSERT INTO clip_tags (clip_id, tag_id) VALUES (?1, 901), (?2, 902)",
+                params![keeper_id, duplicate_id],
+            )
+            .expect("clip tags should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO clip_metadata (
+                    clip_id, metadata_status, account_name, metadata_source, updated_at
+                ) VALUES (?1, 'enriched', 'Keeper#0001', 'wonderful_db', '2026-08-09 01:00:00')
+                ",
+                params![keeper_id],
+            )
+            .expect("keeper metadata should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO clip_metadata (
+                    clip_id, metadata_status, map_name, game_mode, updated_at
+                ) VALUES (?1, 'enriched', 'Bind', 'Competitive', '2026-08-09 02:00:00')
+                ",
+                params![duplicate_id],
+            )
+            .expect("duplicate metadata should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO clip_segments (clip_id, segment_key, start_ms, duration_ms)
+                VALUES (?1, 'keeper-segment', 0, 1000), (?2, 'duplicate-segment', 1000, 1000)
+                ",
+                params![keeper_id, duplicate_id],
+            )
+            .expect("segments should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO clip_events (
+                    clip_id, segment_id, event_key, event_type, killer_is_me, killed_is_me
+                ) VALUES
+                    (?1, (SELECT id FROM clip_segments WHERE clip_id = ?1), 'keeper-event', 'kill', 1, 0),
+                    (?2, (SELECT id FROM clip_segments WHERE clip_id = ?2), 'duplicate-event', 'death', 0, 1)
+                ",
+                params![keeper_id, duplicate_id],
+            )
+            .expect("events should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO clip_thumbnails (
+                    clip_id, fingerprint, cache_file, status, byte_size, revision, updated_at
+                ) VALUES (?1, 'keeper-fp', 'keeper.jpg', 'ready', 10, 'keeper-rev', '2026-08-09 01:00:00')
+                ",
+                params![keeper_id],
+            )
+            .expect("keeper thumbnail should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO clip_thumbnails (clip_id, fingerprint, status, updated_at)
+                VALUES (?1, 'duplicate-fp', 'failed', '2026-08-09 02:00:00')
+                ",
+                params![duplicate_id],
+            )
+            .expect("duplicate thumbnail should insert");
+
+        connection
+            .pragma_update(None, "user_version", 15)
+            .expect("fixture should become schema v15");
+        initialize_schema(&connection).expect("schema v16 migration should succeed");
+
+        assert_eq!(schema_user_version(&connection), 16);
+        let keeper: (String, String, String, i64, Option<String>, String) = connection
+            .query_row(
+                "
+                SELECT file_path, normalized_path, file_status, is_favorite, note, review_decision
+                FROM clips WHERE id = ?1
+                ",
+                params![keeper_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("keeper should remain");
+        assert_eq!(
+            keeper,
+            (
+                r"D:\Captures\ace.mp4".to_string(),
+                "d:/captures/ace.mp4".to_string(),
+                "trashed".to_string(),
+                1,
+                Some("keeper note\n\nduplicate note".to_string()),
+                "disliked".to_string(),
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM clips", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM clip_tags WHERE clip_id = ?1",
+                    params![keeper_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        let metadata: (Option<String>, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT account_name, map_name, game_mode FROM clip_metadata WHERE clip_id = ?1",
+                params![keeper_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("metadata should survive");
+        assert_eq!(
+            metadata,
+            (
+                Some("Keeper#0001".to_string()),
+                Some("Bind".to_string()),
+                Some("Competitive".to_string())
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM clip_segments WHERE clip_id = ?1",
+                    params![keeper_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM clip_events WHERE clip_id = ?1",
+                    params![keeper_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        let thumbnail: (i64, String) = connection
+            .query_row("SELECT clip_id, status FROM clip_thumbnails", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .expect("best thumbnail should survive");
+        assert_eq!(thumbnail, (keeper_id, "ready".to_string()));
+        assert_eq!(
+            connection
+                .query_row("SELECT clip_id FROM clip_trash_snapshots", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            keeper_id
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT clip_id FROM clip_delete_intents", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            keeper_id
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn schema_v16_leaves_protected_verbatim_duplicates_untouched() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: r"D:\Captures",
+                name: "Captures",
+            },
+        )
+        .expect("source should insert");
+        connection
+            .execute(
+                r#"
+                INSERT INTO clips (
+                    id, source_dir_id, file_path, normalized_path, file_name, size_bytes,
+                    file_status, file_volume_serial, file_index_high, file_index_low
+                ) VALUES
+                    (91001, ?1, 'D:\Captures\protected.mp4', 'd:/captures/protected.mp4',
+                     'protected.mp4', 10, 'available', 17, 18, 19),
+                    (91002, ?1, '\\?\D:\Captures\protected.mp4', '//?/d:/captures/protected.mp4',
+                     'protected.mp4', 10, 'trashed', 17, 18, 19)
+                "#,
+                params![source.id],
+            )
+            .expect("protected pair should insert");
+        connection
+            .execute(
+                r#"
+                INSERT INTO clip_trash_snapshots (
+                    clip_id, video_path, canonical_video_path, source_dir_path,
+                    canonical_source_dir_path, extension, file_existed
+                ) VALUES (91002, '\\?\D:\Captures\protected.mp4',
+                          '\\?\D:\Captures\protected.mp4', 'D:\Captures', 'D:\Captures', 'mp4', 0)
+                "#,
+                [],
+            )
+            .expect("protected snapshot should insert");
+        connection
+            .pragma_update(None, "user_version", 15)
+            .expect("fixture should become schema v15");
+
+        initialize_schema(&connection).expect("schema v16 migration should finish safely");
+
+        let statuses = connection
+            .prepare("SELECT id, file_status FROM clips ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            statuses,
+            vec![
+                (91_001, "available".to_string()),
+                (91_002, "trashed".to_string())
+            ]
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT clip_id FROM clip_trash_snapshots", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            91_002
+        );
+    }
+
+    #[test]
+    fn schema_v16_merges_unc_aliases_but_skips_conflicting_reviews() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: r"\\server\share",
+                name: "UNC captures",
+            },
+        )
+        .expect("source should insert");
+        for (id, path, normalized, decision, volume, index) in [
+            (
+                92_001_i64,
+                r"\\server\share\ace.mp4",
+                "//server/share/ace.mp4",
+                "unreviewed",
+                21_i64,
+                22_i64,
+            ),
+            (
+                92_002,
+                r"\\?\UNC\server\share\ace.mp4",
+                "//?/unc/server/share/ace.mp4",
+                "liked",
+                21,
+                22,
+            ),
+            (
+                92_003,
+                r"D:\Captures\conflict.mp4",
+                "d:/captures/conflict.mp4",
+                "liked",
+                31,
+                32,
+            ),
+            (
+                92_004,
+                r"\\?\D:\Captures\conflict.mp4",
+                "//?/d:/captures/conflict.mp4",
+                "disliked",
+                31,
+                32,
+            ),
+        ] {
+            connection
+                .execute(
+                    "
+                    INSERT INTO clips (
+                        id, source_dir_id, file_path, normalized_path, file_name, size_bytes,
+                        file_status, review_decision, reviewed_at,
+                        file_volume_serial, file_index_high, file_index_low
+                    ) VALUES (?1, ?2, ?3, ?4, 'clip.mp4', 10, 'available', ?5,
+                              CASE WHEN ?5 = 'unreviewed' THEN NULL ELSE '2026-08-09 01:00:00' END,
+                              ?6, 0, ?7)
+                    ",
+                    params![id, source.id, path, normalized, decision, volume, index],
+                )
+                .expect("migration fixture clip should insert");
+        }
+        connection
+            .pragma_update(None, "user_version", 15)
+            .expect("fixture should become schema v15");
+
+        initialize_schema(&connection).expect("schema v16 migration should succeed");
+
+        let unc: (String, String) = connection
+            .query_row(
+                "SELECT file_path, review_decision FROM clips WHERE id = 92001",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("ordinary UNC keeper should remain");
+        assert_eq!(
+            unc,
+            (r"\\server\share\ace.mp4".to_string(), "liked".to_string())
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM clips WHERE file_volume_serial = 21",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        let conflicts = connection
+            .prepare(
+                "SELECT id, review_decision FROM clips WHERE file_volume_serial = 31 ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            conflicts,
+            vec![
+                (92_003, "liked".to_string()),
+                (92_004, "disliked".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn schema_v16_does_not_merge_case_distinct_hard_link_paths() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: r"D:\CaseSensitiveCaptures",
+                name: "Case-sensitive captures",
+            },
+        )
+        .expect("source should insert");
+        connection
+            .execute(
+                r#"
+                INSERT INTO clips (
+                    id, source_dir_id, file_path, normalized_path, file_name, size_bytes,
+                    file_status, file_volume_serial, file_index_high, file_index_low
+                ) VALUES
+                    (93001, ?1, 'D:\CaseSensitiveCaptures\ACE.mp4',
+                     'd:/casesensitivecaptures/ace.mp4', 'ACE.mp4', 10, 'available', 41, 0, 42),
+                    (93002, ?1, '\\?\D:\CaseSensitiveCaptures\ace.mp4',
+                     '//?/d:/casesensitivecaptures/ace.mp4', 'ace.mp4', 10, 'available', 41, 0, 42)
+                "#,
+                params![source.id],
+            )
+            .expect("case-distinct hard-link fixture should insert");
+        connection
+            .pragma_update(None, "user_version", 15)
+            .expect("fixture should become schema v15");
+
+        initialize_schema(&connection).expect("schema v16 migration should finish safely");
+
+        let paths = connection
+            .prepare("SELECT file_path FROM clips WHERE file_volume_serial = 41 ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                r"D:\CaseSensitiveCaptures\ACE.mp4".to_string(),
+                r"\\?\D:\CaseSensitiveCaptures\ace.mp4".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -2203,6 +4303,7 @@ mod tests {
                 killer_name: Some("Player#1001"),
                 killed_name: Some("Opponent#2002"),
                 killer_is_me: true,
+                killed_is_me: None,
                 raw_json: Some("{\"source\":\"clip-b\"}"),
             }],
         )
@@ -2231,6 +4332,7 @@ mod tests {
                 killer_name: None,
                 killed_name: None,
                 killer_is_me: false,
+                killed_is_me: None,
                 raw_json: None,
             }],
         )
@@ -2260,6 +4362,7 @@ mod tests {
                 killer_name: Some("Player#1001"),
                 killed_name: Some("Opponent#3003"),
                 killer_is_me: true,
+                killed_is_me: None,
                 raw_json: None,
             }],
         )
@@ -2335,6 +4438,7 @@ mod tests {
                 killer_name: None,
                 killed_name: None,
                 killer_is_me: false,
+                killed_is_me: None,
                 raw_json: None,
             }],
         )
@@ -2400,6 +4504,7 @@ mod tests {
                 killer_name: None,
                 killed_name: None,
                 killer_is_me: false,
+                killed_is_me: None,
                 raw_json: None,
             }],
         )
@@ -2429,6 +4534,7 @@ mod tests {
                 killer_name: None,
                 killed_name: None,
                 killer_is_me: false,
+                killed_is_me: None,
                 raw_json: None,
             }],
         );
@@ -3726,6 +5832,28 @@ mod tests {
             .expect("note should update");
         connection
             .execute(
+                "
+                UPDATE clips
+                SET review_decision = 'liked',
+                    reviewed_at = '2026-07-02T00:00:00Z'
+                WHERE id = ?1
+                ",
+                params![triple],
+            )
+            .expect("liked review state should update");
+        connection
+            .execute(
+                "
+                UPDATE clips
+                SET review_decision = 'disliked',
+                    reviewed_at = '2026-07-02T00:01:00Z'
+                WHERE id = ?1
+                ",
+                params![quad],
+            )
+            .expect("disliked review state should update");
+        connection
+            .execute(
                 "UPDATE clip_metadata SET highlight_type = '2' WHERE clip_id = ?1",
                 params![compilation],
             )
@@ -3836,6 +5964,22 @@ mod tests {
                 vec![compilation, ace, quad],
             ),
             (
+                "liked review",
+                ClipListQuery {
+                    review_decision: Some(ReviewDecision::Liked),
+                    ..ClipListQuery::default()
+                },
+                vec![triple],
+            ),
+            (
+                "disliked review",
+                ClipListQuery {
+                    review_decision: Some(ReviewDecision::Disliked),
+                    ..ClipListQuery::default()
+                },
+                vec![quad],
+            ),
+            (
                 "missing",
                 ClipListQuery {
                     file_status: Some("missing".to_string()),
@@ -3910,6 +6054,7 @@ mod tests {
                 game_mode: Some("竞技模式".to_string()),
                 tag_id: Some(review.id),
                 favorite_filter: Some(FavoriteFilter::Favorite),
+                review_decision: Some(ReviewDecision::Liked),
                 file_status: Some("available".to_string()),
                 metadata_status: Some("enriched".to_string()),
                 ..ClipListQuery::default()
@@ -4216,6 +6361,7 @@ mod tests {
                 killer_name: Some("Tester"),
                 killed_name: Some("Enemy"),
                 killer_is_me: true,
+                killed_is_me: None,
                 raw_json: Some("{\"detail\":true}"),
             }],
         )
@@ -4318,6 +6464,7 @@ mod tests {
                     killer_name: Some("Tester"),
                     killed_name: Some("Enemy"),
                     killer_is_me: true,
+                    killed_is_me: None,
                     raw_json: Some(raw_json),
                 }],
             )
@@ -4974,6 +7121,19 @@ mod tests {
             },
         )
         .expect("clip should upsert");
+        connection
+            .execute(
+                "
+                UPDATE clips
+                SET is_favorite = 1,
+                    review_decision = 'disliked',
+                    reviewed_at = '2026-07-02T00:00:00Z',
+                    note = 'preserve user state'
+                WHERE id = ?1
+                ",
+                [inserted.id],
+            )
+            .expect("user state should seed before rescan");
         upsert_clip(
             &connection,
             ClipInput {
@@ -5008,8 +7168,13 @@ mod tests {
             Some("D:\\Clips\\Valorant\\cover-ace.jpeg")
         );
         assert_eq!(clips[0].status, "available");
-        assert!(!clips[0].favorite);
-        assert_eq!(clips[0].note, None);
+        assert!(clips[0].favorite);
+        assert_eq!(clips[0].review_decision, ReviewDecision::Disliked);
+        assert_eq!(
+            clips[0].reviewed_at.as_deref(),
+            Some("2026-07-02T00:00:00Z")
+        );
+        assert_eq!(clips[0].note.as_deref(), Some("preserve user state"));
     }
 
     #[test]
@@ -5017,11 +7182,16 @@ mod tests {
         let connection = Connection::open_in_memory().expect("in-memory db should open");
         initialize_schema(&connection).expect("schema should initialize");
 
-        let direct_source = upsert_source_dir(
+        let direct_source = upsert_source_dir_with_profile(
             &connection,
             SourceDirInput {
                 path: "D:\\Direct Clips",
                 name: "Direct Clips",
+            },
+            SourceProfileInput {
+                source_kind: SourceKind::Nvidia,
+                scan_mode: ScanMode::RecursiveMp4,
+                scan_root_path: "D:\\Direct Clips",
             },
         )
         .expect("direct source should upsert");
@@ -5073,11 +7243,17 @@ mod tests {
             .expect("direct source should be returned");
         assert_eq!(direct.path, "D:\\Direct Clips");
         assert_eq!(direct.display_name, "Direct Clips");
+        assert_eq!(direct.source_kind, SourceKind::Nvidia);
+        assert_eq!(direct.scan_mode, ScanMode::RecursiveMp4);
+        assert_eq!(direct.scan_root_path, "D:\\Direct Clips");
         assert_eq!(direct.clip_count, 1);
         assert!(direct.accessibility);
         assert!(direct.last_scan_at.is_some());
         let json = serde_json::to_value(direct).expect("source DTO should serialize");
         assert_eq!(json["displayName"], "Direct Clips");
+        assert_eq!(json["sourceKind"], "nvidia");
+        assert_eq!(json["scanMode"], "recursive-mp4");
+        assert_eq!(json["scanRootPath"], "D:\\Direct Clips");
         assert_eq!(json["accessibility"], true);
         assert_eq!(json["clipCount"], 1);
         assert!(json.get("accessible").is_none());
@@ -5090,7 +7266,7 @@ mod tests {
         assert!(!empty.accessibility);
         assert_eq!(empty.status, "unavailable");
         assert_eq!(empty.last_error.as_deref(), Some("directory is offline"));
-        assert_eq!(empty.last_scan_at.as_deref(), Some("2026-07-02 22:35:00"));
+        assert_eq!(empty.last_scan_at.as_deref(), Some("2026-07-02T22:35:00Z"));
     }
 
     #[test]
@@ -5291,6 +7467,7 @@ mod tests {
                     killer_name: Some("Tester"),
                     killed_name: Some("Enemy A"),
                     killer_is_me: true,
+                    killed_is_me: None,
                     raw_json: None,
                 },
                 ClipEventInput {
@@ -5306,6 +7483,7 @@ mod tests {
                     killer_name: Some("Tester"),
                     killed_name: Some("Enemy C"),
                     killer_is_me: true,
+                    killed_is_me: None,
                     raw_json: None,
                 },
                 ClipEventInput {
@@ -5321,6 +7499,7 @@ mod tests {
                     killer_name: Some("Tester"),
                     killed_name: Some("Enemy B"),
                     killer_is_me: true,
+                    killed_is_me: None,
                     raw_json: None,
                 },
             ],
@@ -5343,6 +7522,7 @@ mod tests {
                 killer_name: Some("Tester"),
                 killed_name: Some("Enemy D"),
                 killer_is_me: true,
+                killed_is_me: None,
                 raw_json: None,
             }],
         )

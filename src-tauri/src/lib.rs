@@ -1,7 +1,10 @@
+mod app_updates;
 mod commands;
+mod critical_tasks;
 pub mod db;
 pub mod display_names;
 pub mod drive_discovery;
+pub(crate) mod file_identity;
 pub mod highlight_log_parser;
 pub mod leveldb_reader;
 pub mod metadata;
@@ -30,6 +33,7 @@ pub(crate) struct AppState {
     pub(crate) database_path: String,
     pub(crate) scan_coordinator: Arc<scan_coordinator::ScanCoordinator>,
     pub(crate) thumbnail_queue: Arc<thumbnail::ThumbnailQueue>,
+    pub(crate) critical_tasks: Arc<critical_tasks::CriticalTaskGate>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -78,6 +82,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let release_smoke_root =
                 resolve_release_smoke_root(app.handle()).map_err(std::io::Error::other)?;
@@ -135,11 +140,14 @@ pub fn run() {
             )
             .map_err(std::io::Error::other)?;
 
-            app.manage(AppState {
+            let app_state = AppState {
                 database_path: database_path.display().to_string(),
                 scan_coordinator: Arc::new(scan_coordinator::ScanCoordinator::default()),
                 thumbnail_queue,
-            });
+                critical_tasks: Arc::new(critical_tasks::CriticalTaskGate::default()),
+            };
+            app.manage(app_state.clone());
+            app.manage(app_updates::AppUpdateState::default());
 
             let window_config = app
                 .config()
@@ -162,6 +170,7 @@ pub fn run() {
                 .map_err(|_| std::io::Error::other("primary window state lock is poisoned"))? =
                 Some(window.clone());
             window.show()?;
+            commands::start_enabled_source_sync(app.handle().clone(), app_state);
 
             Ok(())
         })
@@ -179,18 +188,29 @@ pub fn run() {
             commands::get_thumbnail_status,
             commands::list_clips,
             commands::list_clip_page,
+            commands::list_review_clip_page,
             commands::get_library_facets,
             commands::get_clip_detail,
             commands::list_sources,
+            commands::register_scan_source,
+            commands::set_scan_source_enabled,
+            commands::preview_scan_source_relocation,
+            commands::relocate_scan_source,
+            commands::sync_scan_source,
+            commands::sync_enabled_sources,
             commands::list_tags,
             commands::create_tag,
             commands::update_tag,
             commands::delete_tag,
             commands::set_clip_favorite,
             commands::set_clips_favorite,
+            commands::set_clip_review_decision,
+            commands::reset_clip_review_decision,
+            commands::restore_clip_review_state,
             commands::set_clip_trashed,
             commands::set_clips_trashed,
             commands::remove_clip_from_index,
+            commands::remove_clips_from_index,
             commands::delete_clips_permanently,
             commands::update_clip_note,
             commands::add_tag_to_clip,
@@ -199,8 +219,15 @@ pub fn run() {
             commands::remove_tag_from_clips,
             commands::get_clip_media,
             commands::open_clip_location,
+            commands::open_clip_externally,
             commands::copy_clip_path,
-            commands::export_clips
+            commands::export_clips,
+            app_updates::get_app_update_runtime_info,
+            app_updates::check_for_app_update,
+            app_updates::download_app_update,
+            app_updates::cancel_app_update_download,
+            app_updates::discard_app_update,
+            app_updates::install_app_update
         ])
         .build(tauri::generate_context!());
 
@@ -227,19 +254,8 @@ pub fn run() {
 }
 
 fn show_startup_failure(error: &str, recovery_dir: Option<&Path>) {
-    let error_summary = error.chars().take(2_000).collect::<String>();
-    let recovery_hint = recovery_dir
-        .map(|path| {
-            format!(
-                "\n\n为避免继续损坏数据，瓦刻已停止启动且不会自动覆盖数据库。迁移前备份位于：\n{}\n\n选择“是”可打开该目录；请保留数据库及 backups 子目录后再进行恢复。",
-                path.display()
-            )
-        })
-        .unwrap_or_else(|| {
-            "\n\n为避免继续损坏数据，瓦刻已停止启动且不会自动覆盖数据库。请保留应用数据目录后再进行恢复。"
-                .to_string()
-        });
-    let message = format!("瓦刻无法安全打开。\n\n错误：{error_summary}{recovery_hint}");
+    let presentation = startup_failure_presentation(error, recovery_dir);
+    let message = presentation.message;
 
     eprintln!("{message}");
 
@@ -251,29 +267,65 @@ fn show_startup_failure(error: &str, recovery_dir: Option<&Path>) {
 
         use std::{os::windows::ffi::OsStrExt, process::Command};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONERROR, MB_TASKMODAL, MB_YESNO,
+            MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONERROR, MB_OK, MB_TASKMODAL, MB_YESNO,
         };
 
         let wide_message = std::ffi::OsStr::new(&message)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
-        let wide_title = std::ffi::OsStr::new("瓦刻 · 数据库恢复")
+        let wide_title = std::ffi::OsStr::new(presentation.title)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
+        let style = if presentation.offer_recovery_directory {
+            MB_YESNO | MB_ICONERROR | MB_DEFBUTTON2 | MB_TASKMODAL
+        } else {
+            MB_OK | MB_ICONERROR | MB_TASKMODAL
+        };
         let response = unsafe {
             MessageBoxW(
                 std::ptr::null_mut(),
                 wide_message.as_ptr(),
                 wide_title.as_ptr(),
-                MB_YESNO | MB_ICONERROR | MB_DEFBUTTON2 | MB_TASKMODAL,
+                style,
             )
         };
-        if response == IDYES {
+        if presentation.offer_recovery_directory && response == IDYES {
             if let Some(path) = recovery_dir {
                 let _ = Command::new("explorer.exe").arg(path).spawn();
             }
+        }
+    }
+}
+
+struct StartupFailurePresentation {
+    title: &'static str,
+    message: String,
+    offer_recovery_directory: bool,
+}
+
+fn startup_failure_presentation(
+    error: &str,
+    recovery_dir: Option<&Path>,
+) -> StartupFailurePresentation {
+    let error_summary = error.chars().take(2_000).collect::<String>();
+    if let Some(path) = recovery_dir {
+        StartupFailurePresentation {
+            title: "瓦刻 · 数据库恢复",
+            message: format!(
+                "瓦刻无法安全打开。\n\n错误：{error_summary}\n\n为避免继续损坏数据，瓦刻已停止启动且不会自动覆盖数据库。迁移前备份位于：\n{}\n\n选择“是”可打开该目录；请保留数据库及 backups 子目录后再进行恢复。",
+                path.display()
+            ),
+            offer_recovery_directory: true,
+        }
+    } else {
+        StartupFailurePresentation {
+            title: "瓦刻 · 启动失败",
+            message: format!(
+                "瓦刻在数据库初始化前启动失败。\n\n错误：{error_summary}\n\n应用数据库和原始视频未被修改。请重新启动应用；若问题持续，请检查安装文件或联系维护者。"
+            ),
+            offer_recovery_directory: false,
         }
     }
 }
@@ -463,6 +515,30 @@ mod release_smoke_tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn startup_failures_before_database_initialization_do_not_claim_database_damage() {
+        let presentation =
+            startup_failure_presentation("failed to initialize plugin `updater`", None);
+
+        assert_eq!(presentation.title, "瓦刻 · 启动失败");
+        assert!(!presentation.offer_recovery_directory);
+        assert!(presentation.message.contains("数据库初始化前"));
+        assert!(presentation.message.contains("数据库和原始视频未被修改"));
+        assert!(!presentation.message.contains("迁移前备份"));
+    }
+
+    #[test]
+    fn database_failures_keep_the_recovery_directory_action() {
+        let recovery_dir = Path::new("fixture-data");
+        let presentation =
+            startup_failure_presentation("database migration failed", Some(recovery_dir));
+
+        assert_eq!(presentation.title, "瓦刻 · 数据库恢复");
+        assert!(presentation.offer_recovery_directory);
+        assert!(presentation.message.contains("迁移前备份"));
+        assert!(presentation.message.contains("fixture-data"));
+    }
 
     #[test]
     fn release_smoke_root_is_marker_gated_and_rejects_protected_paths() {

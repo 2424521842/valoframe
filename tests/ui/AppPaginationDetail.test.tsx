@@ -2,6 +2,10 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockClips } from "../../src/data/mockData";
+import {
+  APP_PREFERENCES_STORAGE_KEY,
+  DEFAULT_APP_PREFERENCES,
+} from "../../src/lib/appPreferences";
 import type { Clip, ClipListQuery, ClipPage, ClipSummary, ThumbnailProgress } from "../../src/types";
 import { libraryFacets } from "./libraryFacetFixtures";
 
@@ -105,6 +109,53 @@ describe("production paginated list and on-demand detail flow", () => {
     expect(mocks.listClips).not.toHaveBeenCalled();
     expect(await screen.findByText("50 / 10000 条片段")).toBeVisible();
     expect(document.querySelectorAll("[data-clip-id]").length).toBeLessThan(20);
+  });
+
+  it("hydrates startup, view, and sort preferences before the first library query", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(APP_PREFERENCES_STORAGE_KEY, JSON.stringify({
+      ...DEFAULT_APP_PREFERENCES,
+      startupDestination: "library-favorites",
+      libraryViewMode: "list",
+      librarySort: "name-asc",
+    }));
+
+    render(<App />);
+
+    await waitFor(() => expect(mocks.listClipPage).toHaveBeenCalledTimes(1));
+    expect(mocks.listClipPage).toHaveBeenCalledWith(expect.objectContaining({
+      favoriteFilter: "favorite",
+      offset: 0,
+      sortBy: "name-asc",
+    }));
+    expect(screen.getByRole("button", { name: "列表视图" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    await user.click(screen.getByRole("button", { name: "网格视图" }));
+    expect(JSON.parse(window.localStorage.getItem(APP_PREFERENCES_STORAGE_KEY) ?? "{}"))
+      .toEqual(expect.objectContaining({ libraryViewMode: "grid" }));
+  });
+
+  it("opens the recent library with today's bounded query when saved for startup", async () => {
+    window.localStorage.setItem(APP_PREFERENCES_STORAGE_KEY, JSON.stringify({
+      ...DEFAULT_APP_PREFERENCES,
+      startupDestination: "library-today",
+    }));
+
+    render(<App />);
+
+    await waitFor(() => expect(mocks.listClipPage).toHaveBeenCalledTimes(1));
+    expect(mocks.listClipPage).toHaveBeenCalledWith(expect.objectContaining({
+      modifiedFrom: expect.any(Number),
+      modifiedTo: expect.any(Number),
+      offset: 0,
+    }));
+    expect(screen.getByRole("button", { name: /最近添加/ })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   it("retries the same thumbnail revision after eviction without list or media reloads", async () => {
@@ -292,6 +343,8 @@ describe("production paginated list and on-demand detail flow", () => {
     await user.click(await screen.findByRole("option", { name: "文件名" }));
     await waitFor(() => expect(mocks.listClipPage).toHaveBeenCalledTimes(4));
     expect(lastListQuery()).toEqual(expect.objectContaining({ offset: 0, sortBy: "name-asc" }));
+    expect(JSON.parse(window.localStorage.getItem(APP_PREFERENCES_STORAGE_KEY) ?? "{}"))
+      .toEqual(expect.objectContaining({ librarySort: "name-asc" }));
   });
 
   it("ignores an old query page after a newer generation has rendered", async () => {

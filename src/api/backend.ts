@@ -16,6 +16,13 @@ import type {
   BackendClipSummary,
   BackendExportClipsResult,
   BackendPermanentDeleteResult,
+  BackendRemoveClipsFromIndexResult,
+  BackendReviewClipPage,
+  BackendReviewClipState,
+  BackendReviewDecisionMutation,
+  BackendRelocateScanSourceResult,
+  BackendRegisterScanSourceResult,
+  BackendScanSourceRelocationPreview,
   BackendSource,
   BackendTag,
   BackendThumbnailProgress,
@@ -33,10 +40,20 @@ import type {
   LibraryFacets,
   LibraryFacetValue,
   PermanentDeleteResult,
+  RemoveClipsFromIndexResult,
+  RelocateScanSourceResult,
+  RegisterScanSourceInput,
+  RegisterScanSourceResult,
+  ReviewClipPage,
+  ReviewClipState,
+  ReviewDecision,
+  ReviewDecisionMutation,
+  ReviewQueueQuery,
   ScanJobResult,
   ScanProgress,
   ScanStatus,
   ScanSummary,
+  ScanSourceRelocationPreview,
   SourceDir,
   Tag,
   TagColor,
@@ -61,8 +78,16 @@ const browserPreviewClipStore = new Map<string, Clip>(
 const browserPreviewTagStore = new Map<string, Tag>(
   mockTags.map((tag) => [tag.id, { ...tag }]),
 );
+const browserPreviewSourceStore = new Map<string, SourceDir>(
+  mockSourceDirs.map((source) => [source.id, { ...source }]),
+);
 let browserPreviewTagSequence = 1;
 let browserPreviewScanSequence = 1;
+const browserPreviewScanSummaries = new Map<string, ScanSummary>();
+let browserPreviewSourceSequence = Math.max(
+  0,
+  ...mockSourceDirs.map((source) => Number(source.id) || 0),
+) + 1;
 const AGENT_DISPLAY_NAMES: Record<string, string> = {
   brimstone: "炼狱",
   viper: "蝰蛇",
@@ -218,6 +243,25 @@ export async function listClipPage(
   }
 }
 
+/** Stable, cursor-based queue used exclusively by the quick-review workspace. */
+export async function listReviewClipPage(
+  query: ReviewQueueQuery = {},
+): Promise<ReviewClipPage> {
+  try {
+    const page = await invoke<BackendReviewClipPage>("list_review_clip_page", { query });
+    return {
+      ...page,
+      items: page.items.map(mapBackendClipSummary),
+    };
+  } catch (error) {
+    if (shouldUseBrowserPreviewFallback(error)) {
+      return browserPreviewReviewClipPage(query);
+    }
+
+    throw error;
+  }
+}
+
 /** Exact whole-index facets; this request is intentionally independent from list pagination. */
 export async function getLibraryFacets(): Promise<LibraryFacets> {
   try {
@@ -275,11 +319,144 @@ export async function listSources(): Promise<SourceDir[]> {
     return sources.map(mapBackendSource);
   } catch (error) {
     if (shouldUseBrowserPreviewFallback(error)) {
-      return mockSourceDirs.map((source) => ({ ...source }));
+      return [...browserPreviewSourceStore.values()].map((source) => ({ ...source }));
     }
 
     throw error;
   }
+}
+
+export async function registerScanSource(
+  input: RegisterScanSourceInput,
+): Promise<RegisterScanSourceResult> {
+  if (isBrowserPreviewRuntime()) {
+    const normalizedRootPath = input.scanRootPath.trim().replace(/[\\/]+$/, "");
+    const pathKey = normalizedRootPath.replace(/\\/g, "/").toLocaleLowerCase("en-US");
+    const duplicate = [...browserPreviewSourceStore.values()].find(
+      (source) => source.scanRootPath.replace(/\\/g, "/").replace(/\/+$/, "")
+        .toLocaleLowerCase("en-US") === pathKey,
+    );
+    if (duplicate) {
+      const updated = {
+        ...duplicate,
+        name: input.displayName.trim() || duplicate.name,
+        displayName: input.displayName.trim() || duplicate.displayName,
+        enabled: input.enabled,
+      };
+      browserPreviewSourceStore.set(updated.id, updated);
+      return {
+        sources: [{ ...updated }],
+        createdCount: 0,
+        duplicateCount: 1,
+        normalizedRootPath,
+        requiresOverlapConfirmation: false,
+        overlaps: [],
+      };
+    }
+    const id = String(browserPreviewSourceSequence++);
+    const source: SourceDir = {
+      id,
+      name: input.displayName.trim(),
+      displayName: input.displayName.trim(),
+      path: normalizedRootPath,
+      sourceKind: input.sourceKind,
+      scanMode: input.sourceKind === "aclos" ? "aclos-structured" : "recursive-mp4",
+      scanRootPath: normalizedRootPath,
+      enabled: input.enabled,
+      status: "pending",
+      accessibility: false,
+      lastError: null,
+      clipCount: 0,
+      lastScanAt: null,
+    };
+    browserPreviewSourceStore.set(id, source);
+    return {
+      sources: [{ ...source }],
+      createdCount: 1,
+      duplicateCount: 0,
+      normalizedRootPath,
+      requiresOverlapConfirmation: false,
+      overlaps: [],
+    };
+  }
+  const result = await invoke<BackendRegisterScanSourceResult>("register_scan_source", { input });
+  return {
+    ...result,
+    sources: result.sources.map(mapBackendSource),
+    overlaps: result.overlaps.map((overlap) => ({
+      ...overlap,
+      id: String(overlap.id),
+    })),
+  };
+}
+
+export async function previewScanSourceRelocation(
+  sourceId: string,
+  newRootPath: string,
+): Promise<ScanSourceRelocationPreview> {
+  if (isBrowserPreviewRuntime()) {
+    return browserPreviewScanSourceRelocation(sourceId, newRootPath);
+  }
+  const preview = await invoke<BackendScanSourceRelocationPreview>(
+    "preview_scan_source_relocation",
+    {
+      sourceId: numericSourceId(sourceId),
+      newRootPath,
+    },
+  );
+  return mapBackendScanSourceRelocationPreview(preview);
+}
+
+export async function relocateScanSource(
+  sourceId: string,
+  newRootPath: string,
+): Promise<RelocateScanSourceResult> {
+  if (isBrowserPreviewRuntime()) {
+    const preview = browserPreviewScanSourceRelocation(sourceId, newRootPath);
+    if (!preview.canRelocate) {
+      throw new Error(preview.blockers[0]?.message ?? "当前来源无法重新定位");
+    }
+    const source = browserPreviewSourceStore.get(sourceId);
+    if (!source) throw new Error(`Unknown preview source: ${sourceId}`);
+    browserPreviewSourceStore.set(sourceId, {
+      ...source,
+      path: preview.newRootPath,
+      scanRootPath: preview.newRootPath,
+    });
+    return {
+      preview,
+      relocatedClipCount: preview.expectedClipUpdateCount,
+      syncJobId: null,
+      syncStarted: false,
+      syncStatus: null,
+      syncMessage: null,
+    };
+  }
+  const result = await invoke<BackendRelocateScanSourceResult>("relocate_scan_source", {
+    sourceId: numericSourceId(sourceId),
+    newRootPath,
+  });
+  return {
+    ...result,
+    preview: mapBackendScanSourceRelocationPreview(result.preview),
+  };
+}
+
+export async function setScanSourceEnabled(
+  sourceId: string,
+  enabled: boolean,
+): Promise<SourceDir> {
+  if (isBrowserPreviewRuntime()) {
+    const source = browserPreviewSourceStore.get(sourceId);
+    if (!source) throw new Error(`Unknown preview source: ${sourceId}`);
+    const updated = { ...source, enabled };
+    browserPreviewSourceStore.set(sourceId, updated);
+    return { ...updated };
+  }
+  return mapBackendSource(await invoke<BackendSource>("set_scan_source_enabled", {
+    sourceId: numericSourceId(sourceId),
+    enabled,
+  }));
 }
 
 export async function listTags(): Promise<Tag[]> {
@@ -398,6 +575,57 @@ export async function setClipFavorite(
   return mapBackendClip(clip);
 }
 
+export async function setClipReviewDecision(
+  clipId: string,
+  decision: Exclude<ReviewDecision, "unreviewed">,
+): Promise<ReviewDecisionMutation> {
+  if (isBrowserPreviewRuntime()) {
+    return browserPreviewSetReviewDecision(clipId, decision);
+  }
+
+  const result = await invoke<BackendReviewDecisionMutation>("set_clip_review_decision", {
+    clipId: numericClipId(clipId),
+    decision,
+  });
+  return mapBackendReviewDecisionMutation(result);
+}
+
+export async function restoreClipReviewState(
+  clipId: string,
+  expectedCurrent: ReviewClipState,
+  restore: ReviewClipState,
+): Promise<ReviewDecisionMutation> {
+  if (isBrowserPreviewRuntime()) {
+    return browserPreviewRestoreReviewState(clipId, expectedCurrent, restore);
+  }
+
+  const toBackendState = (state: ReviewClipState): BackendReviewClipState => ({
+    ...state,
+    clipId: numericClipId(state.clipId),
+  });
+  return mapBackendReviewDecisionMutation(
+    await invoke<BackendReviewDecisionMutation>("restore_clip_review_state", {
+      clipId: numericClipId(clipId),
+      expectedCurrent: toBackendState(expectedCurrent),
+      restore: toBackendState(restore),
+    }),
+  );
+}
+
+export async function resetClipReviewDecision(
+  clipId: string,
+): Promise<ReviewDecisionMutation> {
+  if (isBrowserPreviewRuntime()) {
+    return browserPreviewResetReviewDecision(clipId);
+  }
+
+  return mapBackendReviewDecisionMutation(
+    await invoke<BackendReviewDecisionMutation>("reset_clip_review_decision", {
+      clipId: numericClipId(clipId),
+    }),
+  );
+}
+
 export async function setClipsFavorite(
   clipIds: string[],
   isFavorite: boolean,
@@ -460,12 +688,72 @@ export async function setClipsTrashed(
 
 export async function removeClipFromIndex(clipId: string): Promise<void> {
   if (isBrowserPreviewRuntime()) {
-    if (!browserPreviewClipStore.delete(clipId)) {
-      throw new Error(`素材不存在：${clipId}`);
-    }
-    return;
+    const result = browserPreviewRemoveClipsFromIndex([clipId]);
+    if (result.removedIds.includes(clipId)) return;
+    if (result.missingIds.includes(clipId)) throw new Error(`clip-not-found: 素材 ${clipId} 不存在`);
+    const problem = result.blocked[0] ?? result.failures[0];
+    throw new Error(problem ? `${problem.code}: ${problem.message}` : `无法仅移除素材 ${clipId} 的索引`);
   }
   await invoke("remove_clip_from_index", { clipId: numericClipId(clipId) });
+}
+
+export async function removeClipsFromIndex(
+  clipIds: string[],
+): Promise<RemoveClipsFromIndexResult> {
+  if (isBrowserPreviewRuntime()) {
+    return browserPreviewRemoveClipsFromIndex(clipIds);
+  }
+  const result = await invoke<BackendRemoveClipsFromIndexResult>(
+    "remove_clips_from_index",
+    { clipIds: clipIds.map(numericClipId) },
+  );
+  return {
+    ...result,
+    removedIds: result.removedIds.map(String),
+    missingIds: result.missingIds.map(String),
+    blocked: result.blocked.map((problem) => ({ ...problem, clipId: String(problem.clipId) })),
+    failures: result.failures.map((problem) => ({ ...problem, clipId: String(problem.clipId) })),
+  };
+}
+
+function browserPreviewRemoveClipsFromIndex(
+  clipIds: string[],
+): RemoveClipsFromIndexResult {
+  const uniqueIds = [...new Set(clipIds)];
+  if (uniqueIds.length > 200) {
+    throw new Error("仅移除索引命令最多接受 200 个不同的素材 ID");
+  }
+  const result: RemoveClipsFromIndexResult = {
+    requested: uniqueIds.length,
+    removedIds: [],
+    missingIds: [],
+    blocked: [],
+    failures: [],
+  };
+  for (const clipId of uniqueIds) {
+    const clip = browserPreviewClipStore.get(clipId);
+    if (!clip) {
+      result.missingIds.push(clipId);
+      continue;
+    }
+    const source = browserPreviewSourceStore.get(clip.sourceDirId);
+    const eligible = clip.fileStatus === "missing"
+      || clip.fileStatus === "trashed"
+      || source?.status === "unavailable";
+    if (!eligible) {
+      result.blocked.push({
+        clipId,
+        code: source ? "index-removal-not-eligible" : "source-missing",
+        message: source
+          ? `素材 ${clipId} 仍可用且来源未明确失联`
+          : `素材 ${clipId} 的来源记录不存在，无法验证仅移除索引资格`,
+      });
+      continue;
+    }
+    browserPreviewClipStore.delete(clipId);
+    result.removedIds.push(clipId);
+  }
+  return result;
 }
 
 export async function exportClips(
@@ -664,6 +952,29 @@ export async function scanRoots(paths: string[]): Promise<ScanJobResult<ScanSumm
   return invoke<ScanJobResult<ScanSummary>>("scan_roots", { paths });
 }
 
+export async function syncScanSource(
+  sourceId: string,
+): Promise<ScanJobResult<ScanSummary>> {
+  if (isBrowserPreviewRuntime()) {
+    const source = browserPreviewSourceStore.get(sourceId);
+    if (!source) throw new Error(`Unknown preview source: ${sourceId}`);
+    return browserPreviewScanJob(source.scanRootPath);
+  }
+  return invoke<ScanJobResult<ScanSummary>>("sync_scan_source", {
+    sourceId: numericSourceId(sourceId),
+  });
+}
+
+export async function syncEnabledSources(): Promise<ScanJobResult<ScanSummary>> {
+  if (isBrowserPreviewRuntime()) {
+    const roots = [...browserPreviewSourceStore.values()]
+      .filter((source) => source.enabled)
+      .map((source) => source.scanRootPath);
+    return browserPreviewScanJob(roots.join("; "));
+  }
+  return invoke<ScanJobResult<ScanSummary>>("sync_enabled_sources");
+}
+
 export async function discoverAndScanFixedDrives(): Promise<ScanJobResult<FullDriveScanResult>> {
   if (isBrowserPreviewRuntime()) {
     const scanSummary = await browserPreviewScanSummary("本机固定磁盘");
@@ -696,6 +1007,18 @@ export async function getScanStatus(): Promise<ScanStatus> {
     };
   }
   return invoke<ScanStatus>("get_scan_status");
+}
+
+export async function getScanSummary(jobId?: string): Promise<ScanSummary | null> {
+  if (isBrowserPreviewRuntime()) {
+    if (jobId) return browserPreviewScanSummaries.get(jobId) ?? null;
+    const jobIds = [...browserPreviewScanSummaries.keys()];
+    const latestJobId = jobIds[jobIds.length - 1];
+    return latestJobId ? browserPreviewScanSummaries.get(latestJobId) ?? null : null;
+  }
+  return invoke<ScanSummary | null>("get_scan_summary", {
+    jobId: jobId ?? null,
+  });
 }
 
 export async function cancelScan(jobId: string): Promise<CancelScanResult> {
@@ -819,6 +1142,16 @@ export async function openClipLocation(clipId: string): Promise<void> {
   });
 }
 
+export async function openClipExternally(clipId: string): Promise<void> {
+  if (isBrowserPreviewRuntime()) {
+    browserPreviewClip(clipId, (clip) => clip);
+    return;
+  }
+  await invoke("open_clip_externally", {
+    clipId: numericClipId(clipId),
+  });
+}
+
 export async function copyClipPath(clipId: string): Promise<string> {
   if (isBrowserPreviewRuntime()) {
     return browserPreviewClip(clipId, (clip) => clip).filePath;
@@ -872,7 +1205,11 @@ export function mapBackendClip(clip: BackendClip): Clip {
     filePath: clip.videoPath,
     sourceDirId,
     sourceDirName: sourceDisplayName,
-    sourceDirPath: "",
+    sourceDirPath: clip.scanRootPath,
+    sourceKind: clip.sourceKind,
+    scanMode: clip.scanMode,
+    scanRootPath: clip.scanRootPath,
+    sourceRelativeDir: clip.sourceRelativeDir,
     clipGroupId: clip.clipGroupId === null ? null : String(clip.clipGroupId),
     clipGroupName: clip.clipGroupName?.trim() || clip.fileName,
     ...account,
@@ -903,6 +1240,8 @@ export function mapBackendClip(clip: BackendClip): Clip {
     sizeBytes: clip.fileSize,
     durationMs: clip.durationMs,
     isFavorite: clip.favorite,
+    reviewDecision: clip.reviewDecision,
+    reviewedAt: normalizeOptionalDateValue(clip.reviewedAt),
     isMissing: clip.status !== "available",
     fileStatus: clip.status || "available",
     tags: clip.tagIds.map(String),
@@ -963,6 +1302,27 @@ export function mapBackendBatchMutationResult(
   };
 }
 
+export function mapBackendReviewDecisionMutation(
+  result: BackendReviewDecisionMutation,
+): ReviewDecisionMutation {
+  return {
+    changed: result.changed,
+    before: mapBackendReviewClipState(result.before),
+    after: mapBackendReviewClipState(result.after),
+  };
+}
+
+function mapBackendReviewClipState(state: BackendReviewClipState): ReviewClipState {
+  return {
+    clipId: String(state.clipId),
+    reviewDecision: state.reviewDecision,
+    // This value is also an opaque CAS token for restore_clip_review_state.
+    // Preserve the backend bytes instead of normalizing its timestamp shape.
+    reviewedAt: state.reviewedAt,
+    favorite: state.favorite,
+  };
+}
+
 function mapBackendClipEvent(event: BackendClipEvent): ClipEvent {
   return {
     id: String(event.id),
@@ -975,6 +1335,7 @@ function mapBackendClipEvent(event: BackendClipEvent): ClipEvent {
     killerName: event.killerName?.trim() || "",
     killedName: event.killedName?.trim() || "",
     killerIsMe: event.killerIsMe === true,
+    killedIsMe: event.killedIsMe === true,
   };
 }
 
@@ -1029,6 +1390,9 @@ export function mapBackendSource(source: BackendSource): SourceDir {
     name: displayName,
     displayName,
     path: source.path,
+    sourceKind: source.sourceKind,
+    scanMode: source.scanMode,
+    scanRootPath: source.scanRootPath,
     enabled: source.enabled,
     status: source.status,
     accessibility: source.accessibility,
@@ -1036,6 +1400,86 @@ export function mapBackendSource(source: BackendSource): SourceDir {
     clipCount: source.clipCount,
     lastScanAt: source.lastScanAt,
   };
+}
+
+export function mapBackendScanSourceRelocationPreview(
+  preview: BackendScanSourceRelocationPreview,
+): ScanSourceRelocationPreview {
+  return {
+    ...preview,
+    sourceId: String(preview.sourceId),
+    affectedSources: preview.affectedSources.map((source) => ({
+      ...source,
+      id: String(source.id),
+    })),
+  };
+}
+
+function browserPreviewScanSourceRelocation(
+  sourceId: string,
+  newRootPath: string,
+): ScanSourceRelocationPreview {
+  const source = browserPreviewSourceStore.get(sourceId);
+  if (!source) throw new Error(`Unknown preview source: ${sourceId}`);
+  const oldRootPath = trimDirectorySeparators(source.scanRootPath);
+  const normalizedNewRootPath = trimDirectorySeparators(newRootPath.trim());
+  if (!normalizedNewRootPath) throw new Error("请选择新的来源根目录");
+  const exactPathMatchCount = source.clipCount;
+  const sameRoot = oldRootPath.replace(/\\/g, "/").toLocaleLowerCase("en-US") ===
+    normalizedNewRootPath.replace(/\\/g, "/").toLocaleLowerCase("en-US");
+  const blockers = [] as ScanSourceRelocationPreview["blockers"];
+  if (sameRoot) {
+    blockers.push({ code: "same-root", message: "新目录与当前来源根目录相同" });
+  }
+  if (exactPathMatchCount === 0) {
+    blockers.push({ code: "zero-trusted-matches", message: "新目录中没有可信匹配，不能提交重新定位" });
+  }
+  const newSourcePath = replacePreviewRoot(
+    source.path,
+    oldRootPath,
+    normalizedNewRootPath,
+  );
+  return {
+    sourceId,
+    oldRootPath,
+    newRootPath: normalizedNewRootPath,
+    affectedSources: [{
+      id: source.id,
+      displayName: source.displayName,
+      oldSourcePath: source.path,
+      newSourcePath,
+      clipCount: source.clipCount,
+    }],
+    exactPathMatchCount,
+    identityMatchCount: 0,
+    legacyFingerprintMatchCount: 0,
+    unmatchedCount: 0,
+    newCandidateCount: 0,
+    expectedClipUpdateCount: exactPathMatchCount,
+    expectedGroupUpdateCount: 0,
+    expectedCoverUpdateCount: 0,
+    expectedMetadataReferenceUpdateCount: 0,
+    conflicts: [],
+    blockers,
+    canRelocate: blockers.length === 0,
+  };
+}
+
+function trimDirectorySeparators(path: string): string {
+  return path.replace(/[\\/]+$/, "");
+}
+
+function replacePreviewRoot(path: string, oldRoot: string, newRoot: string): string {
+  const normalizedPath = path.replace(/\\/g, "/");
+  const normalizedOldRoot = oldRoot.replace(/\\/g, "/");
+  if (!normalizedPath.toLocaleLowerCase("en-US").startsWith(
+    normalizedOldRoot.toLocaleLowerCase("en-US"),
+  )) {
+    return newRoot;
+  }
+  const suffix = normalizedPath.slice(normalizedOldRoot.length).replace(/^\/+/, "");
+  const separator = newRoot.includes("\\") ? "\\" : "/";
+  return suffix ? `${newRoot}${separator}${suffix.replace(/\//g, separator)}` : newRoot;
 }
 
 export function mergeClipsWithSources(
@@ -1062,6 +1506,9 @@ export function mergeClipsWithSources(
       ...clip,
       sourceDirName: source.displayName,
       sourceDirPath: source.path,
+      sourceKind: source.sourceKind,
+      scanMode: source.scanMode,
+      scanRootPath: source.scanRootPath,
       accountName: shouldUseSourceForAccount ? accountDisplayName : clip.accountName,
       accountDisplayName,
       accountSourceName: source.displayName,
@@ -1205,6 +1652,16 @@ function numericClipId(clipId: string): number {
   return parsedClipId;
 }
 
+function numericSourceId(sourceId: string): number {
+  const parsedSourceId = Number(sourceId);
+
+  if (!Number.isSafeInteger(parsedSourceId)) {
+    throw new Error(`Invalid source id: ${sourceId}`);
+  }
+
+  return parsedSourceId;
+}
+
 function thumbnailCommandClipIds(clipIds: readonly string[]): number[] {
   if (clipIds.length > THUMBNAIL_ENQUEUE_LIMIT) {
     throw new Error(`一次最多处理 ${THUMBNAIL_ENQUEUE_LIMIT} 个缩略图`);
@@ -1304,12 +1761,34 @@ async function browserPreviewScanJob(
 }
 
 function browserPreviewJobResult<T>(result: T): ScanJobResult<T> {
+  const jobId = `preview-scan-${browserPreviewScanSequence++}`;
+  const summary = browserPreviewSummaryFromResult(result);
+  if (summary) {
+    browserPreviewScanSummaries.set(jobId, summary);
+    while (browserPreviewScanSummaries.size > 32) {
+      const oldestJobId = browserPreviewScanSummaries.keys().next().value;
+      if (typeof oldestJobId !== "string") break;
+      browserPreviewScanSummaries.delete(oldestJobId);
+    }
+  }
   return {
-    jobId: `preview-scan-${browserPreviewScanSequence++}`,
+    jobId,
     status: "completed",
     result,
     message: "浏览器预览扫描完成",
   };
+}
+
+function browserPreviewSummaryFromResult<T>(result: T): ScanSummary | null {
+  if (!result || typeof result !== "object") return null;
+  if ("newClipCount" in result) return result as unknown as ScanSummary;
+  if ("scanSummary" in result) {
+    const scanSummary = (result as { scanSummary?: unknown }).scanSummary;
+    return scanSummary && typeof scanSummary === "object"
+      ? scanSummary as ScanSummary
+      : null;
+  }
+  return null;
 }
 
 function browserPreviewClip(
@@ -1321,6 +1800,210 @@ function browserPreviewClip(
   const updated = update(clip);
   browserPreviewClipStore.set(clipId, updated);
   return updated;
+}
+
+function browserPreviewSetReviewDecision(
+  clipId: string,
+  decision: Exclude<ReviewDecision, "unreviewed">,
+): ReviewDecisionMutation {
+  const clip = browserPreviewClipStore.get(clipId);
+  if (!clip) throw new Error(`Unknown preview clip: ${clipId}`);
+
+  const before = browserPreviewReviewState(clip);
+  if (before.reviewDecision === decision) {
+    return { before, after: before, changed: false };
+  }
+  const updated = {
+    ...clip,
+    reviewDecision: decision,
+    reviewedAt: new Date().toISOString(),
+    isFavorite: decision === "liked" ? true : clip.isFavorite,
+  };
+  browserPreviewClipStore.set(clipId, updated);
+  const after = browserPreviewReviewState(updated);
+  return {
+    before,
+    after,
+    changed:
+      before.reviewDecision !== after.reviewDecision ||
+      before.reviewedAt !== after.reviewedAt ||
+      before.favorite !== after.favorite,
+  };
+}
+
+function browserPreviewRestoreReviewState(
+  clipId: string,
+  expectedCurrent: ReviewClipState,
+  restore: ReviewClipState,
+): ReviewDecisionMutation {
+  const clip = browserPreviewClipStore.get(clipId);
+  if (!clip) throw new Error(`Unknown preview clip: ${clipId}`);
+  if (expectedCurrent.clipId !== clipId || restore.clipId !== clipId) {
+    throw new Error("撤销状态与素材不匹配");
+  }
+  const before = browserPreviewReviewState(clip);
+  if (!browserPreviewReviewStatesEqual(before, expectedCurrent)) {
+    throw new Error("素材状态已经变化，无法安全撤销");
+  }
+  const updated = {
+    ...clip,
+    reviewDecision: restore.reviewDecision,
+    reviewedAt: restore.reviewedAt,
+    isFavorite: restore.favorite,
+  };
+  browserPreviewClipStore.set(clipId, updated);
+  const after = browserPreviewReviewState(updated);
+  return {
+    before,
+    after,
+    changed: !browserPreviewReviewStatesEqual(before, after),
+  };
+}
+
+function browserPreviewResetReviewDecision(clipId: string): ReviewDecisionMutation {
+  const clip = browserPreviewClipStore.get(clipId);
+  if (!clip) throw new Error(`Unknown preview clip: ${clipId}`);
+  const before = browserPreviewReviewState(clip);
+  const updated = { ...clip, reviewDecision: "unreviewed" as const, reviewedAt: null };
+  browserPreviewClipStore.set(clipId, updated);
+  const after = browserPreviewReviewState(updated);
+  return {
+    before,
+    after,
+    changed: before.reviewDecision !== "unreviewed" || before.reviewedAt !== null,
+  };
+}
+
+function browserPreviewReviewState(clip: Clip): ReviewClipState {
+  return {
+    clipId: clip.id,
+    reviewDecision: clip.reviewDecision,
+    reviewedAt: clip.reviewedAt,
+    favorite: clip.isFavorite,
+  };
+}
+
+function browserPreviewReviewStatesEqual(
+  left: ReviewClipState,
+  right: ReviewClipState,
+): boolean {
+  return (
+    left.clipId === right.clipId &&
+    left.reviewDecision === right.reviewDecision &&
+    left.reviewedAt === right.reviewedAt &&
+    left.favorite === right.favorite
+  );
+}
+
+function browserPreviewReviewClipPage(query: ReviewQueueQuery): ReviewClipPage {
+  const limit = Math.max(1, Math.min(200, query.limit ?? 3));
+  const snapshotMaxClipId = query.snapshotMaxClipId ?? browserPreviewClipStore.size;
+  const sourceIds = new Set((query.sourceDirIds ?? []).map(String));
+  const tagIds = new Set((query.tagIds ?? []).map(String));
+  const cursor = decodeBrowserReviewCursor(query.cursor, query, snapshotMaxClipId);
+  const allCandidates = [...browserPreviewClipStore.values()]
+    .map((clip) => ({
+      clip,
+      ordinal: browserPreviewClipOrdinal(clip.id),
+      recordedAt: browserPreviewRecordedAt(clip),
+    }))
+    .filter(({ clip, ordinal, recordedAt }) => {
+      const fileStatus = clip.fileStatus || (clip.isMissing ? "missing" : "available");
+      return (
+        ordinal <= snapshotMaxClipId &&
+        fileStatus === "available" &&
+        clip.reviewDecision === "unreviewed" &&
+        (!query.accountId || query.accountId === "all" || clip.accountId === query.accountId) &&
+        (!query.agentName || query.agentName === "all" || clip.agentName === query.agentName) &&
+        (!query.mapName || query.mapName === "all" || clip.mapName === query.mapName) &&
+        (!query.gameMode || query.gameMode === "all" || clip.gameMode === query.gameMode) &&
+        (sourceIds.size === 0 || sourceIds.has(clip.sourceDirId)) &&
+        (tagIds.size === 0 || clip.tags.some((tagId) => tagIds.has(tagId))) &&
+        (query.recordedFrom === undefined || recordedAt >= query.recordedFrom) &&
+        (query.recordedTo === undefined || recordedAt <= query.recordedTo)
+      );
+    })
+    .sort((left, right) => right.recordedAt - left.recordedAt || right.ordinal - left.ordinal);
+  const afterCursor = cursor
+    ? allCandidates.filter(
+        (candidate) =>
+          candidate.recordedAt < cursor.recordedAt ||
+          (candidate.recordedAt === cursor.recordedAt && candidate.ordinal < cursor.ordinal),
+      )
+    : allCandidates;
+  const selected = afterCursor.slice(0, limit);
+  const last = selected[selected.length - 1];
+  const hasMore = afterCursor.length > selected.length;
+
+  return {
+    items: selected.map(({ clip }) => toClipSummary(clip)),
+    snapshotMaxClipId,
+    candidateCount: allCandidates.length,
+    limit,
+    hasMore,
+    nextCursor: hasMore && last
+      ? encodeBrowserReviewCursor(last.recordedAt, last.ordinal, query, snapshotMaxClipId)
+      : null,
+  };
+}
+
+function browserPreviewClipOrdinal(clipId: string): number {
+  let ordinal = 0;
+  for (const key of browserPreviewClipStore.keys()) {
+    ordinal += 1;
+    if (key === clipId) return ordinal;
+  }
+  return 0;
+}
+
+function browserPreviewRecordedAt(clip: Clip): number {
+  const timestamp = new Date(clip.createdAt || clip.modifiedAt).getTime();
+  return Number.isFinite(timestamp) ? Math.floor(timestamp / 1_000) : 0;
+}
+
+function encodeBrowserReviewCursor(
+  recordedAt: number,
+  ordinal: number,
+  query: ReviewQueueQuery,
+  snapshotMaxClipId: number,
+): string {
+  return `browser:${snapshotMaxClipId}:${browserReviewQuerySignature(query)}:${recordedAt}:${ordinal}`;
+}
+
+function decodeBrowserReviewCursor(
+  value: string | undefined,
+  query: ReviewQueueQuery,
+  snapshotMaxClipId: number,
+): { recordedAt: number; ordinal: number } | null {
+  if (!value) return null;
+  const match = /^browser:(\d+):([0-9a-f]+):(-?\d+):(\d+)$/.exec(value);
+  if (!match) throw new Error("无效的旧版挑片游标");
+  if (
+    Number(match[1]) !== snapshotMaxClipId ||
+    match[2] !== browserReviewQuerySignature(query)
+  ) {
+    throw new Error("旧版挑片游标与当前快照或筛选条件不匹配");
+  }
+  return { recordedAt: Number(match[3]), ordinal: Number(match[4]) };
+}
+
+function browserReviewQuerySignature(query: ReviewQueueQuery): string {
+  const normalized = JSON.stringify({
+    accountId: query.accountId ?? null,
+    agentName: query.agentName ?? null,
+    mapName: query.mapName ?? null,
+    gameMode: query.gameMode ?? null,
+    sourceDirIds: [...(query.sourceDirIds ?? [])].sort((left, right) => left - right),
+    tagIds: [...(query.tagIds ?? [])].sort((left, right) => left - right),
+    recordedFrom: query.recordedFrom ?? null,
+    recordedTo: query.recordedTo ?? null,
+  });
+  let hash = 2_166_136_261;
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash ^= normalized.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0).toString(16);
 }
 
 function browserPreviewClipPage(query: ClipListQuery): ClipPage {
@@ -1357,6 +2040,7 @@ function browserPreviewClipPage(query: ClipListQuery): ClipPage {
         browserPreviewMatchesHighlight(clip, query.highlightFilter) &&
         (query.favoriteFilter !== "favorite" || clip.isFavorite) &&
         (query.favoriteFilter !== "not-favorite" || !clip.isFavorite) &&
+        (!query.reviewDecision || clip.reviewDecision === query.reviewDecision) &&
         (query.fileStatus ? fileStatus === query.fileStatus : fileStatus !== "trashed") &&
         (!query.metadataStatus || clip.metadataStatus === query.metadataStatus) &&
         (query.modifiedFrom === undefined || modifiedAt >= query.modifiedFrom) &&

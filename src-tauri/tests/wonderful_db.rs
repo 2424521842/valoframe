@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use valorant_highlight_manager_lib::wonderful_db::{
     decrypt_wonderful_db_text, parse_wonderful_db_text, parse_wonderful_snapshot_text,
-    read_wonderful_db_dir,
+    read_wonderful_db_dir, WonderfulEventNormalizationWarning,
 };
 
 type Aes256CbcEnc = cbc::Encryptor<Aes256>;
@@ -385,6 +385,209 @@ fn explicit_event_ext_zero_overrides_top_level_killer_is_me() {
 
     let matches = parse_wonderful_db_text("1001", fixture).expect("fixture should parse");
     assert!(!matches[0].videos[0].segments[0].events[0].killer_is_me);
+}
+
+#[test]
+fn parses_killed_is_me_from_top_level_and_event_ext_strictly() {
+    for (value, expected) in [
+        ("true", Some(true)),
+        ("false", Some(false)),
+        ("1", Some(true)),
+        ("0", Some(false)),
+        ("1.0", Some(true)),
+        ("0.0", Some(false)),
+        (r#""1""#, Some(true)),
+        (r#""0""#, Some(false)),
+    ] {
+        for (container, field_name) in [
+            ("top", "KilledIsMe"),
+            ("top", "killedIsMe"),
+            ("ext", "KilledIsMe"),
+            ("ext", "killedIsMe"),
+        ] {
+            let event_field = if container == "ext" {
+                format!(r#""event_ext":{{"{field_name}":{value}}}"#)
+            } else {
+                format!(r#""{field_name}":{value}"#)
+            };
+            let fixture = format!(
+                r#"{{
+                  "key_wonderful_list_1001":[{{
+                    "videos":[{{
+                      "highLightType":1,
+                      "round_clips":[{{
+                        "clip_sTime":0,
+                        "clip_duration":1000,
+                        "clip_events":[{{"event_sTime":100,{event_field}}}]
+                      }}]
+                    }}]
+                  }}]
+                }}"#
+            );
+
+            let matches = parse_wonderful_db_text("1001", &fixture)
+                .expect("strict killed flag fixture should parse");
+            let event = &matches[0].videos[0].segments[0].events[0];
+
+            assert_eq!(
+                event.killed_is_me, expected,
+                "container={container}, field={field_name}, value={value}"
+            );
+            assert!(event.normalization_warnings.is_empty());
+        }
+    }
+}
+
+#[test]
+fn invalid_killed_is_me_values_are_unknown_and_warn() {
+    for value in ["2", "-1", r#""true""#, "null", "[]", "{}"] {
+        let fixture = format!(
+            r#"{{
+              "key_wonderful_list_1001":[{{
+                "videos":[{{
+                  "highLightType":1,
+                  "round_clips":[{{
+                    "clip_sTime":0,
+                    "clip_duration":1000,
+                    "clip_events":[{{"event_sTime":100,"KilledIsMe":{value}}}]
+                  }}]
+                }}]
+              }}]
+            }}"#
+        );
+        let matches = parse_wonderful_db_text("1001", &fixture)
+            .expect("invalid killed flag should not reject its account");
+        let event = &matches[0].videos[0].segments[0].events[0];
+
+        assert_eq!(event.killed_is_me, None, "value={value}");
+        assert_eq!(
+            event.normalization_warnings,
+            vec![WonderfulEventNormalizationWarning::InvalidTopLevelKilledIsMe],
+            "value={value}"
+        );
+    }
+
+    let invalid_extended = r#"
+    {
+      "key_wonderful_list_1001":[{
+        "videos":[{
+          "highLightType":1,
+          "round_clips":[{
+            "clip_sTime":0,
+            "clip_duration":1000,
+            "clip_events":[{
+              "event_sTime":100,
+              "KilledIsMe":true,
+              "event_ext":{"KilledIsMe":"invalid"}
+            }]
+          }]
+        }]
+      }]
+    }
+    "#;
+    let matches = parse_wonderful_db_text("1001", invalid_extended)
+        .expect("invalid extended flag should not reject its account");
+    let event = &matches[0].videos[0].segments[0].events[0];
+    assert_eq!(event.killed_is_me, None);
+    assert_eq!(
+        event.normalization_warnings,
+        vec![WonderfulEventNormalizationWarning::InvalidExtendedKilledIsMe]
+    );
+}
+
+#[test]
+fn applies_relative_and_absolute_wonderful_event_time_semantics() {
+    let fixture = r#"
+    {
+      "key_wonderful_list_1001":[{
+        "videos":[
+          {"video_id":"ordinary-type-one","video_name":"普通高光","highLightType":1,
+           "round_clips":[{"clip_sTime":1000,"clip_duration":4000,"clip_events":[{"event_sTime":250}]}]},
+          {"video_id":"ordinary-multikill","video_name":"六杀时刻","highLightType":10,
+           "round_clips":[{"clip_sTime":1000,"clip_duration":4000,"clip_events":[{"event_sTime":250}]}]},
+          {"video_id":"kill-type","video_name":"击杀集锦","highLightType":2,
+           "round_clips":[{"clip_sTime":1000,"clip_duration":4000,"clip_events":[{"event_sTime":250}]}]},
+          {"video_id":"death-type","video_name":"死亡集锦","highLightType":3,
+           "round_clips":[{"clip_sTime":1000,"clip_duration":4000,"clip_events":[{"event_sTime":250}]}]},
+          {"video_id":"kill-name","video_name":"精彩击杀合集",
+           "round_clips":[{"clip_sTime":1000,"clip_duration":4000,"clip_events":[{"event_sTime":250}]}]},
+          {"video_id":"death-name","video_type":"death compilation",
+           "round_clips":[{"clip_sTime":1000,"clip_duration":4000,"clip_events":[{"event_sTime":250}]}]},
+          {"video_id":"unknown","video_name":"未分类片段",
+           "round_clips":[{"clip_sTime":1000,"clip_duration":4000,"clip_events":[{"event_sTime":250}]}]}
+        ]
+      }]
+    }
+    "#;
+    let matches =
+        parse_wonderful_db_text("1001", fixture).expect("timeline semantics fixture should parse");
+    let event_time = |video_id: &str| {
+        matches[0]
+            .videos
+            .iter()
+            .find(|video| video.video_id == video_id)
+            .expect("fixture video should exist")
+            .segments[0]
+            .events[0]
+            .video_time_ms
+    };
+
+    assert_eq!(event_time("ordinary-type-one"), Some(1_250));
+    assert_eq!(event_time("ordinary-multikill"), Some(1_250));
+    assert_eq!(event_time("kill-type"), Some(250));
+    assert_eq!(event_time("death-type"), Some(250));
+    assert_eq!(event_time("kill-name"), Some(250));
+    assert_eq!(event_time("death-name"), Some(250));
+    assert_eq!(event_time("unknown"), None);
+}
+
+#[test]
+fn rejects_overflow_and_out_of_bounds_event_times_without_clipping() {
+    let fixture = r#"
+    {
+      "key_wonderful_list_1001":[{
+        "videos":[
+          {"video_id":"overflow","highLightType":1,
+           "round_clips":[{"clip_sTime":9223372036854775807,"clip_duration":0,"clip_events":[{"event_sTime":1}]}]},
+          {"video_id":"too-late","highLightType":1,
+           "round_clips":[{"clip_sTime":1000,"clip_duration":1000,"clip_events":[{"event_sTime":1500}]}]},
+          {"video_id":"negative","highLightType":2,
+           "round_clips":[{"clip_sTime":0,"clip_duration":1000,"clip_events":[{"event_sTime":-1}]}]},
+          {"video_id":"duration-unknown","highLightType":2,
+           "round_clips":[{"clip_sTime":1000,"clip_events":[{"event_sTime":250}]}]}
+        ]
+      }]
+    }
+    "#;
+    let matches = parse_wonderful_db_text("1001", fixture)
+        .expect("invalid timeline fixture should parse safely");
+    let event = |video_id: &str| {
+        &matches[0]
+            .videos
+            .iter()
+            .find(|video| video.video_id == video_id)
+            .expect("fixture video should exist")
+            .segments[0]
+            .events[0]
+    };
+
+    assert_eq!(event("overflow").video_time_ms, None);
+    assert_eq!(
+        event("overflow").normalization_warnings,
+        vec![WonderfulEventNormalizationWarning::VideoTimeOverflow]
+    );
+    assert_eq!(event("too-late").video_time_ms, None);
+    assert_eq!(
+        event("too-late").normalization_warnings,
+        vec![WonderfulEventNormalizationWarning::VideoTimeOutOfBounds]
+    );
+    assert_eq!(event("negative").video_time_ms, None);
+    assert_eq!(
+        event("negative").normalization_warnings,
+        vec![WonderfulEventNormalizationWarning::VideoTimeOutOfBounds]
+    );
+    assert_eq!(event("duration-unknown").video_time_ms, Some(250));
+    assert!(event("duration-unknown").normalization_warnings.is_empty());
 }
 
 #[test]

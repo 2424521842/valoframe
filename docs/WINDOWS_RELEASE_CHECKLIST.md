@@ -1,15 +1,15 @@
 # Windows 发布检查清单
 
-本清单分为“内部未签名 RC”和“公开发布”。内部 RC 的通过不等于公开发布获准。
+本清单区分内部 RC、个人开发者稳定 updater 发布和未来严格公开发行。当前路线是手动安装 `v0.2.1`，再用 `v0.2.2` 验证第一次应用内更新。
 
 ## 1. 变更范围和版本
 
 - [ ] 发布工作区干净，或所有未提交改动均已逐项审阅并记录。
-- [ ] `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 版本一致。
-- [ ] 发布说明包含 Git 提交、版本、构建时间和构建机/工具链版本。
+- [ ] `package.json`、`package-lock.json` 顶层/root package、`src-tauri/Cargo.toml`、Cargo.lock 中项目 package 及 `src-tauri/tauri.conf.json` 均精确为 `0.2.1`；没有改写第三方依赖的同名版本值。
+- [ ] `release/notes/v0.2.1.md` 包含 Git 提交、版本、构建时间和构建机/工具链版本，并如实说明尚未完成的外部门禁。
 - [ ] 已确认默认产物仅为 NSIS；未把未配置、未测试的 MSI 宣称为支持渠道。
 - [ ] 产品名称、identifier、安装范围和升级策略与上一版本兼容。
-- [ ] 按 `DATABASE_RECOVERY.md` 完成旧库原子升级/在线备份、未来 schema 拒绝、损坏库拒绝、最近备份恢复及恢复后再次升级；保留输入库和结果证据。
+- [ ] 按 `DATABASE_RECOVERY.md` 完成 v13/v14/v15→v16（`pre-v*-to-v16`）原子升级/在线备份、未来 schema 拒绝、损坏库拒绝、最近备份恢复及恢复后再次升级；保留输入库和结果证据。
 
 ## 2. 配置静态检查
 
@@ -22,7 +22,7 @@
 - [ ] 日常 Rust 门禁只依赖受版本控制的资源根/元数据；发布静态检查会另外拒绝未 staged 的 FFmpeg。
 - [ ] `check-bundle.ps1` 接收本次构建生成的唯一 `installer.nsi`，并把 `Section Install` 精确绑定到主程序、FFmpeg、FFmpeg 许可文件和 `COMPLIANCE-MANIFEST.json` 声明的全部第三方材料。
 - [ ] 完整 `7z.exe` 把最终安装器识别为 NSIS 3 Unicode；manifest 驱动的全部资源与输入逐字节一致。内部 `strict-unsigned` 主程序只允许唯一 Tauri marker 从 UNK 变为 NSS；公开 `authenticode-aware` 主程序还只允许 checksum、security-directory、Align8 零 padding 和 EOF WIN_CERTIFICATE 表发生合法签名变化。
-- [ ] 公开模式要求外部 UNK staging 主程序为 `NotSigned`、内嵌 NSS 主程序和安装器均为 `Valid`；证书表边界、大小、条目和 EOF 覆盖有效。两项签名均与获批 publisher subject/证书 thumbprint 一致、存在时间戳证书并通过 `signtool verify /pa /all /v`。报告包含 embedded main 的 raw/canonical SHA-256、比较模式、签名者、时间戳和 signtool 结果。
+- [ ] 若启用 Authenticode，外部 UNK staging 主程序为 `NotSigned`、内嵌 NSS 主程序和安装器均为 `Valid`，并完成证书表、时间戳和 `signtool` 检查；当前个人发布可跳过此项。
 - [ ] 配置中没有占位 publisher、伪造许可证、测试证书、虚构更新公钥或更新端点。
 - [ ] 本地 Tauri schema 校验通过。
 
@@ -33,8 +33,9 @@
 - [ ] `npm test` 全部通过。
 - [ ] `npm run build` 通过。
 - [ ] `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过。
-- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` 通过。
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` 通过，手工/ignored 测试另有记录。
+- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings` 通过。
+- [ ] `cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features` 通过，手工/ignored 测试另有记录。
+- [ ] 扫描新鲜度/终态数量、同源重连/歧义、来源根预览与提交、仅移除索引、本人击杀/死亡时间轴和 schema v16 路径去重定向测试全部通过。
 - [ ] 构建使用隔离的 `CARGO_TARGET_DIR`，没有依赖或改写默认 `src-tauri/target`。
 
 ## 4. FFmpeg 和第三方材料
@@ -46,7 +47,7 @@
 - [ ] 已根据实际启用组件完成许可证审核，没有根据项目名猜测 LGPL/GPL 状态。
 - [ ] SBOM 或等价组件清单已生成并归档。
 - [ ] npm/Cargo SPDX、FFmpeg 组件快照、第三方声明、许可证全文和 SHA-256 manifest 均由锁文件重新生成；12 项 tracked license override 已逐项批准，`selectors` 的 MPL 2.0 源代码形式义务和其他人工审核已闭合。
-- [ ] 最小自建 FFmpeg 候选的 checksum/build metadata、12 位 commit、PE 实际 imports 与 objdump 结果已一致，imports 只命中 Windows 系统 DLL allowlist；Windows 合成视频和代表性真实高光视频均通过，且对应源码包与最终二进制同址长期提供。通过前仍使用内部 RC 固定版本。
+- [ ] 最小自建 FFmpeg 候选的 checksum/build metadata、12 位 commit、PE 实际 imports 与 objdump 结果已一致，imports 只命中 Windows 系统 DLL allowlist；H.264、HEVC、AV1 三种合成 MP4 均完成受控缩略图烟测，NVIDIA/Tracker 代表性真实高光视频也通过，且对应源码包与最终二进制同址长期提供。通过前仍使用内部 RC 固定版本。
 - [ ] 对应源代码镜像或书面提供方式可长期访问并匹配该二进制。
 - [x] 项目自有代码已选择 MIT，根许可证已纳入仓库，并记录当前不另设重复 EULA。
 - [ ] 第三方声明、缺失许可文本处理和人工审核已获批准并纳入发布材料。
@@ -77,18 +78,31 @@
 - [ ] 烟测根目录与真实应用 data/cache 目录互不等同且互不为父子目录。
 - [ ] 配置窗口不会自动创建；验证 smoke root 后才手动创建，WebView2 data directory 位于 `<root>/webview2`。
 - [ ] 烟测数据库位于 `<root>/data`，缩略图位于 `<root>/cache/thumbnails`；只有 `TEMP`/`TMP`、进程日志和哨兵路径使用 root 外的 marker-gated sibling。
-- [ ] 子进程不伪造 `APPDATA`、`LOCALAPPDATA`、`USERPROFILE`、`HOME`、`HOMEDRIVE`、`HOMEPATH`，也不以 `WEBVIEW2_USER_DATA_FOLDER` 覆盖 Rust builder 的显式路径。
+- [ ] 子进程不伪造 `APPDATA`、`LOCALAPPDATA`、`USERPROFILE`、`HOME`、`HOMEDRIVE`、`HOMEPATH`；脚本拒绝继承外部 `WEBVIEW2_USER_DATA_FOLDER`，随后为首、次实例统一注入受控的 `<root>/webview2`，并与 Rust builder 的显式路径及烟测报告逐项核对。
 - [ ] 主进程 suspended 创建并在 resume 前加入 `KILL_ON_JOB_CLOSE` Job；stdout/stderr 可诊断，失败清理后 Job 内无遗留进程。
 - [ ] 只选择隐藏前主 PID 唯一可见的真实顶层窗口；记录 HWND/PID/title/class，`WM_CLOSE` 后窗口消失、主进程 exit 0、Job active process 为 0。
-- [ ] SQLite 只读检查在 `quick_check` 前注册与 Rust 一致的 `VHM_CLIP_NAME` collation，并验证 schema v13、16 张必需表（含 `clip_trash_snapshots` 与 `clip_delete_intents`）、`trashSnapshotCount = 0`、`deleteIntentCount = 0`、空自定义标签目录及空扫描/素材计数。
+- [ ] SQLite 只读检查在 `quick_check` 前注册与 Rust 一致的 `VHM_CLIP_NAME` collation，并验证 schema v16、16 张必需表、clips 三段稳定身份、`clip_events.killed_is_me`、`scan_runs.summary_available`、空的 `clip_trash_snapshots`/`clip_delete_intents`、`trashSnapshotCount = 0`、`deleteIntentCount = 0`、空自定义标签目录及空扫描/素材计数。
 - [ ] 第二实例使用与首实例相同的 smoke root；首窗口在交接前被最小化，`runtime.singleInstance.verified = true`、`secondInstanceExitCode = 0`、`secondInstanceJobActiveProcessesAfterExit = 0`，且 `onlyPrimaryNamedRootAfterHandoff`、`primaryWindowMinimizedBeforeHandoff`、`primaryWindowHandlePreserved`、`primaryWindowVisibleAfterHandoff` 均为 `true`，`primaryWindowMinimizedAfterHandoff = false`。报告保留首/次 PID 与进程/窗口清单，并把 `focusVerification` 作为 best-effort 证据而不是硬通过条件。
 - [ ] 非法相对路径、错误目录名、缺失/错误 marker、路径重叠和符号链接场景均会 fail closed。
 - [ ] 清理逻辑只删除自己创建并重新通过名称、marker 和路径边界校验的目录，不使用通配符删除。
 - [ ] 烟测前后核对真实应用 data/cache/WebView2 profile，确认未创建、未写入、未删除真实用户数据。
 
-完成本节后，产物最多可标记为“内部 RC”，不能勾选“公开发布批准”。
+完成本节后，产物可用于内部 RC；稳定 updater 发布还必须完成下一节。
 
-## 6. 公开发布阻断项
+## 6. 个人开发者稳定 updater 必做项
+
+- [ ] `package.json`/lockfile、Cargo manifest/lockfile 与 `tauri.conf.json` 版本完全一致，tag 精确为 `vMAJOR.MINOR.PATCH` 且高于现有稳定版本。
+- [ ] GitHub 仓库 Secrets 已配置 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`；Variable 已配置 `VALOFRAME_UPDATER_PUBLIC_KEY`。仓库、日志和 Release 中没有私钥。
+- [ ] 私钥和密码已有可读取的加密离线备份；没有把“计划备份”误勾为已经完成。
+- [ ] Tauri 正确签名通过，单字节篡改和错误公钥均失败；下载 URL 绑定 `2424521842/valoframe` 的对应 tag，ZIP 内安装器版本一致且包不超过 512 MiB。
+- [ ] workflow 创建 draft，重新下载验证安装器、`.nsis.zip`、`.sig` 和 `latest.json` 后才发布；公开后二次验证失败能恢复为 draft。
+- [ ] `v0.2.1` 由用户手动安装；发布 `v0.2.2` 后完成发现、下载、验签、确认安装和重启验收。
+- [ ] 覆盖离线、取消、重试、篡改包、错误公钥、安装器启动失败和禁止降级，确认旧安装和用户数据保持可用。
+- [ ] 未启用 Authenticode 时，下载页和发布说明明确提示 Windows 可能显示“未知发布者”或 SmartScreen。
+
+## 7. 未来严格公开发行检查（可选）
+
+以下历史 policy 条目用于商业化、扩大分发和代码签名等未来加固，不阻止当前个人 updater 发布，也不得被虚构为已完成：
 
 - [ ] 真实法律主体/publisher 已确定，并与证书签名主体一致。
 - [ ] 稳定 identifier 已审核并冻结；对既有安装的升级影响已验证。
@@ -103,17 +117,18 @@
 - [ ] Riot Games、腾讯及《无畏契约》相关商标归属和非官方/非赞助/非认可声明已经批准，并纳入 README、About/许可页和公开发布材料。
 - [ ] FFmpeg provenance、SHA-256、许可证结论、SBOM 和源代码镜像/提供方式齐全。
 - [ ] Authenticode 证书和可信时间戳服务已配置；policy 固定 publisher subject 和证书 thumbprint，最终安装器与内嵌主程序的链、时间戳和 `signtool` 验证成功。
-- [ ] 发布流程不会输出或上传未签名的公开安装器。
-- [ ] updater 插件、最小权限、公钥、HTTPS endpoint 和 `latest.json` 契约已实现；若本版本不提供自动更新，则所有公开材料明确写明不支持。
-- [ ] updater 私钥已安全备份并仅通过发布机密注入；篡改包和错误签名会被拒绝。
+- [ ] 若选择 Authenticode，发布流程不会输出或上传未完成代码签名的安装器。
+- [x] updater Rust 服务、最小 capability、设置/关于 UI、主导航可发现状态、每日/焦点恢复/手动检查、进度/验签/取消、失败直重试与显式放弃已实现；关键任务门禁覆盖扫描、永久删除、视频导出和来源根重定位；运行时严格绑定规范版本、固定 GitHub HTTPS 仓库/tag 与已验签 ZIP 内安装器版本，限制下载/解压大小，并在 Windows 安装器启动失败时保留应用和已验证包。
+- [x] 稳定 updater workflow 在 draft 阶段证明正确签名通过、单字节篡改和错误公钥失败；Community Beta 继续拒绝公钥、`.sig` 和 `latest.json`。
+- [ ] 扩展 Windows 10/11、DPI、真实 NVIDIA/Tracker、来源恢复、索引清理、时间轴和数据安全证据矩阵。
 - [ ] 支持的 Windows 版本、CPU 架构、WebView2 在线/离线策略已公布。
 - [ ] 从每个受支持的上一公开版本完成真实升级测试。
 - [ ] 降级被正确拒绝，且“发布更高补丁版本”的回退演练完成。
 - [ ] 安装、升级、卸载均不会修改或删除用户原始视频；仅应用内回收站的显式永久删除会删除所选视频，数据库保留策略符合文档。
 
-任一项未完成，公开发布必须停止。
+这些可选条目未完成时不得宣称“严格企业级发行已验收”，但个人开发者稳定 updater 可以在第 6 节全部通过后发布。
 
-## 7. 虚拟机发布矩阵
+## 8. 虚拟机发布矩阵
 
 | 场景 | 最低要求 | 结果/证据 |
 | --- | --- | --- |
@@ -122,17 +137,22 @@
 | WebView2 下载失败 | WebView2 缺失、禁止联网 | |
 | 同版本重装 | 已安装同版本 | |
 | 正常升级 | 每个受支持的上一公开版本 | |
+| v0.2.1 数据迁移 | v13/v14/v15→v16；备份、clip ID/用户状态和删除安全数据保持 | |
+| 来源恢复 | 同源子目录改名自动重连；用户预览/提交新根；reparse、重叠、歧义与关键任务冲突失败关闭 | |
+| 索引清理 | missing/来源不可用素材单条与混合批量；原视频大小、mtime、身份不变 | |
+| 时间轴 | 真实形状 ACLOS fixture；本人击杀/死亡图标、数量、tooltip、无障碍名称、跳转和越界隐藏 | |
 | 禁止降级 | 当前版本安装后运行更低版本安装器 | |
 | 卸载 | 验证安装文件与用户数据策略 | |
 | FFmpeg 运行时 | 无系统 FFmpeg，仅使用 `$RESOURCE/bin/ffmpeg.exe` | |
 | 用户素材安全 | 安装、升级、卸载前后校验原始素材 | |
 
-## 8. 最终产物与发布后检查
+## 9. 最终产物与发布后检查
 
 - [ ] 最终 NSIS 安装器的 SHA-256、大小和签名状态已二次核对。
-- [ ] Authenticode 链和时间戳在干净机器上验证通过，签名者 subject/thumbprint 与批准 policy 精确一致。
+- [ ] 若启用 Authenticode，其链和时间戳在干净机器上验证通过；未启用时已验证并披露未知发布者提示。
 - [ ] 发布说明列出系统要求、WebView2 联网行为、数据迁移和已知问题。
 - [ ] 安装器、符号/调试材料、SBOM、源代码材料、第三方声明、游戏素材 manifest、可核验的人工范围审阅记录和测试证据已归档；授权原件如含敏感信息，只留在受控法律档案。
 - [ ] 下载页和更新元数据指向同一已验证文件及版本。
+- [ ] `latest.json` 只含 `windows-x86_64` 稳定版本，URL 指向同一非 draft、非 prerelease Release 的已验证 `.nsis.zip`，签名与下载字节重新验证通过。
 - [ ] 发布后从公开入口重新下载并校验哈希、签名、安装和首次启动。
 - [ ] 已准备撤回发布、关闭更新端点和发布更高补丁版本的响应流程。

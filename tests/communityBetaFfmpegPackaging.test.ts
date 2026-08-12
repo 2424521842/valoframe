@@ -148,6 +148,15 @@ function createCandidateArtifact(parent: string): {
       outputSizeBytes: 128,
       outputSha256: sha256("synthetic jpeg output"),
     },
+    smokeFixtures: [
+      candidateManifest.runtimeContract.smokeFixture,
+      ...(candidateManifest.runtimeContract.additionalSmokeFixtures ?? []),
+    ].map((fixture: JsonObject) => ({
+      codec: fixture.codec,
+      fixtureSha256: fixture.sha256,
+      outputSizeBytes: 128,
+      outputSha256: sha256(`synthetic ${fixture.codec} jpeg output`),
+    })),
     promotionAuthorized: false,
   };
   writeJson(

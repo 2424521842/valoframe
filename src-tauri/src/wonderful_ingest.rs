@@ -10,10 +10,12 @@ use crate::{
     db::{self, ClipEventInput, ClipSegmentInput, DbResult},
     highlight_log_parser::HighlightLogRoundScore,
     wonderful_db::{
-        WonderfulAccountRecord, WonderfulEventRecord, WonderfulMatchRecord,
-        WonderfulSnapshotAccountRecord, WonderfulVideoRecord,
+        WonderfulAccountRecord, WonderfulEventNormalizationWarning, WonderfulEventRecord,
+        WonderfulMatchRecord, WonderfulSnapshotAccountRecord, WonderfulVideoRecord,
     },
 };
+
+const MAX_INGEST_WARNING_SAMPLES: usize = 20;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WonderfulIngestSummary {
@@ -21,6 +23,8 @@ pub struct WonderfulIngestSummary {
     pub unmatched_video_count: usize,
     pub event_count: usize,
     pub round_score_backfilled_count: usize,
+    pub warning_count: usize,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,7 +71,25 @@ pub fn ingest_wonderful_metadata_with_round_scores(
                     continue;
                 }
 
-                let timeline = build_timeline(video);
+                let official_duration_ms = video_duration_ms(video);
+                let indexed_duration_ms = connection
+                    .query_row(
+                        "SELECT duration_ms FROM clips WHERE id = ?1",
+                        params![clip_id],
+                        |row| row.get::<_, Option<i64>>(0),
+                    )
+                    .map_err(|error| {
+                        format!("Database reading indexed clip duration failed: {error}")
+                    })?;
+                let timeline = build_timeline(video, official_duration_ms.or(indexed_duration_ms));
+                summary.warning_count =
+                    summary.warning_count.saturating_add(timeline.warning_count);
+                for warning in &timeline.warnings {
+                    if summary.warnings.len() >= MAX_INGEST_WARNING_SAMPLES {
+                        break;
+                    }
+                    summary.warnings.push(warning.clone());
+                }
                 let kill_count = timeline
                     .events
                     .iter()
@@ -76,7 +98,7 @@ pub fn ingest_wonderful_metadata_with_round_scores(
                 let highlight_type = video
                     .highlight_type
                     .or_else(|| video.video_type.trim().parse::<i64>().ok());
-                let duration_ms = video_duration_ms(video);
+                let duration_ms = official_duration_ms;
                 let (round_score, round_score_source) =
                     resolved_round_score(&account.openid, match_record, video, &round_score_lookup);
                 let can_preserve_reconstructed_score =
@@ -255,6 +277,7 @@ pub fn ingest_wonderful_metadata_with_round_scores(
                         killer_name: event.killer_name.as_deref(),
                         killed_name: event.killed_name.as_deref(),
                         killer_is_me: event.killer_is_me,
+                        killed_is_me: event.killed_is_me,
                         raw_json: Some(&event.raw_json),
                     })
                     .collect::<Vec<_>>();
@@ -810,6 +833,8 @@ fn video_duration_ms(video: &WonderfulVideoRecord) -> Option<i64> {
 struct OwnedTimeline {
     segments: Vec<OwnedSegment>,
     events: Vec<OwnedEvent>,
+    warning_count: usize,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -834,14 +859,17 @@ struct OwnedEvent {
     killer_name: Option<String>,
     killed_name: Option<String>,
     killer_is_me: bool,
+    killed_is_me: Option<bool>,
     raw_json: String,
 }
 
-fn build_timeline(video: &WonderfulVideoRecord) -> OwnedTimeline {
+fn build_timeline(video: &WonderfulVideoRecord, known_duration_ms: Option<i64>) -> OwnedTimeline {
     let mut segment_keys = HashSet::new();
     let mut event_keys = HashSet::new();
     let mut segments = Vec::new();
     let mut events = Vec::new();
+    let mut warning_count = 0usize;
+    let mut warnings = Vec::new();
 
     for (segment_index, segment) in video.segments.iter().enumerate() {
         let segment_base = if segment.segment_id.trim().is_empty() {
@@ -871,11 +899,24 @@ fn build_timeline(video: &WonderfulVideoRecord) -> OwnedTimeline {
             if !event_keys.insert(event_base.clone()) {
                 continue;
             }
+            let mut event_warnings = event.normalization_warnings.clone();
+            let video_time_ms = validated_timeline_event_time(
+                event.video_time_ms,
+                known_duration_ms,
+                &mut event_warnings,
+            );
+            warning_count = warning_count.saturating_add(event_warnings.len());
+            for warning in event_warnings {
+                if warnings.len() >= MAX_INGEST_WARNING_SAMPLES {
+                    break;
+                }
+                warnings.push(format_timeline_warning(video, event, warning));
+            }
             events.push(OwnedEvent {
                 segment_key: segment_key.clone(),
                 event_key: event_base,
                 event_type: event.event_type.clone(),
-                video_time_ms: event.video_time_ms,
+                video_time_ms,
                 event_time: event.event_time.clone(),
                 round_id: event.round_id,
                 player_name: event.player_name.clone(),
@@ -884,12 +925,72 @@ fn build_timeline(video: &WonderfulVideoRecord) -> OwnedTimeline {
                 killer_name: event.killer_name.clone(),
                 killed_name: event.killed_name.clone(),
                 killer_is_me: event.killer_is_me,
+                killed_is_me: event.killed_is_me,
                 raw_json: event.raw_json.clone(),
             });
         }
     }
 
-    OwnedTimeline { segments, events }
+    OwnedTimeline {
+        segments,
+        events,
+        warning_count,
+        warnings,
+    }
+}
+
+fn validated_timeline_event_time(
+    video_time_ms: Option<i64>,
+    duration_ms: Option<i64>,
+    warnings: &mut Vec<WonderfulEventNormalizationWarning>,
+) -> Option<i64> {
+    let video_time_ms = video_time_ms?;
+    if video_time_ms < 0 || duration_ms.is_some_and(|duration_ms| video_time_ms > duration_ms) {
+        if !warnings.contains(&WonderfulEventNormalizationWarning::VideoTimeOutOfBounds) {
+            warnings.push(WonderfulEventNormalizationWarning::VideoTimeOutOfBounds);
+        }
+        return None;
+    }
+    Some(video_time_ms)
+}
+
+fn format_timeline_warning(
+    video: &WonderfulVideoRecord,
+    event: &WonderfulEventRecord,
+    warning: WonderfulEventNormalizationWarning,
+) -> String {
+    let warning_code = match warning {
+        WonderfulEventNormalizationWarning::InvalidTopLevelKilledIsMe => {
+            "invalid-top-level-killed-is-me"
+        }
+        WonderfulEventNormalizationWarning::InvalidExtendedKilledIsMe => {
+            "invalid-extended-killed-is-me"
+        }
+        WonderfulEventNormalizationWarning::VideoTimeOverflow => "video-time-overflow",
+        WonderfulEventNormalizationWarning::VideoTimeOutOfBounds => "video-time-out-of-bounds",
+    };
+    format!(
+        "WonderfulDb video {} event {}: {warning_code}",
+        bounded_warning_identifier(&video.video_id),
+        bounded_warning_identifier(&event.event_id),
+    )
+}
+
+fn bounded_warning_identifier(value: &str) -> String {
+    const MAX_IDENTIFIER_CHARS: usize = 64;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return "<missing>".to_string();
+    }
+    let mut characters = trimmed.chars();
+    let mut bounded = characters
+        .by_ref()
+        .take(MAX_IDENTIFIER_CHARS)
+        .collect::<String>();
+    if characters.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
 }
 
 fn unique_key(base: String, index: usize, used: &mut HashSet<String>) -> String {
@@ -917,6 +1018,7 @@ fn event_content_key(segment_key: &str, event: &WonderfulEventRecord) -> String 
     hash_optional_text(&mut hasher, event.killed_name.as_deref());
     hash_optional_text(&mut hasher, event.weapon_name.as_deref());
     hasher.update([u8::from(event.killer_is_me)]);
+    hash_optional_bool(&mut hasher, event.killed_is_me);
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
@@ -941,6 +1043,13 @@ fn hash_optional_i64(hasher: &mut Sha256, value: Option<i64>) {
             hasher.update([1]);
             hasher.update(value.to_le_bytes());
         }
+        None => hasher.update([0]),
+    }
+}
+
+fn hash_optional_bool(hasher: &mut Sha256, value: Option<bool>) {
+    match value {
+        Some(value) => hasher.update([1, u8::from(value)]),
         None => hasher.update([0]),
     }
 }
@@ -1055,6 +1164,8 @@ mod account_name_tests {
                             killer_name: None,
                             killed_name: None,
                             killer_is_me: true,
+                            killed_is_me: None,
+                            normalization_warnings: Vec::new(),
                             raw_json: "{}".to_string(),
                         })
                         .collect(),

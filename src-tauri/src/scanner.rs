@@ -1,3 +1,5 @@
+mod reconnect;
+mod recursive_mp4;
 mod scan_runs;
 mod scan_service;
 
@@ -16,10 +18,18 @@ use serde::Serialize;
 use crate::db::{self, ClipInput, ClipSaveOutcome, DbResult};
 use crate::metadata_ingest::{ingest_match_metadata, MetadataIngestInput};
 
+use reconnect::{
+    canonicalize_non_reparse_directory_chain, canonicalize_regular_path_within_root,
+    collect_scan_candidate, concrete_file_identity_changed, metadata_is_reparse_point,
+    revalidate_staged_candidate, CollectedScanCandidate, IdentityReadDiagnostics,
+    ScanReconnectPlanGuard,
+};
+
 use scan_runs::ScanRunGuard;
 pub use scan_runs::{
     ensure_scan_run_started, ensure_scan_run_terminal, finalize_scan_run_for_job,
     latest_scan_summary, mark_scan_run_cancelling, recover_interrupted_scan_runs,
+    scan_summary_for_job,
 };
 #[cfg(test)]
 use scan_service::scan_library_roots;
@@ -29,7 +39,9 @@ pub use scan_service::{
     scan_default_aclos_library_with_progress, scan_default_aclos_library_with_progress_and_cancel,
     scan_directory, scan_directory_with_progress, scan_discovered_aclos_roots_with_progress,
     scan_discovered_aclos_roots_with_progress_and_cancel, scan_roots, scan_roots_with_progress,
-    scan_roots_with_progress_and_cancel,
+    scan_roots_with_progress_and_cancel, sync_enabled_scan_sources_with_progress_and_cancel,
+    sync_scan_source_with_progress_and_cancel, sync_scan_sources,
+    sync_scan_sources_with_progress_and_cancel,
 };
 
 const EDIT_AGENT_ASSET_WINDOW_SECONDS: i64 = 60;
@@ -275,6 +287,7 @@ struct MetadataScanConfig {
 struct ScanBatchInput {
     requested_roots: Vec<PathBuf>,
     source_paths: Vec<PathBuf>,
+    persistent_sources: Vec<db::SourceDir>,
     metadata_config: MetadataScanConfig,
     initial_errors: Vec<String>,
     empty_message: Option<String>,
@@ -287,10 +300,22 @@ struct LibrarySourceDiscovery {
     empty_message: Option<String>,
 }
 
+struct AclosScanGroup {
+    path: PathBuf,
+    name: String,
+    clips: Vec<(PathBuf, i64)>,
+}
+
+struct CoverJpegDiscovery {
+    paths: Vec<PathBuf>,
+    warnings: Vec<String>,
+}
+
 struct SourceScanOutcome {
     source_path: PathBuf,
     source_id: Option<i64>,
     accessible: bool,
+    metadata_eligible: bool,
     complete_for_missing: bool,
     seen_paths: HashSet<String>,
 }
@@ -406,6 +431,7 @@ fn run_scan_batch(
     let ScanBatchInput {
         requested_roots,
         source_paths,
+        persistent_sources,
         metadata_config,
         initial_errors,
         empty_message,
@@ -430,7 +456,7 @@ fn run_scan_batch(
         return finish_cancelled_scan(scan_run, &progress, summary);
     }
 
-    if source_paths.is_empty() {
+    if source_paths.is_empty() && persistent_sources.is_empty() {
         summary.message = empty_message.or_else(|| {
             Some(format!(
                 "Scan completed: {} sources, {} groups",
@@ -441,23 +467,54 @@ fn run_scan_batch(
         return finish_scan_execution(scan_run, &progress, status, summary);
     }
 
-    progress.set_total_sources(source_paths.len());
+    let total_sources = source_paths.len().saturating_add(persistent_sources.len());
+    progress.set_total_sources(total_sources);
     progress.emit(
         ScanProgressPhase::Scanning,
-        format!("发现 {} 个来源目录", source_paths.len()),
+        format!("发现 {total_sources} 个来源目录"),
     );
-    let mut outcomes = Vec::with_capacity(source_paths.len());
+    let mut outcomes = Vec::with_capacity(total_sources);
     for source_path in source_paths {
         if runtime.is_cancelled() {
             return finish_cancelled_scan(scan_run, &progress, summary);
         }
+        let scan_root_path = scan_root_for_source(&requested_roots, &source_path);
         let step = scan_one_source(
             connection,
             source_path,
+            scan_root_path,
+            None,
             &mut summary,
             &mut progress,
             runtime,
         )?;
+        outcomes.push(step.outcome);
+        if step.cancelled {
+            return finish_cancelled_scan(scan_run, &progress, summary);
+        }
+    }
+    for source in persistent_sources {
+        if runtime.is_cancelled() {
+            return finish_cancelled_scan(scan_run, &progress, summary);
+        }
+        let step = match source.scan_mode {
+            db::ScanMode::AclosStructured => scan_one_source(
+                connection,
+                PathBuf::from(&source.path),
+                PathBuf::from(&source.scan_root_path),
+                Some(&source),
+                &mut summary,
+                &mut progress,
+                runtime,
+            )?,
+            db::ScanMode::RecursiveMp4 => recursive_mp4::scan_recursive_source(
+                connection,
+                source,
+                &mut summary,
+                &mut progress,
+                runtime,
+            )?,
+        };
         outcomes.push(step.outcome);
         if step.cancelled {
             return finish_cancelled_scan(scan_run, &progress, summary);
@@ -471,7 +528,7 @@ fn run_scan_batch(
 
     let accessible_sources = outcomes
         .iter()
-        .filter(|outcome| outcome.accessible)
+        .filter(|outcome| outcome.accessible && outcome.metadata_eligible)
         .map(|outcome| outcome.source_path.clone())
         .collect::<Vec<_>>();
     if !accessible_sources.is_empty() {
@@ -536,6 +593,14 @@ fn run_scan_batch(
         )
     });
     let status = completed_status(&summary);
+    if status == ScanExecutionStatus::Completed {
+        let completed_source_ids = outcomes
+            .iter()
+            .filter(|outcome| outcome.accessible && outcome.complete_for_missing)
+            .filter_map(|outcome| outcome.source_id)
+            .collect::<Vec<_>>();
+        db::mark_source_dirs_scan_completed(connection, &completed_source_ids)?;
+    }
     finish_scan_execution(scan_run, &progress, status, summary)
 }
 
@@ -584,12 +649,17 @@ fn finish_scan_execution(
 fn scan_one_source(
     connection: &Connection,
     source_path: PathBuf,
+    scan_root_path: PathBuf,
+    registered_source: Option<&db::SourceDir>,
     summary: &mut ScanSummary,
     progress: &mut ScanProgressState<'_>,
     runtime: ScanRuntime<'_>,
 ) -> DbResult<SourceScanStep> {
-    let source_name = path_file_name(&source_path);
+    let source_name = registered_source
+        .map(|source| source.name.clone())
+        .unwrap_or_else(|| path_file_name(&source_path));
     let source_path_string = path_to_string(&source_path);
+    let scan_root_path_string = path_to_string(&scan_root_path);
     progress.source_started(&source_name, &source_path);
     summary.source_dir_count += 1;
 
@@ -603,13 +673,20 @@ fn scan_one_source(
         ));
     }
 
-    let source_dir = match db::upsert_source_dir(
-        connection,
-        db::SourceDirInput {
-            path: &source_path_string,
-            name: &source_name,
+    let source_dir_result = registered_source.cloned().map_or_else(
+        || {
+            db::upsert_source_dir_with_profile(
+                connection,
+                db::SourceDirInput {
+                    path: &source_path_string,
+                    name: &source_name,
+                },
+                db::SourceProfileInput::aclos(&scan_root_path_string),
+            )
         },
-    ) {
+        Ok,
+    );
+    let source_dir = match source_dir_result {
         Ok(source_dir) => source_dir,
         Err(error) => {
             push_source_error(summary, &source_path, &error);
@@ -618,6 +695,7 @@ fn scan_one_source(
                 source_path,
                 source_id: None,
                 accessible: false,
+                metadata_eligible: true,
                 complete_for_missing: false,
                 seen_paths: HashSet::new(),
             }));
@@ -635,10 +713,12 @@ fn scan_one_source(
     }
 
     let mut source_errors = Vec::new();
-    let metadata = match fs::metadata(&source_path) {
-        Ok(metadata) => metadata,
+    let canonical_scan_root = match canonicalize_non_reparse_directory_chain(&scan_root_path) {
+        Ok(path) => path,
         Err(error) => {
-            let error = format!("Failed to inspect source directory {source_path_string}: {error}");
+            let error = format!(
+                "Failed to validate ACLOS scan root path chain {scan_root_path_string}: {error}"
+            );
             push_source_error(summary, &source_path, &error);
             db::mark_source_dir_scan_error(connection, source_dir.id, "unavailable", &error)?;
             progress.source_finished(&source_name);
@@ -646,13 +726,37 @@ fn scan_one_source(
                 source_path,
                 source_id: Some(source_dir.id),
                 accessible: false,
+                metadata_eligible: true,
                 complete_for_missing: false,
                 seen_paths: HashSet::new(),
             }));
         }
     };
-    if !metadata.is_dir() {
-        let error = format!("Source path is not a directory: {source_path_string}");
+    let canonical_source_path = match canonicalize_non_reparse_directory_chain(&source_path) {
+        Ok(path) => path,
+        Err(error) => {
+            let error =
+                format!("Failed to validate ACLOS source path chain {source_path_string}: {error}");
+            push_source_error(summary, &source_path, &error);
+            db::mark_source_dir_scan_error(connection, source_dir.id, "unavailable", &error)?;
+            progress.source_finished(&source_name);
+            return Ok(SourceScanStep::finished(SourceScanOutcome {
+                source_path,
+                source_id: Some(source_dir.id),
+                accessible: false,
+                metadata_eligible: true,
+                complete_for_missing: false,
+                seen_paths: HashSet::new(),
+            }));
+        }
+    };
+    if canonical_source_path != canonical_scan_root
+        && !canonical_source_path.starts_with(&canonical_scan_root)
+    {
+        let error = format!(
+            "ACLOS source canonical path is outside its authorized scan root: {}",
+            canonical_source_path.display()
+        );
         push_source_error(summary, &source_path, &error);
         db::mark_source_dir_scan_error(connection, source_dir.id, "unavailable", &error)?;
         progress.source_finished(&source_name);
@@ -660,6 +764,7 @@ fn scan_one_source(
             source_path,
             source_id: Some(source_dir.id),
             accessible: false,
+            metadata_eligible: true,
             complete_for_missing: false,
             seen_paths: HashSet::new(),
         }));
@@ -675,6 +780,7 @@ fn scan_one_source(
                 source_path,
                 source_id: Some(source_dir.id),
                 accessible: false,
+                metadata_eligible: true,
                 complete_for_missing: false,
                 seen_paths: HashSet::new(),
             }));
@@ -699,28 +805,57 @@ fn scan_one_source(
             Vec::new()
         }
     };
-    let scan_groups = entries
-        .into_iter()
-        .filter_map(|path| {
-            if path.is_dir() {
-                let group_name = path_file_name(&path);
-                return Some((path, group_name, None));
-            }
-            if path.is_file() && has_extension(&path, "mp4") {
-                let group_name = path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| path_file_name(&path));
-                return Some((source_path.clone(), group_name, Some(path)));
-            }
-            None
-        })
-        .collect::<Vec<_>>();
     let mut complete_for_missing = true;
     let mut seen_paths = HashSet::new();
+    let mut raw_groups = Vec::new();
+    for path in entries {
+        let entry_metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                complete_for_missing = false;
+                let error = format!("Failed to inspect source entry {}: {error}", path.display());
+                push_source_error(summary, &source_path, &error);
+                push_unique_error(&mut source_errors, error);
+                continue;
+            }
+        };
+        if metadata_is_reparse_point(&entry_metadata) {
+            complete_for_missing = false;
+            let error = format!("Skipped symbolic link or reparse point: {}", path.display());
+            push_source_error(summary, &source_path, &error);
+            push_unique_error(&mut source_errors, error);
+            continue;
+        }
+        if entry_metadata.is_dir() {
+            match canonicalize_regular_path_within_root(&path, &canonical_source_path) {
+                Ok(_) => raw_groups.push((path.clone(), path_file_name(&path), None)),
+                Err(error) => {
+                    complete_for_missing = false;
+                    push_source_error(summary, &source_path, &error);
+                    push_unique_error(&mut source_errors, error);
+                }
+            }
+        } else if entry_metadata.is_file() && has_extension(&path, "mp4") {
+            let group_name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| path_file_name(&path));
+            match canonicalize_regular_path_within_root(&path, &canonical_source_path) {
+                Ok(_) => raw_groups.push((source_path.clone(), group_name, Some(path))),
+                Err(error) => {
+                    complete_for_missing = false;
+                    push_source_error(summary, &source_path, &error);
+                    push_unique_error(&mut source_errors, error);
+                }
+            }
+        }
+    }
 
-    for (group_path, group_name, root_clip_path) in scan_groups {
+    let _reconnect_plan = ScanReconnectPlanGuard::begin(connection, source_dir.id)?;
+    let mut identity_diagnostics = IdentityReadDiagnostics::default();
+    let mut scan_groups = Vec::with_capacity(raw_groups.len());
+    for (group_path, group_name, root_clip_path) in raw_groups {
         if runtime.is_cancelled() {
             return Ok(cancelled_source_step(
                 progress,
@@ -730,7 +865,7 @@ fn scan_one_source(
                 seen_paths,
             ));
         }
-        let mp4_files = if let Some(root_clip_path) = root_clip_path {
+        let discovered_files = if let Some(root_clip_path) = root_clip_path {
             vec![root_clip_path]
         } else {
             match mp4_files_in_dir(&group_path) {
@@ -743,9 +878,64 @@ fn scan_one_source(
                 }
             }
         };
-        if mp4_files.is_empty() {
-            continue;
+        let mut clips = Vec::with_capacity(discovered_files.len());
+        for file in discovered_files {
+            if let Err(error) = canonicalize_regular_path_within_root(&file, &canonical_source_path)
+            {
+                complete_for_missing = false;
+                push_source_error(summary, &source_path, &error);
+                push_unique_error(&mut source_errors, error);
+                continue;
+            }
+            let candidate = match collect_scan_candidate(file, &mut identity_diagnostics) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    complete_for_missing = false;
+                    push_source_error(summary, &source_path, &error);
+                    push_unique_error(&mut source_errors, error);
+                    continue;
+                }
+            };
+            seen_paths.insert(candidate.normalized_path.clone());
+            let db::StageScanReconnectCandidateOutcome::Staged(candidate_id) =
+                db::stage_scan_reconnect_candidate(
+                    connection,
+                    candidate.stage_input(source_dir.id),
+                )?;
+            clips.push((candidate.path, candidate_id));
         }
+        if !clips.is_empty() {
+            scan_groups.push(AclosScanGroup {
+                path: group_path,
+                name: group_name,
+                clips,
+            });
+        }
+    }
+    if runtime.is_cancelled() {
+        return Ok(cancelled_source_step(
+            progress,
+            &source_name,
+            source_path,
+            Some(source_dir.id),
+            seen_paths,
+        ));
+    }
+    db::finalize_scan_reconnect_plan(connection, source_dir.id)?;
+
+    for group in scan_groups {
+        if runtime.is_cancelled() {
+            return Ok(cancelled_source_step(
+                progress,
+                &source_name,
+                source_path,
+                Some(source_dir.id),
+                seen_paths,
+            ));
+        }
+        let group_path = group.path;
+        let group_name = group.name;
+        let staged_clips = group.clips;
 
         let clip_group = match db::upsert_clip_group(
             connection,
@@ -765,8 +955,15 @@ fn scan_one_source(
         };
         summary.clip_group_count += 1;
 
-        let cover_paths = match find_cover_jpegs(&group_path) {
-            Ok(paths) => paths,
+        let cover_paths = match find_cover_jpegs(&group_path, &canonical_source_path) {
+            Ok(discovery) => {
+                for error in discovery.warnings {
+                    complete_for_missing = false;
+                    push_source_error(summary, &source_path, &error);
+                    push_unique_error(&mut source_errors, error);
+                }
+                discovery.paths
+            }
             Err(error) => {
                 complete_for_missing = false;
                 push_source_error(summary, &source_path, &error);
@@ -774,9 +971,9 @@ fn scan_one_source(
                 Vec::new()
             }
         };
-        let clip_count = mp4_files.len();
+        let clip_count = staged_clips.len();
 
-        for (clip_index, clip_path) in mp4_files.iter().enumerate() {
+        for (clip_index, (clip_path, candidate_id)) in staged_clips.iter().enumerate() {
             if runtime.is_cancelled() {
                 return Ok(cancelled_source_step(
                     progress,
@@ -786,12 +983,16 @@ fn scan_one_source(
                     seen_paths,
                 ));
             }
-            let clip_metadata = match fs::metadata(clip_path) {
-                Ok(metadata) => metadata,
+            let decision = match db::resolve_scan_reconnect_candidate(
+                connection,
+                source_dir.id,
+                *candidate_id,
+            ) {
+                Ok(decision) => decision,
                 Err(error) => {
                     complete_for_missing = false;
                     let error = format!(
-                        "Failed to read clip metadata {}: {error}",
+                        "Failed to resolve clip reconnect plan {}: {error}",
                         path_to_string(clip_path)
                     );
                     push_source_error(summary, &source_path, &error);
@@ -799,13 +1000,20 @@ fn scan_one_source(
                     continue;
                 }
             };
-            let video_path = path_to_string(clip_path);
-            let normalized_path = db::normalize_path(&video_path);
-            let modified_time = clip_metadata.modified().ok();
-            let modified_at = modified_time.map(format_system_time);
-            let modified_at_unix =
-                modified_time.and_then(|time| system_time_unix_seconds(time).ok());
-            let file_name = path_file_name(clip_path);
+            let current = match revalidate_staged_candidate(
+                decision.candidate(),
+                &mut identity_diagnostics,
+            ) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    complete_for_missing = false;
+                    push_source_error(summary, &source_path, &error);
+                    push_unique_error(&mut source_errors, error);
+                    continue;
+                }
+            };
+            let modified_at_unix = current.modified_at.parse::<i64>().ok();
+            let file_name = current.file_name.clone();
             let selected_metadata = select_video_export_metadata(&parsed_configs, modified_at_unix);
             let cover_path = select_cover_for_clip(clip_path, &cover_paths, clip_index, clip_count);
             let cover_path_string = cover_path.map(path_to_string);
@@ -815,22 +1023,30 @@ fn scan_one_source(
                 "missing"
             };
 
-            let saved = match db::upsert_scanned_clip(
+            let saved = match persist_aclos_scan_candidate(
                 connection,
+                &source_dir,
+                decision,
+                &current,
                 ClipInput {
                     source_dir_id: source_dir.id,
                     clip_group_id: Some(clip_group.id),
-                    video_path: &video_path,
+                    video_path: &current.file_path,
                     file_name: &file_name,
-                    file_size: clip_metadata.len().min(i64::MAX as u64) as i64,
-                    modified_at: modified_at.as_deref(),
+                    file_size: current.size_bytes,
+                    modified_at: Some(&current.modified_at),
                     duration_ms: None,
                     recorded_at: None,
                     cover_path: cover_path_string.as_deref(),
                     cover_source,
                 },
+                summary,
+                &source_path,
+                &mut source_errors,
+                &mut complete_for_missing,
             ) {
-                Ok(saved) => saved,
+                Ok(Some(saved)) => saved,
+                Ok(None) => continue,
                 Err(error) => {
                     complete_for_missing = false;
                     push_source_error(summary, &source_path, &error);
@@ -838,7 +1054,6 @@ fn scan_one_source(
                     continue;
                 }
             };
-            seen_paths.insert(normalized_path);
             match saved.outcome {
                 ClipSaveOutcome::Inserted => summary.new_clip_count += 1,
                 ClipSaveOutcome::Updated => summary.updated_clip_count += 1,
@@ -919,7 +1134,7 @@ fn scan_one_source(
         ));
     }
     if source_errors.is_empty() {
-        db::mark_source_dir_scanned(connection, source_dir.id)?;
+        db::mark_source_dir_scan_succeeded(connection, source_dir.id)?;
     } else {
         db::mark_source_dir_scan_error(
             connection,
@@ -933,9 +1148,111 @@ fn scan_one_source(
         source_path,
         source_id: Some(source_dir.id),
         accessible: true,
+        metadata_eligible: true,
         complete_for_missing,
         seen_paths,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_aclos_scan_candidate(
+    connection: &Connection,
+    source: &db::SourceDir,
+    decision: db::ScanReconnectDecision,
+    current: &CollectedScanCandidate,
+    input: ClipInput<'_>,
+    summary: &mut ScanSummary,
+    source_path: &Path,
+    source_errors: &mut Vec<String>,
+    complete_for_missing: &mut bool,
+) -> DbResult<Option<db::SavedClip>> {
+    if concrete_file_identity_changed(decision.candidate().file_identity, current.file_identity) {
+        let error = format!(
+            "Deferred MP4 whose stable identity changed after planning: {}",
+            current.path.display()
+        );
+        *complete_for_missing = false;
+        push_source_error(summary, source_path, &error);
+        push_unique_error(source_errors, error);
+        return Ok(None);
+    }
+    let reconnect = match decision {
+        db::ScanReconnectDecision::ExistingPath { .. } | db::ScanReconnectDecision::New(_) => None,
+        db::ScanReconnectDecision::NewWithWarning { warning, .. } => {
+            let skip_candidate = matches!(
+                warning.kind,
+                db::ScanReconnectWarningKind::ForeignPathOwner
+                    | db::ScanReconnectWarningKind::NormalizedPathConflict
+            );
+            record_aclos_reconnect_warning(
+                summary,
+                source_path,
+                source_errors,
+                complete_for_missing,
+                warning,
+            );
+            if skip_candidate {
+                return Ok(None);
+            }
+            None
+        }
+        db::ScanReconnectDecision::Reconnect(planned) => {
+            (current.file_identity == planned.candidate.file_identity).then_some(planned)
+        }
+    };
+
+    if let Some(planned) = reconnect {
+        match db::apply_planned_scan_reconnect(connection, &planned, input, current.file_identity)?
+        {
+            db::ApplyScanReconnectOutcome::Reconnected(saved) => return Ok(Some(*saved)),
+            db::ApplyScanReconnectOutcome::OldPathPresent => {}
+            db::ApplyScanReconnectOutcome::OldPathUnverifiable(error) => {
+                let error = format!(
+                    "Old clip path could not be verified before reconnecting {}: {error}",
+                    current.path.display()
+                );
+                *complete_for_missing = false;
+                push_source_error(summary, source_path, &error);
+                push_unique_error(source_errors, error);
+            }
+            db::ApplyScanReconnectOutcome::StalePlan => {
+                let error = format!(
+                    "Reconnect plan became stale before indexing {}",
+                    current.path.display()
+                );
+                *complete_for_missing = false;
+                push_source_error(summary, source_path, &error);
+                push_unique_error(source_errors, error);
+            }
+        }
+    }
+
+    let normalized_path = db::normalize_path(input.video_path);
+    if let Some(owner_id) =
+        db::find_clip_source_id_by_normalized_path(connection, &normalized_path)?
+    {
+        if owner_id != source.id {
+            return Err(format!(
+                "Skipped MP4 already owned by source {owner_id}: {}",
+                input.video_path
+            ));
+        }
+    }
+    db::upsert_scanned_clip_with_file_identity(connection, input, current.file_identity).map(Some)
+}
+
+fn record_aclos_reconnect_warning(
+    summary: &mut ScanSummary,
+    source_path: &Path,
+    source_errors: &mut Vec<String>,
+    complete_for_missing: &mut bool,
+    warning: db::ScanReconnectWarning,
+) {
+    if warning.kind.blocks_missing_reconciliation() {
+        *complete_for_missing = false;
+    }
+    push_source_error(summary, source_path, &warning.message);
+    push_unique_error(source_errors, warning.message);
 }
 
 fn cancelled_source_step(
@@ -950,6 +1267,7 @@ fn cancelled_source_step(
         source_path,
         source_id,
         accessible: true,
+        metadata_eligible: true,
         complete_for_missing: false,
         seen_paths,
     })
@@ -1136,6 +1454,15 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
             .is_some_and(|remainder| remainder.starts_with('/'))
 }
 
+fn scan_root_for_source(requested_roots: &[PathBuf], source_path: &Path) -> PathBuf {
+    requested_roots
+        .iter()
+        .filter(|root| path_is_within(source_path, root))
+        .max_by_key(|root| scan_path_key(root).len())
+        .cloned()
+        .unwrap_or_else(|| source_path.to_path_buf())
+}
+
 fn metadata_scan_root_for_source(source_path: &Path) -> PathBuf {
     source_path
         .parent()
@@ -1228,6 +1555,11 @@ fn run_metadata_ingest(
                 ingest_summary.matched_video_count.min(i64::MAX as usize) as i64;
             summary.metadata_event_count +=
                 ingest_summary.event_count.min(i64::MAX as usize) as i64;
+            summary.metadata_warning_count +=
+                ingest_summary.warning_count.min(i64::MAX as usize) as i64;
+            for warning in ingest_summary.warnings {
+                summary.push_error(warning);
+            }
         }
         Err(error) => {
             summary.metadata_warning_count += 1;
@@ -1506,20 +1838,49 @@ fn mp4_files_in_dir(path: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-fn find_cover_jpegs(path: &Path) -> Result<Vec<PathBuf>, String> {
-    let covers = read_sorted_entries(path)?
-        .into_iter()
-        .filter(|entry| entry.is_file())
-        .filter(|entry| {
-            entry
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("cover-"))
-                && has_extension(entry, "jpeg")
-        })
-        .collect::<Vec<_>>();
+fn find_cover_jpegs(
+    path: &Path,
+    canonical_source_root: &Path,
+) -> Result<CoverJpegDiscovery, String> {
+    let mut paths = Vec::new();
+    let mut warnings = Vec::new();
+    for entry in read_sorted_entries(path)? {
+        let is_cover_name = entry
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("cover-"))
+            && has_extension(&entry, "jpeg");
+        if !is_cover_name {
+            continue;
+        }
 
-    Ok(covers)
+        let metadata = match fs::symlink_metadata(&entry) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                warnings.push(format!(
+                    "Failed to inspect cover candidate {}: {error}",
+                    entry.display()
+                ));
+                continue;
+            }
+        };
+        if metadata_is_reparse_point(&metadata) {
+            warnings.push(format!(
+                "Skipped cover symbolic link or reparse point: {}",
+                entry.display()
+            ));
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        match canonicalize_regular_path_within_root(&entry, canonical_source_root) {
+            Ok(_) => paths.push(entry),
+            Err(error) => warnings.push(format!("Skipped unsafe cover candidate: {error}")),
+        }
+    }
+
+    Ok(CoverJpegDiscovery { paths, warnings })
 }
 
 fn select_cover_for_clip<'a>(
@@ -1677,6 +2038,7 @@ mod tests {
 
         let summary = crate::scanner::scan_directory(&connection, root).expect("scan should run");
         let clips = db::list_clips(&connection).expect("clips should list");
+        let sources = db::list_sources(&connection).expect("sources should list");
 
         assert_eq!(summary.source_dir_count, 1);
         assert_eq!(summary.clip_group_count, 2);
@@ -1685,9 +2047,15 @@ mod tests {
         assert_eq!(summary.missing_clip_count, 0);
         assert_eq!(summary.cover_missing_count, 1);
         assert!(summary.errors.is_empty());
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source_kind, db::SourceKind::Aclos);
+        assert_eq!(sources[0].scan_mode, db::ScanMode::AclosStructured);
+        assert_eq!(sources[0].scan_root_path, super::path_to_string(root));
         assert_eq!(clips.len(), 2);
         assert!(clips.iter().any(|clip| {
             clip.file_name == "ace.mp4"
+                && clip.source_relative_dir
+                    == "wonderfulVideos-main/11111111-1111-1111-1111-111111111111"
                 && clip.cover_source == "file"
                 && clip
                     .cover_path
@@ -1702,6 +2070,241 @@ mod tests {
                 && clip.cover_path.is_none()
                 && clip.status == "available"
         }));
+    }
+
+    #[test]
+    fn aclos_group_rename_reconnects_the_clip_without_losing_user_state() {
+        let fixture = TestFixture::new("aclos-group-rename");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let old_group = source.join("11111111-1111-1111-1111-111111111111");
+        let new_group = source.join("22222222-2222-2222-2222-222222222222");
+        fs::create_dir_all(&old_group).expect("old group should be created");
+        fs::write(old_group.join("ace.mp4"), b"same-aclos-file").expect("clip should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        let first = crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        assert_eq!(first.new_clip_count, 1);
+        let initial = db::list_clips(&connection).unwrap().pop().unwrap();
+        db::update_clip_note(&connection, initial.id, Some("keep-aclos-note")).unwrap();
+        db::set_clip_review_decision(&connection, initial.id, db::ReviewDecision::Liked).unwrap();
+        let tag = db::create_tag(&connection, "keep-aclos-tag", None).unwrap();
+        db::assign_tag_to_clip(&connection, initial.id, tag.id).unwrap();
+        db::upsert_clip_metadata(
+            &connection,
+            db::ClipMetadataInput {
+                clip_id: initial.id,
+                metadata_status: "parsed",
+                json_path: None,
+                account_name: Some("keep-aclos-account"),
+                player_name: Some("keep-aclos-player"),
+                agent_name: Some("Jett"),
+                map_name: Some("Ascent"),
+                game_mode: Some("ranked"),
+                scoreline: Some("13-9"),
+                kda: Some("20/10/4"),
+                extracted_text: Some("keep-aclos-metadata"),
+                parse_error: None,
+            },
+        )
+        .unwrap();
+        db::ensure_clip_thumbnails(&connection, &[initial.id]).unwrap();
+        let old_thumbnail_job = db::claim_next_thumbnail_job(&connection, "2099-01-01T00:00:00Z")
+            .unwrap()
+            .expect("thumbnail should be claimed before reconnecting");
+
+        fs::rename(&old_group, &new_group).expect("group directory should be renamed");
+        let second = crate::scanner::scan_directory(&connection, root)
+            .expect("renamed group should scan safely");
+        assert_eq!(second.new_clip_count, 0);
+        assert_eq!(second.updated_clip_count, 1);
+        assert!(second.errors.is_empty());
+        let clips = db::list_clips(&connection).unwrap();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].id, initial.id);
+        assert_eq!(clips[0].note.as_deref(), Some("keep-aclos-note"));
+        assert!(clips[0].favorite);
+        assert_eq!(clips[0].review_decision, db::ReviewDecision::Liked);
+        assert_eq!(clips[0].account_name.as_deref(), Some("keep-aclos-account"));
+        assert_eq!(clips[0].player_name.as_deref(), Some("keep-aclos-player"));
+        assert_eq!(clips[0].agent_name.as_deref(), Some("Jett"));
+        assert!(clips[0]
+            .source_relative_dir
+            .ends_with("22222222-2222-2222-2222-222222222222"));
+        let detail = db::find_clip_detail_by_id(&connection, initial.id)
+            .unwrap()
+            .expect("clip should remain addressable");
+        assert_eq!(
+            detail.tags.iter().map(|tag| tag.id).collect::<Vec<_>>(),
+            vec![tag.id]
+        );
+        let stale_cache = format!(
+            "{}-{}.jpg",
+            old_thumbnail_job.clip_id, old_thumbnail_job.fingerprint
+        );
+        assert!(!db::complete_thumbnail_job_if_current(
+            &connection,
+            &old_thumbnail_job,
+            &stale_cache,
+            10,
+            &old_thumbnail_job.fingerprint,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn aclos_source_wide_staging_does_not_merge_ambiguous_hardlinks() {
+        let fixture = TestFixture::new("aclos-hardlink-ambiguity");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let old_group = source.join("old");
+        let old_path = old_group.join("same.mp4");
+        fs::create_dir_all(&old_group).unwrap();
+        fs::write(&old_path, b"shared-aclos-identity").unwrap();
+
+        let connection = Connection::open_in_memory().unwrap();
+        db::initialize_schema(&connection).unwrap();
+        crate::scanner::scan_directory(&connection, root).unwrap();
+        let old_clip_id = db::list_clips(&connection).unwrap()[0].id;
+
+        let first_group = source.join("new-a");
+        let second_group = source.join("new-b");
+        fs::create_dir_all(&first_group).unwrap();
+        fs::create_dir_all(&second_group).unwrap();
+        fs::hard_link(&old_path, first_group.join("same.mp4")).unwrap();
+        fs::hard_link(&old_path, second_group.join("same.mp4")).unwrap();
+        fs::remove_file(&old_path).unwrap();
+
+        let summary = crate::scanner::scan_directory(&connection, root).unwrap();
+        let clips = db::list_clips(&connection).unwrap();
+        assert_eq!(summary.new_clip_count, 2);
+        assert_eq!(summary.missing_clip_count, 1);
+        assert_eq!(clips.len(), 3);
+        assert!(clips
+            .iter()
+            .any(|clip| clip.id == old_clip_id && clip.status == "missing"));
+        assert_eq!(
+            clips
+                .iter()
+                .filter(|clip| clip.status == "available")
+                .count(),
+            2
+        );
+        assert!(summary.errors.iter().any(|error| {
+            error.contains("not unique on both sides")
+                || error.contains("indexed without reconnecting")
+        }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aclos_scan_rejects_file_and_directory_reparse_points() {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+
+        let fixture = TestFixture::new("aclos-reparse");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let outside = root.join("outside");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let outside_clip = outside.join("outside.mp4");
+        fs::write(&outside_clip, b"outside").unwrap();
+        if let Err(error) = symlink_file(&outside_clip, source.join("linked.mp4")) {
+            eprintln!("skipping ACLOS reparse assertion because symlinks are unavailable: {error}");
+            return;
+        }
+        if let Err(error) = symlink_dir(&outside, source.join("linked-group")) {
+            eprintln!("directory symlink unavailable; file assertion still runs: {error}");
+        }
+
+        let connection = Connection::open_in_memory().unwrap();
+        db::initialize_schema(&connection).unwrap();
+        let summary = crate::scanner::scan_directory(&connection, root).unwrap();
+        assert!(db::list_clips(&connection).unwrap().is_empty());
+        assert!(summary
+            .errors
+            .iter()
+            .any(|error| error.contains("reparse point")));
+    }
+
+    #[test]
+    fn aclos_sync_rejects_a_source_outside_its_registered_scan_root() {
+        let fixture = TestFixture::new("aclos-outside-root");
+        let authorized_root = fixture.path().join("authorized");
+        let source = fixture.path().join("outside/wonderfulVideos-main");
+        let group = source.join("match-a");
+        fs::create_dir_all(&authorized_root).unwrap();
+        fs::create_dir_all(&group).unwrap();
+        fs::write(group.join("outside.mp4"), b"outside").unwrap();
+
+        let connection = Connection::open_in_memory().unwrap();
+        db::initialize_schema(&connection).unwrap();
+        let source_path_string = super::path_to_string(&source);
+        let authorized_root_string = super::path_to_string(&authorized_root);
+        let registered = db::register_source_dir(
+            &connection,
+            db::SourceDirInput {
+                path: &source_path_string,
+                name: "wonderfulVideos-main",
+            },
+            db::SourceProfileInput::aclos(&authorized_root_string),
+            true,
+        )
+        .unwrap();
+
+        let summary = crate::scanner::sync_scan_sources(&connection, &[registered.id]).unwrap();
+        assert!(db::list_clips(&connection).unwrap().is_empty());
+        assert!(summary
+            .errors
+            .iter()
+            .any(|error| { error.contains("outside its authorized scan root") }));
+        let source_after = db::find_source_dir_by_id(&connection, registered.id).unwrap();
+        assert_eq!(source_after.status, "unavailable");
+        assert_eq!(source_after.last_scanned_at, None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aclos_cover_discovery_does_not_follow_file_or_directory_reparse_points() {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+
+        let fixture = TestFixture::new("aclos-cover-reparse");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos-main");
+        let group = source.join("match-a");
+        let outside = root.join("outside");
+        fs::create_dir_all(&group).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(group.join("clip.mp4"), b"inside-clip").unwrap();
+        let outside_cover = outside.join("outside.jpeg");
+        fs::write(&outside_cover, b"outside-cover").unwrap();
+        if let Err(error) = symlink_file(&outside_cover, group.join("cover-clip.jpeg")) {
+            eprintln!("skipping cover reparse assertion because symlinks are unavailable: {error}");
+            return;
+        }
+        let directory_link_created =
+            symlink_dir(&outside, group.join("cover-linked-directory.jpeg")).is_ok();
+
+        let connection = Connection::open_in_memory().unwrap();
+        db::initialize_schema(&connection).unwrap();
+        let summary = crate::scanner::scan_directory(&connection, root).unwrap();
+        let clips = db::list_clips(&connection).unwrap();
+
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].file_name, "clip.mp4");
+        assert_eq!(clips[0].cover_source, "missing");
+        assert!(clips[0].cover_path.is_none());
+        assert_eq!(fs::read(&outside_cover).unwrap(), b"outside-cover");
+        assert!(summary
+            .errors
+            .iter()
+            .any(|error| error.contains("cover-clip.jpeg") && error.contains("reparse point")));
+        if directory_link_created {
+            assert!(summary.errors.iter().any(|error| {
+                error.contains("cover-linked-directory.jpeg") && error.contains("reparse point")
+            }));
+        }
     }
 
     #[test]
@@ -1764,6 +2367,12 @@ mod tests {
         assert!(listed_sources
             .iter()
             .all(|source| source.status == "available" && source.clip_count == 1));
+        assert!(listed_sources.iter().all(|source| {
+            source
+                .last_scan_at
+                .as_deref()
+                .is_some_and(|timestamp| timestamp.ends_with('Z') && timestamp.contains('T'))
+        }));
     }
 
     #[test]
@@ -1882,6 +2491,15 @@ mod tests {
         let connection = fixture.open();
         crate::scanner::scan_roots(&connection, std::slice::from_ref(&unavailable_source))
             .expect("initial source scan should run");
+        let initial_unavailable_last_scan = db::list_sources(&connection)
+            .expect("initial source should list")
+            .into_iter()
+            .find(|source| {
+                super::scan_path_key(Path::new(&source.path))
+                    == super::scan_path_key(&unavailable_source)
+            })
+            .and_then(|source| source.last_scan_at)
+            .expect("initial complete scan should set freshness");
         connection
             .execute("DELETE FROM scan_runs", [])
             .expect("initial scan run should be cleared for batch assertion");
@@ -1926,8 +2544,17 @@ mod tests {
         assert_eq!(scan_status, "partial");
         assert_eq!(unavailable.status, "unavailable");
         assert!(unavailable.last_error.is_some());
+        assert_eq!(
+            unavailable.last_scan_at.as_deref(),
+            Some(initial_unavailable_last_scan.as_str()),
+            "partial jobs must preserve the prior freshness timestamp",
+        );
         assert_eq!(unavailable.clip_count, 1);
         assert_eq!(available.status, "available");
+        assert_eq!(
+            available.last_scan_at, None,
+            "a successful source inside an overall partial job must not look fresh",
+        );
         assert_eq!(available.clip_count, 1);
         assert_eq!(clips.len(), 2);
         assert!(clips
@@ -3018,6 +3645,108 @@ mod tests {
     }
 
     #[test]
+    fn wonderful_timeline_warnings_make_the_scan_partial_and_block_freshness() {
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        let openid = "warning-account";
+        let match_id = "warning-match";
+        let video_path = "D:\\wonderfulVideoswarning-account\\warning-match\\clip.mp4";
+        let source = db::upsert_source_dir(
+            &connection,
+            db::SourceDirInput {
+                path: "D:\\wonderfulVideoswarning-account",
+                name: "wonderfulVideoswarning-account",
+            },
+        )
+        .expect("source should seed");
+        let group = db::upsert_clip_group(
+            &connection,
+            db::ClipGroupInput {
+                source_dir_id: source.id,
+                group_key: match_id,
+                display_name: match_id,
+            },
+        )
+        .expect("group should seed");
+        db::upsert_clip(
+            &connection,
+            db::ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: Some(group.id),
+                video_path,
+                file_name: "clip.mp4",
+                file_size: 1,
+                modified_at: None,
+                duration_ms: Some(10_000),
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+        )
+        .expect("clip should seed");
+        let metadata = super::CachedMetadataIngest {
+            leveldb_result: Default::default(),
+            log_result: Default::default(),
+            wonderful_result: crate::wonderful_db::WonderfulDbReadResult {
+                accounts: vec![crate::wonderful_db::WonderfulAccountRecord {
+                    openid: openid.to_string(),
+                    matches: vec![crate::wonderful_db::WonderfulMatchRecord {
+                        match_id: match_id.to_string(),
+                        videos: vec![crate::wonderful_db::WonderfulVideoRecord {
+                            video_id: "clip".to_string(),
+                            video_name: "击杀集锦".to_string(),
+                            video_type: "2".to_string(),
+                            highlight_type: Some(2),
+                            video_src: Some(video_path.to_string()),
+                            round_score: None,
+                            segments: vec![crate::wonderful_db::WonderfulSegmentRecord {
+                                segment_id: "segment".to_string(),
+                                round_id: Some(1),
+                                clip_start_ms: Some(0),
+                                clip_end_ms: Some(10_000),
+                                events: vec![crate::wonderful_db::WonderfulEventRecord {
+                                    event_id: "outside".to_string(),
+                                    event_type: "kill".to_string(),
+                                    video_time_ms: Some(20_000),
+                                    event_time: None,
+                                    round_id: Some(1),
+                                    player_name: None,
+                                    agent_name: None,
+                                    weapon_name: None,
+                                    killer_name: None,
+                                    killed_name: None,
+                                    killer_is_me: true,
+                                    killed_is_me: Some(false),
+                                    normalization_warnings: Vec::new(),
+                                    raw_json: "{}".to_string(),
+                                }],
+                            }],
+                        }],
+                        ..Default::default()
+                    }],
+                }],
+                ..Default::default()
+            },
+            local_account_hint_scope: None,
+            errors: Vec::new(),
+        };
+        let mut summary = super::ScanSummary::empty("D:/".to_string());
+
+        super::run_metadata_ingest(&connection, &mut summary, &metadata, None);
+
+        assert_eq!(summary.metadata_warning_count, 1);
+        assert!(summary
+            .errors
+            .iter()
+            .any(|warning| warning.contains("video-time-out-of-bounds")));
+        assert_eq!(
+            super::completed_status(&summary),
+            super::ScanExecutionStatus::Partial,
+            "metadata warnings must prevent lastScanAt from being refreshed",
+        );
+    }
+
+    #[test]
     fn scan_directory_returns_empty_summary_when_root_is_missing() {
         let fixture = TestFixture::new("missing-root");
         let missing_root = fixture.path().join("does-not-exist");
@@ -3242,6 +3971,17 @@ mod tests {
             "cancelled"
         );
         assert_eq!(running_scan_run_count(&connection), 0);
+        let cancelled_source = db::list_sources(&connection)
+            .expect("cancelled source should list")
+            .into_iter()
+            .find(|candidate| {
+                super::scan_path_key(Path::new(&candidate.path)) == super::scan_path_key(&source)
+            })
+            .expect("cancelled source should remain");
+        assert_eq!(
+            cancelled_source.last_scan_at, None,
+            "cancellation at finalization must not set freshness",
+        );
     }
 
     #[test]

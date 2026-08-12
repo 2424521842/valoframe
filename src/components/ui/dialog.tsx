@@ -6,13 +6,26 @@ import { cn } from "../../lib/classNames";
 export const UiDialog = DialogPrimitive.Root;
 export const UiDialogTrigger = DialogPrimitive.Trigger;
 
-export function UiDialogContent({ className, children, ...props }: ComponentProps<typeof DialogPrimitive.Content>) {
+type UiDialogContentProps = ComponentProps<typeof DialogPrimitive.Content> & {
+  closeDisabled?: boolean;
+};
+
+export function UiDialogContent({
+  className,
+  children,
+  closeDisabled = false,
+  ...props
+}: UiDialogContentProps) {
   return (
     <DialogPrimitive.Portal>
       <DialogPrimitive.Overlay className="ui-dialog-overlay" />
       <DialogPrimitive.Content className={cn("ui-dialog-content", className)} {...props}>
         {children}
-        <DialogPrimitive.Close aria-label="关闭" className="ui-dialog-close">
+        <DialogPrimitive.Close
+          aria-label="关闭"
+          className="ui-dialog-close"
+          disabled={closeDisabled}
+        >
           <X weight="bold" />
         </DialogPrimitive.Close>
       </DialogPrimitive.Content>

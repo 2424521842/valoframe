@@ -18,6 +18,10 @@ import type { BackendClip, BackendClipSummary, BackendSource, BackendTag, ScanSu
 const backendClip: BackendClip = {
   id: 42,
   sourceDirId: 7,
+  sourceKind: "aclos",
+  scanMode: "aclos-structured",
+  scanRootPath: "C:\\Users\\Player\\AppData\\ACLOS\\aclos-highlight",
+  sourceRelativeDir: "wonderfulVideos-main/group-a",
   clipGroupId: 3,
   clipGroupName: "2026-07-02 22:34",
   videoPath:
@@ -34,6 +38,8 @@ const backendClip: BackendClip = {
   coverSource: "missing",
   status: "available",
   favorite: true,
+  reviewDecision: "liked",
+  reviewedAt: "2026-06-28T08:12:00Z",
   note: "1v3 clutch",
   extractedText: "ACE highlight transcript",
   accountIdentityKey: "match-account-1001",
@@ -70,6 +76,7 @@ const backendClip: BackendClip = {
       killerName: "FixtureAlpha#0001",
       killedName: "Opponent#0001",
       killerIsMe: true,
+      killedIsMe: false,
     },
   ],
   tagIds: [1, 2],
@@ -79,6 +86,9 @@ const backendSource: BackendSource = {
   id: 7,
   path: "D:\\Direct Clips",
   displayName: "wonderfulVideos-main",
+  sourceKind: "aclos",
+  scanMode: "aclos-structured",
+  scanRootPath: "D:\\Direct Clips",
   enabled: true,
   status: "available",
   accessibility: true,
@@ -111,6 +121,10 @@ test("maps backend clips into the frontend clip contract", () => {
   assert.equal(clip.sourceDirId, "7");
   assert.equal(clip.sourceDirName, "wonderfulVideos-main");
   assert.equal(clip.sourceDirPath, "D:\\Direct Clips");
+  assert.equal(clip.sourceKind, "aclos");
+  assert.equal(clip.scanMode, "aclos-structured");
+  assert.equal(clip.scanRootPath, "D:\\Direct Clips");
+  assert.equal(clip.sourceRelativeDir, "wonderfulVideos-main/group-a");
   assert.equal(clip.clipGroupId, "3");
   assert.equal(clip.clipGroupName, "2026-07-02 22:34");
   assert.equal(clip.accountDisplayName, "FixtureAlpha#0001");
@@ -148,6 +162,7 @@ test("maps backend clips into the frontend clip contract", () => {
       killerName: "FixtureAlpha#0001",
       killedName: "Opponent#0001",
       killerIsMe: true,
+      killedIsMe: false,
     },
   ]);
   assert.deepEqual(Object.keys(clip).filter((key) => key.endsWith("Events")), ["clipEvents"]);
@@ -155,6 +170,8 @@ test("maps backend clips into the frontend clip contract", () => {
   assert.equal(clip.durationMs, null);
   assert.equal(clip.modifiedAt, "2026-06-28T08:11:12.000Z");
   assert.equal(clip.isFavorite, true);
+  assert.equal(clip.reviewDecision, "liked");
+  assert.equal(clip.reviewedAt, "2026-06-28T08:12:00.000Z");
   assert.equal(clip.isMissing, false);
   assert.equal(clip.fileStatus, "available");
   assert.deepEqual(clip.tags, ["1", "2"]);
@@ -191,6 +208,10 @@ test("maps list payloads without retaining detail-only note, OCR, or event field
     sourceDirId: backendClip.sourceDirId,
     sourceDirPath: backendSource.path,
     sourceDirName: backendSource.displayName,
+    sourceKind: backendClip.sourceKind,
+    scanMode: backendClip.scanMode,
+    scanRootPath: backendClip.scanRootPath,
+    sourceRelativeDir: backendClip.sourceRelativeDir,
     clipGroupId: backendClip.clipGroupId,
     clipGroupName: backendClip.clipGroupName,
     videoPath: backendClip.videoPath,
@@ -205,6 +226,8 @@ test("maps list payloads without retaining detail-only note, OCR, or event field
     thumbnailRevision: "summary-rev",
     status: backendClip.status,
     favorite: backendClip.favorite,
+    reviewDecision: backendClip.reviewDecision,
+    reviewedAt: backendClip.reviewedAt,
     accountIdentityKey: backendClip.accountIdentityKey,
     accountIdentitySource: backendClip.accountIdentitySource,
     accountDisplayName: backendClip.accountDisplayName,
@@ -235,6 +258,12 @@ test("maps list payloads without retaining detail-only note, OCR, or event field
 
   assert.equal(summary.sourceDirName, "wonderfulVideos-main");
   assert.equal(summary.sourceDirPath, backendSource.path);
+  assert.equal(summary.sourceKind, "aclos");
+  assert.equal(summary.scanMode, "aclos-structured");
+  assert.equal(summary.scanRootPath, backendClip.scanRootPath);
+  assert.equal(summary.sourceRelativeDir, "wonderfulVideos-main/group-a");
+  assert.equal(summary.reviewDecision, "liked");
+  assert.equal(summary.reviewedAt, "2026-06-28T08:12:00.000Z");
   assert.equal(summary.thumbnailStatus, "ready");
   assert.equal(summary.thumbnailRevision, "summary-rev");
   assert.match(summary.thumbnailUrl ?? "", /cover\/42\?v=summary-rev$/);
@@ -266,6 +295,7 @@ test("maps official WonderfulDb metadata", () => {
         killerName: "Tester",
         killedName: "Enemy",
         killerIsMe: true,
+        killedIsMe: true,
       },
     ],
   });
@@ -287,6 +317,7 @@ test("maps official WonderfulDb metadata", () => {
       killerName: "Tester",
       killedName: "Enemy",
       killerIsMe: true,
+      killedIsMe: true,
     },
   ]);
 });
@@ -404,6 +435,9 @@ test("maps source DTOs without requiring clips, including zero-clip sources", ()
     name: "wonderfulVideos-main",
     displayName: "wonderfulVideos-main",
     path: "D:\\Direct Clips",
+    sourceKind: "aclos",
+    scanMode: "aclos-structured",
+    scanRootPath: "D:\\Direct Clips",
     enabled: true,
     status: "available",
     accessibility: true,

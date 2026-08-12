@@ -1,6 +1,128 @@
 //! Database input and output contracts.
 
+use std::io;
+
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceKind {
+    #[default]
+    Aclos,
+    Nvidia,
+    Tracker,
+    Generic,
+}
+
+impl SourceKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Aclos => "aclos",
+            Self::Nvidia => "nvidia",
+            Self::Tracker => "tracker",
+            Self::Generic => "generic",
+        }
+    }
+
+    pub const fn default_scan_mode(self) -> ScanMode {
+        match self {
+            Self::Aclos => ScanMode::AclosStructured,
+            Self::Nvidia | Self::Tracker | Self::Generic => ScanMode::RecursiveMp4,
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "aclos" => Some(Self::Aclos),
+            "nvidia" => Some(Self::Nvidia),
+            "tracker" => Some(Self::Tracker),
+            "generic" => Some(Self::Generic),
+            _ => None,
+        }
+    }
+}
+
+impl FromSql for SourceKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let value = value.as_str()?;
+        Self::from_str(value).ok_or_else(|| invalid_enum_value("source kind", value))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScanMode {
+    #[default]
+    AclosStructured,
+    RecursiveMp4,
+}
+
+impl ScanMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AclosStructured => "aclos-structured",
+            Self::RecursiveMp4 => "recursive-mp4",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "aclos-structured" => Some(Self::AclosStructured),
+            "recursive-mp4" => Some(Self::RecursiveMp4),
+            _ => None,
+        }
+    }
+}
+
+impl FromSql for ScanMode {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let value = value.as_str()?;
+        Self::from_str(value).ok_or_else(|| invalid_enum_value("scan mode", value))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewDecision {
+    #[default]
+    Unreviewed,
+    Liked,
+    Disliked,
+}
+
+impl ReviewDecision {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreviewed => "unreviewed",
+            Self::Liked => "liked",
+            Self::Disliked => "disliked",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "unreviewed" => Some(Self::Unreviewed),
+            "liked" => Some(Self::Liked),
+            "disliked" => Some(Self::Disliked),
+            _ => None,
+        }
+    }
+}
+
+impl FromSql for ReviewDecision {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let value = value.as_str()?;
+        Self::from_str(value).ok_or_else(|| invalid_enum_value("review decision", value))
+    }
+}
+
+fn invalid_enum_value(kind: &str, value: &str) -> FromSqlError {
+    FromSqlError::Other(Box::new(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("unsupported {kind}: {value}"),
+    )))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -8,6 +130,9 @@ pub struct SourceDir {
     pub id: i64,
     pub path: String,
     pub name: String,
+    pub source_kind: SourceKind,
+    pub scan_mode: ScanMode,
+    pub scan_root_path: String,
     pub enabled: bool,
     pub status: String,
     pub last_error: Option<String>,
@@ -20,6 +145,9 @@ pub struct Source {
     pub id: i64,
     pub path: String,
     pub display_name: String,
+    pub source_kind: SourceKind,
+    pub scan_mode: ScanMode,
+    pub scan_root_path: String,
     pub enabled: bool,
     pub status: String,
     pub accessibility: bool,
@@ -32,6 +160,23 @@ pub struct Source {
 pub struct SourceDirInput<'a> {
     pub path: &'a str,
     pub name: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SourceProfileInput<'a> {
+    pub source_kind: SourceKind,
+    pub scan_mode: ScanMode,
+    pub scan_root_path: &'a str,
+}
+
+impl<'a> SourceProfileInput<'a> {
+    pub const fn aclos(scan_root_path: &'a str) -> Self {
+        Self {
+            source_kind: SourceKind::Aclos,
+            scan_mode: ScanMode::AclosStructured,
+            scan_root_path,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -63,6 +208,10 @@ pub enum AccountIdentitySource {
 pub struct Clip {
     pub id: i64,
     pub source_dir_id: i64,
+    pub source_kind: SourceKind,
+    pub scan_mode: ScanMode,
+    pub scan_root_path: String,
+    pub source_relative_dir: String,
     pub clip_group_id: Option<i64>,
     pub clip_group_name: Option<String>,
     pub video_path: String,
@@ -82,6 +231,8 @@ pub struct Clip {
     pub thumbnail_revision: Option<String>,
     pub status: String,
     pub favorite: bool,
+    pub review_decision: ReviewDecision,
+    pub reviewed_at: Option<String>,
     pub note: Option<String>,
     pub extracted_text: String,
     pub account_identity_key: String,
@@ -169,6 +320,7 @@ pub struct ClipListQuery {
     pub tag_id: Option<i64>,
     pub highlight_filter: Option<HighlightFilter>,
     pub favorite_filter: Option<FavoriteFilter>,
+    pub review_decision: Option<ReviewDecision>,
     pub file_status: Option<String>,
     pub metadata_status: Option<String>,
     pub modified_from: Option<i64>,
@@ -185,6 +337,10 @@ pub struct ClipSummary {
     pub source_dir_id: i64,
     pub source_dir_path: String,
     pub source_dir_name: String,
+    pub source_kind: SourceKind,
+    pub scan_mode: ScanMode,
+    pub scan_root_path: String,
+    pub source_relative_dir: String,
     pub clip_group_id: Option<i64>,
     pub clip_group_name: Option<String>,
     pub video_path: String,
@@ -199,6 +355,8 @@ pub struct ClipSummary {
     pub thumbnail_revision: Option<String>,
     pub status: String,
     pub favorite: bool,
+    pub review_decision: ReviewDecision,
+    pub reviewed_at: Option<String>,
     pub account_identity_key: String,
     pub account_identity_source: AccountIdentitySource,
     pub account_display_name: String,
@@ -235,6 +393,59 @@ pub struct ClipPage {
     pub total_count: i64,
     pub has_more: bool,
     pub next_offset: Option<i64>,
+}
+
+/// Frozen quick-review queue filters. Source and tag values are OR-ed within their own
+/// dimensions and the dimensions are AND-ed together. Account, agent, map, and game mode use the
+/// same optional single-value semantics as [`ClipListQuery`]. Date bounds are inclusive Unix
+/// seconds and apply to the effective recording time (`recorded_at`, then `modified_at`, then
+/// `first_indexed_at`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewQueueQuery {
+    pub source_dir_ids: Option<Vec<i64>>,
+    pub tag_ids: Option<Vec<i64>>,
+    /// Stable `accountIdentityKey`, not a display label.
+    pub account_id: Option<String>,
+    pub agent_name: Option<String>,
+    pub map_name: Option<String>,
+    pub game_mode: Option<String>,
+    pub recorded_from: Option<i64>,
+    pub recorded_to: Option<i64>,
+    pub snapshot_max_clip_id: Option<i64>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewClipPage {
+    pub items: Vec<ClipSummary>,
+    pub snapshot_max_clip_id: i64,
+    pub candidate_count: i64,
+    pub limit: i64,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+}
+
+/// The complete user-owned state changed by a quick-review decision. Returning both sides lets
+/// the current UI session restore the exact previous state, including an older review timestamp
+/// and a favorite value that may have been changed independently after an earlier decision.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipReviewState {
+    pub clip_id: i64,
+    pub review_decision: ReviewDecision,
+    pub reviewed_at: Option<String>,
+    pub favorite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipReviewMutationResult {
+    pub before: ClipReviewState,
+    pub after: ClipReviewState,
+    pub changed: bool,
 }
 
 /// Exact, whole-index facet data. `count` values include every indexed clip, including missing
@@ -336,6 +547,9 @@ pub struct ClipEvent {
     pub killer_name: Option<String>,
     pub killed_name: Option<String>,
     pub killer_is_me: bool,
+    /// v15 stores this as a non-null SQLite boolean. `Option` remains on the staged Rust read
+    /// contract while callers migrate; rows written by v15 always return `Some`.
+    pub killed_is_me: Option<bool>,
     pub raw_json: Option<String>,
     pub created_at: String,
 }
@@ -364,6 +578,7 @@ pub struct ClipEventInput<'a> {
     pub killer_name: Option<&'a str>,
     pub killed_name: Option<&'a str>,
     pub killer_is_me: bool,
+    pub killed_is_me: Option<bool>,
     pub raw_json: Option<&'a str>,
 }
 

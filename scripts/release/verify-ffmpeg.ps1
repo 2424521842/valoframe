@@ -436,46 +436,55 @@ foreach ($kind in $capabilityCommands.Keys) {
     }
 }
 
-$fixture = $manifest.runtimeContract.smokeFixture
-Assert-Condition -Condition ([string]$fixture.encoding -ceq 'base64') -Message 'Unsupported FFmpeg smoke fixture encoding.'
-try {
-    $fixtureBytes = [Convert]::FromBase64String([string]$fixture.base64)
-}
-catch {
-    throw "FFmpeg smoke fixture is not valid base64: $($_.Exception.Message)"
-}
-Assert-Condition -Condition ($fixtureBytes.LongLength -eq [long]$fixture.sizeBytes) -Message 'FFmpeg smoke fixture size does not match the manifest.'
-$fixtureHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($fixtureBytes)).ToLowerInvariant()
-Assert-Condition -Condition ($fixtureHash -ceq [string]$fixture.sha256) -Message 'FFmpeg smoke fixture SHA-256 does not match the manifest.'
-
 $tempRoot = Get-FullNormalizedPath -Path ([System.IO.Path]::GetTempPath())
 $smokeDirectory = Join-Path $tempRoot ("valorant-highlight-manager-ffmpeg-smoke-" + [Guid]::NewGuid().ToString('N'))
 [void][System.IO.Directory]::CreateDirectory($smokeDirectory)
-$inputPath = Join-Path $smokeDirectory 'synthetic.mp4'
-$outputPath = Join-Path $smokeDirectory 'thumbnail.jpg'
 try {
-    [System.IO.File]::WriteAllBytes($inputPath, $fixtureBytes)
-    $smokeArguments = [System.Collections.Generic.List[string]]::new()
-    foreach ($argument in @($manifest.runtimeContract.thumbnailArguments)) {
-        $resolvedArgument = switch ([string]$argument) {
-            '{input}' { $inputPath }
-            '{output}' { $outputPath }
-            default { [string]$argument }
-        }
-        $smokeArguments.Add($resolvedArgument)
+    $smokeFixtures = @($manifest.runtimeContract.smokeFixture)
+    if ($manifest.runtimeContract.PSObject.Properties.Name -contains 'additionalSmokeFixtures') {
+        $smokeFixtures += @($manifest.runtimeContract.additionalSmokeFixtures)
     }
-    Assert-Condition -Condition ($smokeArguments.Contains($inputPath)) -Message 'Thumbnail runtime contract does not reference the smoke input.'
-    Assert-Condition -Condition ($smokeArguments.Contains($outputPath)) -Message 'Thumbnail runtime contract does not reference the smoke output.'
+    Assert-Condition -Condition ($smokeFixtures.Count -ge 1) -Message 'At least one FFmpeg smoke fixture is required.'
+    for ($fixtureIndex = 0; $fixtureIndex -lt $smokeFixtures.Count; $fixtureIndex++) {
+        $fixture = $smokeFixtures[$fixtureIndex]
+        $codecProperty = $fixture.PSObject.Properties['codec']
+        $codec = if ($null -eq $codecProperty -or [string]::IsNullOrWhiteSpace([string]$codecProperty.Value)) { "fixture-$fixtureIndex" } else { [string]$codecProperty.Value }
+        Assert-Condition -Condition ([string]$fixture.encoding -ceq 'base64') -Message "Unsupported $codec FFmpeg smoke fixture encoding."
+        try {
+            $fixtureBytes = [Convert]::FromBase64String([string]$fixture.base64)
+        }
+        catch {
+            throw "$codec FFmpeg smoke fixture is not valid base64: $($_.Exception.Message)"
+        }
+        Assert-Condition -Condition ($fixtureBytes.LongLength -eq [long]$fixture.sizeBytes) -Message "$codec FFmpeg smoke fixture size does not match the manifest."
+        $fixtureHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($fixtureBytes)).ToLowerInvariant()
+        Assert-Condition -Condition ($fixtureHash -ceq [string]$fixture.sha256) -Message "$codec FFmpeg smoke fixture SHA-256 does not match the manifest."
 
-    [void](Invoke-CheckedProcess -Executable $ffmpegFull -Arguments $smokeArguments.ToArray() -TimeoutSeconds $timeoutSeconds -Description 'FFmpeg synthetic MP4-to-JPEG smoke test')
-    $outputItem = Assert-RegularFile -Path $outputPath -Description 'FFmpeg smoke-test JPEG'
-    Assert-Condition -Condition ($outputItem.Length -ge 4) -Message 'FFmpeg smoke-test JPEG is too short.'
-    Assert-Condition -Condition ($outputItem.Length -le [long]$manifest.runtimeContract.maximumOutputBytes) -Message 'FFmpeg smoke-test JPEG exceeds the runtime output limit.'
-    $outputBytes = [System.IO.File]::ReadAllBytes($outputPath)
-    Assert-Condition -Condition ($outputBytes[0] -eq 0xFF -and $outputBytes[1] -eq 0xD8) -Message 'FFmpeg smoke-test output is missing the JPEG SOI marker.'
-    Assert-Condition -Condition ($outputBytes[$outputBytes.Length - 2] -eq 0xFF -and $outputBytes[$outputBytes.Length - 1] -eq 0xD9) -Message 'FFmpeg smoke-test output is missing the JPEG EOI marker.'
-    $smokeHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($outputBytes)).ToLowerInvariant()
-    Write-Host "[ffmpeg] synthetic MP4 -> JPEG smoke passed ($($outputItem.Length) bytes, SHA-256 $smokeHash)."
+        $fixtureInputPath = Join-Path $smokeDirectory ("synthetic-$fixtureIndex.mp4")
+        $thumbnailResultPath = Join-Path $smokeDirectory ("thumbnail-$fixtureIndex.jpg")
+        [System.IO.File]::WriteAllBytes($fixtureInputPath, $fixtureBytes)
+        $smokeArguments = [System.Collections.Generic.List[string]]::new()
+        foreach ($argument in @($manifest.runtimeContract.thumbnailArguments)) {
+            $resolvedArgument = switch ([string]$argument) {
+                '{input}' { $fixtureInputPath }
+                '{output}' { $thumbnailResultPath }
+                default { [string]$argument }
+            }
+            $smokeArguments.Add($resolvedArgument)
+        }
+        Assert-Condition -Condition ($smokeArguments.Contains($fixtureInputPath)) -Message 'Thumbnail runtime contract does not reference the smoke input.'
+        Assert-Condition -Condition ($smokeArguments.Contains($thumbnailResultPath)) -Message 'Thumbnail runtime contract does not reference the smoke output.'
+
+        [void](Invoke-CheckedProcess -Executable $ffmpegFull -Arguments $smokeArguments.ToArray() -TimeoutSeconds $timeoutSeconds -Description "$codec FFmpeg synthetic MP4-to-JPEG smoke test")
+        $thumbnailResult = Assert-RegularFile -Path $thumbnailResultPath -Description "$codec FFmpeg smoke-test JPEG"
+        Assert-Condition -Condition ($thumbnailResult.Length -ge 4) -Message "$codec FFmpeg smoke-test JPEG is too short."
+        Assert-Condition -Condition ($thumbnailResult.Length -le [long]$manifest.runtimeContract.maximumOutputBytes) -Message "$codec FFmpeg smoke-test JPEG exceeds the runtime output limit."
+        $thumbnailBytes = [System.IO.File]::ReadAllBytes($thumbnailResultPath)
+        Assert-Condition -Condition ($thumbnailBytes[0] -eq 0xFF -and $thumbnailBytes[1] -eq 0xD8) -Message "$codec FFmpeg smoke-test output is missing the JPEG SOI marker."
+        Assert-Condition -Condition ($thumbnailBytes[$thumbnailBytes.Length - 2] -eq 0xFF -and $thumbnailBytes[$thumbnailBytes.Length - 1] -eq 0xD9) -Message "$codec FFmpeg smoke-test output is missing the JPEG EOI marker."
+        $smokeHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($thumbnailBytes)).ToLowerInvariant()
+        Write-Host "[ffmpeg] $codec synthetic MP4 -> JPEG smoke passed ($($thumbnailResult.Length) bytes, SHA-256 $smokeHash)."
+    }
 }
 finally {
     $smokeFull = Get-FullNormalizedPath -Path $smokeDirectory

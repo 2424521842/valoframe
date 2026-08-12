@@ -16,7 +16,21 @@ import {
 test("manual scan targets are staged and deduplicated against indexed sources", () => {
   const manual = scanTargetFromPath("D:\\VALO Clips\\");
   const targets = mergeScanTargets(
-    [{ id: "1", name: "wonderfulVideos1001", path: "D:\\VALO Clips\\wonderfulVideos1001" }],
+    [{
+      id: "1",
+      name: "wonderfulVideos1001",
+      displayName: "ACLOS",
+      path: "D:\\VALO Clips\\wonderfulVideos1001",
+      sourceKind: "aclos",
+      scanMode: "aclos-structured",
+      scanRootPath: "D:\\VALO Clips\\wonderfulVideos1001",
+      enabled: true,
+      status: "available",
+      accessibility: true,
+      lastError: null,
+      clipCount: 1,
+      lastScanAt: null,
+    }],
     [manual],
   );
 
@@ -27,12 +41,49 @@ test("manual scan targets are staged and deduplicated against indexed sources", 
 
 test("removing a scan path excludes both indexed and manual representations", () => {
   const targets = mergeScanTargets(
-    [{ id: "1", name: "wonderfulVideos1001", path: "D:\\Highlights\\wonderfulVideos1001" }],
+    [{
+      id: "1",
+      name: "wonderfulVideos1001",
+      displayName: "ACLOS",
+      path: "D:\\Highlights\\wonderfulVideos1001",
+      sourceKind: "aclos",
+      scanMode: "aclos-structured",
+      scanRootPath: "D:\\Highlights\\wonderfulVideos1001",
+      enabled: true,
+      status: "available",
+      accessibility: true,
+      lastError: null,
+      clipCount: 1,
+      lastScanAt: null,
+    }],
     [scanTargetFromPath("D:\\Highlights")],
     new Set(["d:\\highlights"]),
   );
 
   assert.deepEqual(targets, []);
+});
+
+test("recursive sources retain their exact configured root", () => {
+  const targets = mergeScanTargets(
+    [{
+      id: "2",
+      name: "NVIDIA",
+      displayName: "NVIDIA 录屏",
+      path: "D:\\Recordings\\Valorant",
+      sourceKind: "nvidia",
+      scanMode: "recursive-mp4",
+      scanRootPath: "D:\\Recordings\\Valorant",
+      enabled: true,
+      status: "available",
+      accessibility: true,
+      lastError: null,
+      clipCount: 0,
+      lastScanAt: null,
+    }],
+    [],
+  );
+
+  assert.equal(targets[0]?.path, "D:\\Recordings\\Valorant");
 });
 
 test("multi-directory scan summaries combine into one user-visible result", () => {

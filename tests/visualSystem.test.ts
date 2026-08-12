@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const css = readFileSync(new URL("../src/cinematic.css", import.meta.url), "utf8");
+const libraryToolbar = readFileSync(
+  new URL("../src/components/LibraryToolbar.tsx", import.meta.url),
+  "utf8",
+);
 
 test("cinematic tokens use the charcoal and Valorant-red production foundation", () => {
   assert.match(css, /--canvas-0:\s*#06070a/);
@@ -69,9 +73,33 @@ test("reduced motion stops ambient, selection, and dialog animation", () => {
 test("smallest supported viewport keeps current command and card layouts compact", () => {
   const smallest = extractBlocks(css, "@media (max-width: 680px)");
 
-  assert.match(smallest, /\.library-search-row\s*\{[^}]*grid-template-columns:\s*1fr;/s);
+  assert.match(
+    smallest,
+    /\.library-search-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/s,
+  );
   assert.match(smallest, /\.match-board-clips\s*\{[^}]*grid-template-columns:\s*1fr;/s);
-  assert.match(smallest, /\.library-clear-button\s*\{[^}]*display:\s*none;/s);
+});
+
+test("library toolbar gives search and filters their requested two-band hierarchy", () => {
+  assert.match(
+    css,
+    /\.library-search-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/s,
+  );
+
+  const searchActions = libraryToolbar.indexOf('<div className="library-search-actions">');
+  const filterRow = libraryToolbar.indexOf('<div className="library-filter-row">');
+  const filterControls = libraryToolbar.indexOf('<div className="library-filter-controls">');
+  const sortContainer = libraryToolbar.indexOf('<div className="library-sort-control">');
+  const sortControl = libraryToolbar.indexOf('label="排序"');
+  const viewControl = libraryToolbar.indexOf('className="library-view-switch"');
+
+  assert.ok(searchActions >= 0);
+  assert.ok(viewControl > searchActions && viewControl < filterRow);
+  assert.ok(filterControls > filterRow);
+  assert.ok(sortContainer > filterControls);
+  assert.ok(sortControl > sortContainer);
+  assert.doesNotMatch(libraryToolbar, /library-result-controls/);
+  assert.match(libraryToolbar, /aria-label="清空搜索与所有筛选"/);
 });
 
 test("grid clip cards keep the official per-video score visible", () => {
@@ -102,6 +130,11 @@ test("grid clip cards collapse the empty metadata footer", () => {
     css,
     /\.match-clip-favorite\s*\{[^}]*bottom:\s*8px;/s,
   );
+});
+
+test("grid clip cards do not carry a legacy review state beside the favorite action", () => {
+  assert.doesNotMatch(css, /\.match-clip-review(?:--(?:liked|disliked))?\s*\{/);
+  assert.doesNotMatch(css, /\.match-clip-source-context\s*\{/);
 });
 
 function extractBlocks(source: string, heading: string): string {

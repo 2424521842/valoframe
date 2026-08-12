@@ -15,6 +15,10 @@ use std::{
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
+#[cfg(windows)]
+use crate::file_identity::snapshot_windows_handle;
+use crate::file_identity::{read_stable_file_snapshot, StableFileIdentity, StableFileSnapshot};
+
 use super::{
     super::{
         ensure_row_changed, readable_error, BatchClipMutationResult, ClipFileTarget, DbResult,
@@ -24,6 +28,8 @@ use super::{
 
 const DELETE_LEASE_DURATION_SQL: &str = "+5 minutes";
 const DELETE_PENDING_CODE: &str = "delete-pending";
+const INDEX_REMOVAL_NOT_ELIGIBLE_CODE: &str = "index-removal-not-eligible";
+const SOURCE_MISSING_CODE: &str = "source-missing";
 static DELETE_WORKER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +46,19 @@ pub(crate) enum ClipDeleteItemOutcome {
     Pending(ClipDeleteIssue),
     Blocked(ClipDeleteIssue),
     Rejected(ClipDeleteIssue),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClipIndexRemovalIssue {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClipIndexRemovalOutcome {
+    Removed,
+    Missing,
+    Blocked(ClipIndexRemovalIssue),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,26 +110,13 @@ struct TrashIdentitySnapshot {
     file_existed: bool,
     file_size_bytes: Option<i64>,
     file_modified_ticks: Option<i64>,
-    file_identity: StableFileIdentity,
-    source_identity: StableFileIdentity,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct StableFileIdentity {
-    volume_serial: Option<i64>,
-    file_index_high: Option<i64>,
-    file_index_low: Option<i64>,
-}
-
-struct StableFileSnapshot {
-    size_bytes: i64,
-    modified_ticks: i64,
-    identity: StableFileIdentity,
+    file_identity: Option<StableFileIdentity>,
+    source_identity: Option<StableFileIdentity>,
 }
 
 struct AccessibleDirectory {
     canonical_path: PathBuf,
-    identity: StableFileIdentity,
+    identity: Option<StableFileIdentity>,
     #[cfg(windows)]
     _handle: fs::File,
 }
@@ -419,26 +425,81 @@ fn finish_trash_mutation(
     Ok(result)
 }
 
-/// Removes an index row only when no durable delete authorization exists. The check and delete
-/// share one write transaction; the schema's `ON DELETE RESTRICT` remains a second line of defense.
+/// Removes an index row only for an offline/recycled clip with no durable delete authorization.
+/// The eligibility check and delete share one immediate transaction; the schema's
+/// `ON DELETE RESTRICT` remains a second line of defense.
 pub(crate) fn delete_clip_from_index_guarded(
     connection: &Connection,
     clip_id: i64,
-) -> DbResult<()> {
+) -> DbResult<ClipIndexRemovalOutcome> {
     let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
         .map_err(|error| readable_error("starting guarded index removal", error))?;
-    let has_delete_intent = transaction
+    let target = transaction
         .query_row(
-            "SELECT EXISTS (SELECT 1 FROM clip_delete_intents WHERE clip_id = ?1)",
+            "
+            SELECT
+                clips.file_status,
+                source_dirs.status,
+                EXISTS (
+                    SELECT 1
+                    FROM clip_delete_intents
+                    WHERE clip_delete_intents.clip_id = clips.id
+                )
+            FROM clips
+            LEFT JOIN source_dirs ON source_dirs.id = clips.source_dir_id
+            WHERE clips.id = ?1
+            ",
             params![clip_id],
-            |row| row.get::<_, i64>(0),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)? != 0,
+                ))
+            },
         )
-        .map_err(|error| readable_error("checking pending permanent deletion", error))?
-        != 0;
+        .optional()
+        .map_err(|error| readable_error("checking pending permanent deletion", error))?;
+    let Some((file_status, source_status, has_delete_intent)) = target else {
+        transaction
+            .rollback()
+            .map_err(|error| readable_error("rolling back missing index removal", error))?;
+        return Ok(ClipIndexRemovalOutcome::Missing);
+    };
+
     if has_delete_intent {
-        return Err(format!(
-            "{DELETE_PENDING_CODE}: 素材 {clip_id} 已进入永久删除队列，无法仅移除索引"
-        ));
+        transaction
+            .rollback()
+            .map_err(|error| readable_error("rolling back blocked index removal", error))?;
+        return Ok(ClipIndexRemovalOutcome::Blocked(ClipIndexRemovalIssue {
+            code: DELETE_PENDING_CODE.to_string(),
+            message: format!("素材 {clip_id} 已进入永久删除队列，无法仅移除索引"),
+        }));
+    }
+
+    let eligible = matches!(file_status.as_str(), "missing" | "trashed")
+        || source_status.as_deref() == Some("unavailable");
+    if !eligible {
+        let (code, message) = if source_status.is_none() {
+            (
+                SOURCE_MISSING_CODE,
+                format!("素材 {clip_id} 的来源记录不存在，无法验证仅移除索引资格"),
+            )
+        } else {
+            (
+                INDEX_REMOVAL_NOT_ELIGIBLE_CODE,
+                format!(
+                    "素材 {clip_id} 仍可用且来源未明确失联；请先移入回收站，或在来源不可用后重试"
+                ),
+            )
+        };
+        transaction
+            .rollback()
+            .map_err(|error| readable_error("rolling back ineligible index removal", error))?;
+        return Ok(ClipIndexRemovalOutcome::Blocked(ClipIndexRemovalIssue {
+            code: code.to_string(),
+            message,
+        }));
     }
 
     let changed = transaction
@@ -447,7 +508,8 @@ pub(crate) fn delete_clip_from_index_guarded(
     ensure_row_changed(changed, "removing clip from index", clip_id)?;
     transaction
         .commit()
-        .map_err(|error| readable_error("committing guarded index removal", error))
+        .map_err(|error| readable_error("committing guarded index removal", error))?;
+    Ok(ClipIndexRemovalOutcome::Removed)
 }
 
 fn prepare_trash_snapshot(
@@ -504,13 +566,7 @@ fn prepare_trash_snapshot(
                 Path::new(&target.source_dir_path),
                 &source.canonical_path,
             )?;
-            (
-                canonical_video_path,
-                false,
-                None,
-                None,
-                StableFileIdentity::default(),
-            )
+            (canonical_video_path, false, None, None, None)
         };
 
     Ok(TrashIdentitySnapshot {
@@ -532,6 +588,10 @@ fn insert_trash_snapshot(
     clip_id: i64,
     snapshot: &TrashIdentitySnapshot,
 ) -> DbResult<()> {
+    let (file_volume_serial, file_index_high, file_index_low) =
+        identity_database_parts(snapshot.file_identity);
+    let (source_volume_serial, source_file_index_high, source_file_index_low) =
+        identity_database_parts(snapshot.source_identity);
     connection
         .execute(
             "
@@ -566,12 +626,12 @@ fn insert_trash_snapshot(
                 i64::from(snapshot.file_existed),
                 snapshot.file_size_bytes,
                 snapshot.file_modified_ticks,
-                snapshot.file_identity.volume_serial,
-                snapshot.file_identity.file_index_high,
-                snapshot.file_identity.file_index_low,
-                snapshot.source_identity.volume_serial,
-                snapshot.source_identity.file_index_high,
-                snapshot.source_identity.file_index_low,
+                file_volume_serial,
+                file_index_high,
+                file_index_low,
+                source_volume_serial,
+                source_file_index_high,
+                source_file_index_low,
             ],
         )
         .map_err(|error| readable_error("recording recycle-bin identity snapshot", error))?;
@@ -614,16 +674,16 @@ fn find_trash_snapshot_by_clip_id(
                     file_existed: row.get::<_, i64>(5)? != 0,
                     file_size_bytes: row.get(6)?,
                     file_modified_ticks: row.get(7)?,
-                    file_identity: StableFileIdentity {
-                        volume_serial: row.get(8)?,
-                        file_index_high: row.get(9)?,
-                        file_index_low: row.get(10)?,
-                    },
-                    source_identity: StableFileIdentity {
-                        volume_serial: row.get(11)?,
-                        file_index_high: row.get(12)?,
-                        file_index_low: row.get(13)?,
-                    },
+                    file_identity: StableFileIdentity::from_database_parts(
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ),
+                    source_identity: StableFileIdentity::from_database_parts(
+                        row.get(11)?,
+                        row.get(12)?,
+                        row.get(13)?,
+                    ),
                 })
             },
         )
@@ -683,6 +743,10 @@ fn stage_delete_intent(connection: &Connection, clip_id: i64) -> DbResult<StageD
         )));
     }
 
+    let (file_volume_serial, file_index_high, file_index_low) =
+        identity_database_parts(snapshot.file_identity);
+    let (source_volume_serial, source_file_index_high, source_file_index_low) =
+        identity_database_parts(snapshot.source_identity);
     transaction
         .execute(
             "
@@ -719,12 +783,12 @@ fn stage_delete_intent(connection: &Connection, clip_id: i64) -> DbResult<StageD
                 i64::from(snapshot.file_existed),
                 snapshot.file_size_bytes,
                 snapshot.file_modified_ticks,
-                snapshot.file_identity.volume_serial,
-                snapshot.file_identity.file_index_high,
-                snapshot.file_identity.file_index_low,
-                snapshot.source_identity.volume_serial,
-                snapshot.source_identity.file_index_high,
-                snapshot.source_identity.file_index_low,
+                file_volume_serial,
+                file_index_high,
+                file_index_low,
+                source_volume_serial,
+                source_file_index_high,
+                source_file_index_low,
             ],
         )
         .map_err(|error| readable_error("recording permanent-delete intent", error))?;
@@ -1333,7 +1397,7 @@ fn inspect_accessible_directory(path: &Path) -> Result<AccessibleDirectory, Clip
     {
         Ok(AccessibleDirectory {
             canonical_path: canonical,
-            identity: StableFileIdentity::default(),
+            identity: None,
         })
     }
 }
@@ -1451,60 +1515,48 @@ fn canonicalize_missing_target(
     Ok(canonical_video)
 }
 
-fn target_identity(intent: &ClipDeleteIntent) -> StableFileIdentity {
-    StableFileIdentity {
-        volume_serial: intent.file_volume_serial,
-        file_index_high: intent.file_index_high,
-        file_index_low: intent.file_index_low,
-    }
+fn identity_database_parts(
+    identity: Option<StableFileIdentity>,
+) -> (Option<i64>, Option<i64>, Option<i64>) {
+    identity.map(StableFileIdentity::database_parts).map_or(
+        (None, None, None),
+        |(volume_serial, index_high, index_low)| {
+            (Some(volume_serial), Some(index_high), Some(index_low))
+        },
+    )
 }
 
-fn source_identity(intent: &ClipDeleteIntent) -> StableFileIdentity {
-    StableFileIdentity {
-        volume_serial: intent.source_volume_serial,
-        file_index_high: intent.source_file_index_high,
-        file_index_low: intent.source_file_index_low,
-    }
+fn target_identity(intent: &ClipDeleteIntent) -> Option<StableFileIdentity> {
+    StableFileIdentity::from_database_parts(
+        intent.file_volume_serial,
+        intent.file_index_high,
+        intent.file_index_low,
+    )
 }
 
-#[cfg(windows)]
+fn source_identity(intent: &ClipDeleteIntent) -> Option<StableFileIdentity> {
+    StableFileIdentity::from_database_parts(
+        intent.source_volume_serial,
+        intent.source_file_index_high,
+        intent.source_file_index_low,
+    )
+}
+
 fn snapshot_existing_file(
     path: &Path,
     _metadata: &fs::Metadata,
 ) -> Result<StableFileSnapshot, ClipDeleteIssue> {
-    let handle = open_windows_file(path, false).map_err(|error| {
+    read_stable_file_snapshot(path).map_err(|error| {
+        let invalid_target = error.kind() == ErrorKind::InvalidData;
         issue(
-            fs_error_code(&error),
-            format!("无法安全打开视频句柄并记录文件身份：{error}"),
-            true,
+            if invalid_target {
+                "unsafe-path"
+            } else {
+                fs_error_code(&error)
+            },
+            format!("无法从视频句柄读取文件身份：{error}"),
+            !invalid_target,
         )
-    })?;
-    windows_file_snapshot(&handle, false)
-}
-
-#[cfg(not(windows))]
-fn snapshot_existing_file(
-    _path: &Path,
-    metadata: &fs::Metadata,
-) -> Result<StableFileSnapshot, ClipDeleteIssue> {
-    let size_bytes = i64::try_from(metadata.len()).map_err(|_| {
-        issue(
-            "unsafe-metadata",
-            "视频大小超出可安全记录的范围，已拒绝永久删除",
-            false,
-        )
-    })?;
-    let modified_ticks = file_modified_ticks(metadata).ok_or_else(|| {
-        issue(
-            "unsafe-metadata",
-            "无法记录视频修改时间，已拒绝永久删除",
-            false,
-        )
-    })?;
-    Ok(StableFileSnapshot {
-        size_bytes,
-        modified_ticks,
-        identity: StableFileIdentity::default(),
     })
 }
 
@@ -1520,7 +1572,18 @@ fn open_verified_delete_file(
             true,
         )
     })?;
-    let snapshot = windows_file_snapshot(&handle, false)?;
+    let snapshot = snapshot_windows_handle(&handle, false).map_err(|error| {
+        let invalid_target = error.kind() == ErrorKind::InvalidData;
+        issue(
+            if invalid_target {
+                "unsafe-path"
+            } else {
+                fs_error_code(&error)
+            },
+            format!("无法从待删除视频句柄读取文件身份：{error}"),
+            !invalid_target,
+        )
+    })?;
     Ok((
         VerifiedDeleteFile {
             path: path.to_path_buf(),
@@ -1594,7 +1657,7 @@ fn open_windows_file(path: &Path, for_delete: bool) -> std::io::Result<fs::File>
 }
 
 #[cfg(windows)]
-fn open_windows_directory(path: &Path) -> std::io::Result<(fs::File, StableFileIdentity)> {
+fn open_windows_directory(path: &Path) -> std::io::Result<(fs::File, Option<StableFileIdentity>)> {
     use std::os::windows::fs::OpenOptionsExt;
 
     use windows_sys::Win32::Storage::FileSystem::{
@@ -1609,65 +1672,8 @@ fn open_windows_directory(path: &Path) -> std::io::Result<(fs::File, StableFileI
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
-    let snapshot = windows_file_snapshot(&handle, true)
-        .map_err(|problem| std::io::Error::other(problem.message))?;
+    let snapshot = snapshot_windows_handle(&handle, true)?;
     Ok((handle, snapshot.identity))
-}
-
-#[cfg(windows)]
-fn windows_file_snapshot(
-    handle: &fs::File,
-    expect_directory: bool,
-) -> Result<StableFileSnapshot, ClipDeleteIssue> {
-    use std::os::windows::io::AsRawHandle;
-
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
-        FILE_ATTRIBUTE_REPARSE_POINT,
-    };
-
-    let mut information = BY_HANDLE_FILE_INFORMATION::default();
-    let succeeded = unsafe {
-        GetFileInformationByHandle(
-            handle.as_raw_handle(),
-            &mut information as *mut BY_HANDLE_FILE_INFORMATION,
-        )
-    };
-    if succeeded == 0 {
-        let error = std::io::Error::last_os_error();
-        return Err(issue(
-            fs_error_code(&error),
-            format!("无法从句柄读取文件身份：{error}"),
-            true,
-        ));
-    }
-    let is_directory = information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-    if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-        || is_directory != expect_directory
-    {
-        return Err(issue(
-            "unsafe-path",
-            "句柄目标的类型或重解析点属性不符合永久删除安全要求",
-            false,
-        ));
-    }
-
-    let size = (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
-    let modified = (u64::from(information.ftLastWriteTime.dwHighDateTime) << 32)
-        | u64::from(information.ftLastWriteTime.dwLowDateTime);
-    let size_bytes = i64::try_from(size)
-        .map_err(|_| issue("unsafe-metadata", "文件大小超出可安全记录的范围", false))?;
-    let modified_ticks = i64::try_from(modified)
-        .map_err(|_| issue("unsafe-metadata", "文件修改时间超出可安全记录的范围", false))?;
-    Ok(StableFileSnapshot {
-        size_bytes,
-        modified_ticks,
-        identity: StableFileIdentity {
-            volume_serial: Some(i64::from(information.dwVolumeSerialNumber)),
-            file_index_high: Some(i64::from(information.nFileIndexHigh)),
-            file_index_low: Some(i64::from(information.nFileIndexLow)),
-        },
-    })
 }
 
 fn metadata_is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
@@ -1683,12 +1689,6 @@ fn metadata_is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
     {
         metadata.file_type().is_symlink()
     }
-}
-
-#[cfg(not(windows))]
-fn file_modified_ticks(metadata: &fs::Metadata) -> Option<i64> {
-    let duration = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
-    i64::try_from(duration.as_nanos()).ok()
 }
 
 fn path_is_within(path: &Path, root: &Path) -> bool {
@@ -1785,7 +1785,8 @@ mod tests {
         delete_clip_from_index_guarded, delete_clip_permanently, finalize_delete_intent,
         find_delete_intent_by_clip_id, find_trash_snapshot_by_clip_id,
         recover_pending_clip_deletions, set_clips_trashed_guarded, stage_delete_intent,
-        verify_delete_target, ClipDeleteItemOutcome, StageDeleteOutcome, VerifiedDeleteTarget,
+        verify_delete_target, ClipDeleteItemOutcome, ClipIndexRemovalIssue,
+        ClipIndexRemovalOutcome, StageDeleteOutcome, VerifiedDeleteTarget,
     };
     use crate::db::{self, ClipInput, SourceDirInput};
 
@@ -2020,17 +2021,131 @@ mod tests {
     }
 
     #[test]
-    fn pending_intent_atomically_blocks_restore_and_index_only_removal() {
-        let fixture = DeleteFixture::with_file("guard-me.mp4", b"original video");
-        fixture.stage_intent();
+    fn every_delete_intent_state_atomically_blocks_restore_and_index_only_removal() {
+        for state in ["pending", "processing", "blocked"] {
+            let fixture =
+                DeleteFixture::with_file(&format!("guard-{state}.mp4"), b"original video");
+            fixture.stage_intent();
+            fixture
+                .connection
+                .execute(
+                    "UPDATE clip_delete_intents SET state = ?1 WHERE clip_id = ?2",
+                    rusqlite::params![state, fixture.clip_id],
+                )
+                .unwrap();
 
-        let restore_error =
-            set_clips_trashed_guarded(&fixture.connection, &[fixture.clip_id], false).unwrap_err();
-        let remove_error =
-            delete_clip_from_index_guarded(&fixture.connection, fixture.clip_id).unwrap_err();
+            let restore_error =
+                set_clips_trashed_guarded(&fixture.connection, &[fixture.clip_id], false)
+                    .unwrap_err();
+            let remove_problem =
+                delete_clip_from_index_guarded(&fixture.connection, fixture.clip_id).unwrap();
 
-        assert!(restore_error.contains("delete-pending"));
-        assert!(remove_error.contains("delete-pending"));
+            assert!(restore_error.contains("delete-pending"), "state={state}");
+            assert!(
+                matches!(
+                    remove_problem,
+                    ClipIndexRemovalOutcome::Blocked(ClipIndexRemovalIssue { ref code, .. })
+                        if code == "delete-pending"
+                ),
+                "state={state}"
+            );
+            assert!(fixture.clip_exists(), "state={state}");
+            assert!(fixture.clip_path.is_file(), "state={state}");
+        }
+    }
+
+    #[test]
+    fn index_only_removal_rejects_available_and_merely_disabled_sources() {
+        let fixture = DeleteFixture::with_file("still-online.mp4", b"original video");
+        set_clips_trashed_guarded(&fixture.connection, &[fixture.clip_id], false).unwrap();
+
+        let available = delete_clip_from_index_guarded(&fixture.connection, fixture.clip_id)
+            .expect("eligibility denial should be an item outcome");
+        assert!(matches!(
+            available,
+            ClipIndexRemovalOutcome::Blocked(ClipIndexRemovalIssue { ref code, .. })
+                if code == "index-removal-not-eligible"
+        ));
+
+        fixture
+            .connection
+            .execute(
+                "UPDATE source_dirs SET enabled = 0 WHERE id = (SELECT source_dir_id FROM clips WHERE id = ?1)",
+                [fixture.clip_id],
+            )
+            .unwrap();
+        let disabled = delete_clip_from_index_guarded(&fixture.connection, fixture.clip_id)
+            .expect("disabled source should still be denied");
+        assert!(matches!(
+            disabled,
+            ClipIndexRemovalOutcome::Blocked(ClipIndexRemovalIssue { ref code, .. })
+                if code == "index-removal-not-eligible"
+        ));
+        assert!(fixture.clip_exists());
+        assert!(fixture.clip_path.is_file());
+    }
+
+    #[test]
+    fn index_only_removal_accepts_missing_or_explicitly_unavailable_targets() {
+        let missing = DeleteFixture::with_file("missing-index.mp4", b"missing bytes");
+        set_clips_trashed_guarded(&missing.connection, &[missing.clip_id], false).unwrap();
+        missing
+            .connection
+            .execute(
+                "UPDATE clips SET file_status = 'missing' WHERE id = ?1",
+                [missing.clip_id],
+            )
+            .unwrap();
+        assert_eq!(
+            delete_clip_from_index_guarded(&missing.connection, missing.clip_id).unwrap(),
+            ClipIndexRemovalOutcome::Removed
+        );
+        assert!(!missing.clip_exists());
+        assert!(missing.clip_path.is_file());
+
+        let unavailable = DeleteFixture::with_file("offline-index.mp4", b"offline bytes");
+        set_clips_trashed_guarded(&unavailable.connection, &[unavailable.clip_id], false).unwrap();
+        unavailable
+            .connection
+            .execute(
+                "UPDATE source_dirs SET status = 'unavailable' WHERE id = (SELECT source_dir_id FROM clips WHERE id = ?1)",
+                [unavailable.clip_id],
+            )
+            .unwrap();
+        assert_eq!(
+            delete_clip_from_index_guarded(&unavailable.connection, unavailable.clip_id).unwrap(),
+            ClipIndexRemovalOutcome::Removed
+        );
+        assert!(!unavailable.clip_exists());
+        assert!(unavailable.clip_path.is_file());
+    }
+
+    #[test]
+    fn index_only_removal_fails_closed_for_an_orphaned_source_reference() {
+        let fixture = DeleteFixture::with_file("orphan-source.mp4", b"original video");
+        set_clips_trashed_guarded(&fixture.connection, &[fixture.clip_id], false).unwrap();
+        fixture
+            .connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .unwrap();
+        fixture
+            .connection
+            .execute(
+                "UPDATE clips SET source_dir_id = 999999 WHERE id = ?1",
+                [fixture.clip_id],
+            )
+            .unwrap();
+        fixture
+            .connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .unwrap();
+
+        let outcome = delete_clip_from_index_guarded(&fixture.connection, fixture.clip_id).unwrap();
+        assert!(matches!(
+            outcome,
+            ClipIndexRemovalOutcome::Blocked(ClipIndexRemovalIssue { ref code, .. })
+                if code == "source-missing"
+        ));
         assert!(fixture.clip_exists());
         assert!(fixture.clip_path.is_file());
     }

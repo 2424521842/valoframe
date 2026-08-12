@@ -577,23 +577,32 @@ function validateUpdaterDisabled(repositoryRoot, packageJson, tauriConfig, cargo
     );
   }
 
+  // M5 keeps the Rust updater runtime in every build so the same source tree can
+  // produce both channels. Community Beta remains updater-disabled because it
+  // embeds no public key, exposes no direct updater capability, and creates no
+  // updater artifacts.
+  const cargoPluginPresent =
+    /(^|[^A-Za-z0-9_-])tauri-plugin-updater([^A-Za-z0-9_-]|$)/im.test(cargoToml);
   assert(
-    !/(^|[^A-Za-z0-9_-])tauri-plugin-updater([^A-Za-z0-9_-]|$)/im.test(cargoToml),
-    "Cargo.toml must not include tauri-plugin-updater",
+    cargoPluginPresent,
+    "Cargo.toml must include the dormant tauri-plugin-updater runtime",
   );
   const cargoLockPath = "src-tauri/Cargo.lock";
   if (repositoryEntryExists(repositoryRoot, cargoLockPath)) {
     const cargoLock = readRepositoryText(repositoryRoot, cargoLockPath, "Cargo.lock");
     assert(
-      !/(^|[^A-Za-z0-9_-])tauri-plugin-updater([^A-Za-z0-9_-]|$)/im.test(cargoLock),
-      "Cargo.lock must not include tauri-plugin-updater",
+      /(^|[^A-Za-z0-9_-])tauri-plugin-updater([^A-Za-z0-9_-]|$)/im.test(cargoLock),
+      "Cargo.lock must include the dormant tauri-plugin-updater runtime",
     );
   }
 
   const plugins = tauriConfig.plugins;
+  const updaterBootstrap = isPlainObject(plugins) ? plugins.updater : undefined;
   assert(
-    !isPlainObject(plugins) || !Object.hasOwn(plugins, "updater"),
-    "Tauri configuration must not enable the updater plugin",
+    isPlainObject(updaterBootstrap) &&
+      Object.keys(updaterBootstrap).length === 1 &&
+      updaterBootstrap.pubkey === "",
+    "Tauri updater bootstrap must be exactly an empty pubkey object",
   );
   const createUpdaterArtifacts = tauriConfig.bundle?.createUpdaterArtifacts;
   assert(
@@ -604,8 +613,10 @@ function validateUpdaterDisabled(repositoryRoot, packageJson, tauriConfig, cargo
   return {
     enabled: false,
     npmPluginPresent: false,
-    cargoPluginPresent: false,
+    cargoPluginPresent,
+    publicKeyEmbedded: false,
     tauriPluginConfigured: false,
+    tauriPluginBootstrapPresent: true,
     createUpdaterArtifacts: false,
   };
 }

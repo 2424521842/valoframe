@@ -1,10 +1,16 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AppUpdaterController } from "../../src/hooks/useAppUpdaterController";
+import {
+  APP_PREFERENCES_STORAGE_KEY,
+  DEFAULT_APP_PREFERENCES,
+} from "../../src/lib/appPreferences";
 import type {
   CancelScanResult,
   ScanJobResult,
   ScanProgress,
+  ScanSourceRelocationPreview,
   ScanSummary,
   SourceDir,
 } from "../../src/types";
@@ -13,14 +19,54 @@ import { libraryFacets } from "./libraryFacetFixtures";
 const mocks = vi.hoisted(() => ({
   cancelScan: vi.fn(),
   getScanStatus: vi.fn(),
+  getScanSummary: vi.fn(),
   getLibraryFacets: vi.fn(),
   listClips: vi.fn(),
   listClipPage: vi.fn(),
   listSources: vi.fn(),
   listTags: vi.fn(),
+  openDirectory: vi.fn(),
+  previewScanSourceRelocation: vi.fn(),
+  relocateScanSource: vi.fn(),
   scanDefaultAclosDir: vi.fn(),
   scanRoots: vi.fn(),
+  updaterOptions: vi.fn(),
   progressListener: null as ((progress: ScanProgress) => void) | null,
+  appUpdater: {
+    runtimeInfo: {
+      currentVersion: "0.2.1",
+      channel: "stable",
+      endpoint: "https://github.com/2424521842/valoframe/releases/latest/download/latest.json",
+      configured: true,
+    },
+    runtimeStatus: "ready",
+    runtimeError: null,
+    phase: "idle",
+    update: null,
+    progress: { downloadedBytes: 0, totalBytes: null },
+    message: "更新检查尚未运行",
+    error: null,
+    canCheck: true,
+    canDownload: false,
+    canCancelDownload: false,
+    canInstall: false,
+    refreshRuntimeInfo: vi.fn(async () => undefined),
+    checkManually: vi.fn(async () => undefined),
+    download: vi.fn(async () => undefined),
+    cancelDownload: vi.fn(async () => undefined),
+    installAndRestart: vi.fn(async () => undefined),
+  } as AppUpdaterController,
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: mocks.openDirectory,
+}));
+
+vi.mock("../../src/hooks/useAppUpdaterController", () => ({
+  useAppUpdaterController: (options: unknown) => {
+    mocks.updaterOptions(options);
+    return mocks.appUpdater;
+  },
 }));
 
 vi.mock("../../src/api/backend", async (importOriginal) => {
@@ -29,11 +75,14 @@ vi.mock("../../src/api/backend", async (importOriginal) => {
     ...actual,
     cancelScan: mocks.cancelScan,
     getScanStatus: mocks.getScanStatus,
+    getScanSummary: mocks.getScanSummary,
     getLibraryFacets: mocks.getLibraryFacets,
     listClips: mocks.listClips,
     listClipPage: mocks.listClipPage,
     listSources: mocks.listSources,
     listTags: mocks.listTags,
+    previewScanSourceRelocation: mocks.previewScanSourceRelocation,
+    relocateScanSource: mocks.relocateScanSource,
     scanDefaultAclosDir: mocks.scanDefaultAclosDir,
     scanRoots: mocks.scanRoots,
     listenToScanProgress: vi.fn(async (listener: (progress: ScanProgress) => void) => {
@@ -57,15 +106,21 @@ const sourceDirs: SourceDir[] = [
 describe("production scan lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetAppUpdater();
     mocks.cancelScan.mockReset();
     mocks.getScanStatus.mockReset();
+    mocks.getScanSummary.mockReset();
     mocks.getLibraryFacets.mockReset();
     mocks.listClips.mockReset();
     mocks.listClipPage.mockReset();
     mocks.listSources.mockReset();
     mocks.listTags.mockReset();
+    mocks.openDirectory.mockReset();
+    mocks.previewScanSourceRelocation.mockReset();
+    mocks.relocateScanSource.mockReset();
     mocks.scanDefaultAclosDir.mockReset();
     mocks.scanRoots.mockReset();
+    mocks.updaterOptions.mockReset();
     mocks.progressListener = null;
     mocks.listClipPage.mockResolvedValue({
       items: [],
@@ -78,8 +133,19 @@ describe("production scan lifecycle", () => {
     mocks.getLibraryFacets.mockResolvedValue(libraryFacets());
     mocks.listSources.mockResolvedValue(sourceDirs);
     mocks.listTags.mockResolvedValue([]);
+    mocks.openDirectory.mockResolvedValue(null);
+    mocks.previewScanSourceRelocation.mockResolvedValue(relocationPreview());
+    mocks.relocateScanSource.mockResolvedValue({
+      preview: relocationPreview(),
+      relocatedClipCount: 1,
+      syncJobId: null,
+      syncStarted: false,
+      syncStatus: null,
+      syncMessage: null,
+    });
     mocks.scanDefaultAclosDir.mockResolvedValue(jobResult("default", "completed"));
     mocks.cancelScan.mockResolvedValue(cancelResult("scan-active"));
+    mocks.getScanSummary.mockResolvedValue(summary("completed"));
     mocks.getScanStatus.mockResolvedValue({
       jobId: null,
       phase: null,
@@ -98,6 +164,32 @@ describe("production scan lifecycle", () => {
     Reflect.deleteProperty(globalThis, "isTauri");
   });
 
+  it("opens source management immediately when it is the saved startup destination", async () => {
+    window.localStorage.setItem(APP_PREFERENCES_STORAGE_KEY, JSON.stringify({
+      ...DEFAULT_APP_PREFERENCES,
+      startupDestination: "scan",
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "扫描目录" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "扫描目录" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+  });
+
+  it("hydrates the automatic update preference before creating the updater controller", () => {
+    window.localStorage.setItem(APP_PREFERENCES_STORAGE_KEY, JSON.stringify({
+      ...DEFAULT_APP_PREFERENCES,
+      automaticUpdateCheck: false,
+    }));
+
+    render(<App />);
+
+    expect(mocks.updaterOptions).toHaveBeenCalledWith({ automaticCheck: false });
+  });
+
   it("scans multiple roots once, disables duplicate starts, and exposes cancelling state", async () => {
     const user = userEvent.setup();
     const scan = deferred<ScanJobResult<ScanSummary>>();
@@ -105,7 +197,7 @@ describe("production scan lifecycle", () => {
     mocks.scanRoots.mockReturnValueOnce(scan.promise);
     mocks.cancelScan.mockReturnValueOnce(cancel.promise);
     render(<App />);
-    await openScanWorkspace(user);
+    await openScanTaskWorkspace(user);
     const loadsBeforeScan = collectionLoadCounts();
 
     const start = screen.getByRole("button", { name: "开始扫描" });
@@ -134,7 +226,7 @@ describe("production scan lifecycle", () => {
     const second = deferred<ScanJobResult<ScanSummary>>();
     mocks.scanRoots.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
     render(<App />);
-    await openScanWorkspace(user);
+    await openScanTaskWorkspace(user);
     const loadsBeforeCompletedScan = collectionLoadCounts();
 
     await user.click(screen.getByRole("button", { name: "开始扫描" }));
@@ -166,19 +258,31 @@ describe("production scan lifecycle", () => {
     const user = userEvent.setup();
     const scan = deferred<ScanJobResult<ScanSummary>>();
     mocks.scanRoots.mockReturnValueOnce(scan.promise);
-    mocks.getScanStatus.mockResolvedValue({
-      jobId: "scan-recovered",
-      phase: "scanning",
-      currentRoot: "D:\\ArchiveA",
-      source: null,
-      processed: 0,
-      total: null,
-      message: "已恢复扫描状态",
-      terminal: false,
-      status: "running",
-    });
+    mocks.getScanStatus
+      .mockResolvedValueOnce({
+        jobId: null,
+        phase: null,
+        currentRoot: null,
+        source: null,
+        processed: 0,
+        total: null,
+        message: "当前没有扫描任务",
+        terminal: false,
+        status: "idle",
+      })
+      .mockResolvedValue({
+        jobId: "scan-recovered",
+        phase: "scanning",
+        currentRoot: "D:\\ArchiveA",
+        source: null,
+        processed: 0,
+        total: null,
+        message: "已恢复扫描状态",
+        terminal: false,
+        status: "running",
+      });
     render(<App />);
-    await openScanWorkspace(user);
+    await openScanTaskWorkspace(user);
 
     await user.click(screen.getByRole("button", { name: "开始扫描" }));
     const cancelButton = await screen.findByRole("button", { name: "取消扫描" });
@@ -194,13 +298,39 @@ describe("production scan lifecycle", () => {
     const user = userEvent.setup();
     mocks.scanRoots.mockResolvedValueOnce(jobResult("scan-partial", "partial"));
     render(<App />);
-    await openScanWorkspace(user);
+    await openScanTaskWorkspace(user);
     const loadsBeforeScan = collectionLoadCounts();
 
     await user.click(screen.getByRole("button", { name: "开始扫描" }));
     const partialAlert = await screen.findByRole("alert");
     expect(partialAlert).toHaveTextContent(/扫描部分完成/);
     await expectCollectionsRefreshed(loadsBeforeScan);
+  });
+
+  it("keeps the exact terminal count when a secondary scan refresh fails", async () => {
+    const user = userEvent.setup();
+    mocks.getLibraryFacets
+      .mockReset()
+      .mockResolvedValueOnce(libraryFacets())
+      .mockRejectedValueOnce(new Error("facets offline"));
+    mocks.scanRoots.mockResolvedValueOnce({
+      ...jobResult("scan-refresh-failure", "completed"),
+      result: { ...summary("completed"), newClipCount: 3 },
+    });
+    render(<App />);
+    await openScanTaskWorkspace(user);
+    await waitFor(() => expect(mocks.getLibraryFacets).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole("button", { name: "开始扫描" }));
+
+    const refreshAlert = await screen.findByRole("alert");
+    expect(refreshAlert).toHaveTextContent(
+      "扫描完成：新增 3 个视频；终态已确定，但刷新索引视图失败",
+    );
+    await user.click(screen.getByRole("button", { name: /识别结果/ }));
+    expect(screen.getByText("最近素材").closest("article")).toHaveTextContent(
+      "扫描完成：新增 3 个视频；终态已确定，但刷新索引视图失败",
+    );
   });
 
   it("distinguishes ordinary failure from an already-running conflict", async () => {
@@ -211,7 +341,7 @@ describe("production scan lifecycle", () => {
       jobId: "scan-failed",
     });
     render(<App />);
-    await openScanWorkspace(user);
+    await openScanTaskWorkspace(user);
     const loadsBeforeFailure = collectionLoadCounts();
 
     await user.click(screen.getByRole("button", { name: "开始扫描" }));
@@ -233,12 +363,260 @@ describe("production scan lifecycle", () => {
     });
     expect(collectionLoadCounts()).toEqual(loadsBeforeConflict);
   });
+
+  it("refreshes sources, clips, and facets after relocation without inventing scan freshness", async () => {
+    const user = userEvent.setup();
+    Reflect.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    Reflect.defineProperty(globalThis, "isTauri", {
+      configurable: true,
+      value: true,
+    });
+    const movedSources = sourceDirs.map((item) => item.id === "1"
+      ? { ...item, path: "E:\\Moved", scanRootPath: "E:\\Moved" }
+      : item);
+    const preview = relocationPreview();
+    mocks.listSources
+      .mockReset()
+      .mockResolvedValueOnce(sourceDirs)
+      .mockResolvedValue(movedSources);
+    mocks.openDirectory.mockResolvedValueOnce("E:\\Moved");
+    mocks.previewScanSourceRelocation.mockResolvedValueOnce(preview);
+    mocks.relocateScanSource.mockResolvedValueOnce({
+      preview,
+      relocatedClipCount: 1,
+      syncJobId: null,
+      syncStarted: false,
+      syncStatus: null,
+      syncMessage: null,
+    });
+    render(<App />);
+    await openScanWorkspace(user);
+
+    await user.click(screen.getByRole("button", { name: "重新定位 来源 1" }));
+    await user.click(screen.getByRole("button", { name: "选择新的根目录" }));
+    expect(mocks.openDirectory).toHaveBeenCalledWith({
+      directory: true,
+      multiple: false,
+      title: "为 来源 1 选择新的来源根目录",
+    });
+    expect(await screen.findByText("预览通过，可以提交")).toBeVisible();
+    expect(mocks.previewScanSourceRelocation).toHaveBeenCalledWith("1", "E:\\Moved");
+    const loadsBeforeCommit = collectionLoadCounts();
+
+    await user.click(screen.getByRole("button", { name: "继续确认" }));
+    await user.click(screen.getByRole("button", { name: "确认重新定位" }));
+
+    expect(await screen.findByText("重新定位成功；同步尚未启动")).toBeVisible();
+    expect(mocks.relocateScanSource).toHaveBeenCalledWith("1", "E:\\Moved");
+    await waitFor(() => {
+      const current = collectionLoadCounts();
+      expect(current.sources).toBeGreaterThan(loadsBeforeCommit.sources);
+      expect(current.clips).toBeGreaterThan(loadsBeforeCommit.clips);
+      expect(current.facets).toBeGreaterThan(loadsBeforeCommit.facets);
+    });
+    expect(screen.getAllByText("尚未完成首次扫描").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("E:\\Moved").length).toBeGreaterThan(0);
+  });
+
+  it("leaves a relocation follow-up job's terminal notification and refresh to the scan controller", async () => {
+    const user = userEvent.setup();
+    Reflect.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    Reflect.defineProperty(globalThis, "isTauri", {
+      configurable: true,
+      value: true,
+    });
+    const movedSources = sourceDirs.map((item) => item.id === "1"
+      ? { ...item, path: "E:\\Moved", scanRootPath: "E:\\Moved" }
+      : item);
+    const preview = relocationPreview();
+    const relocation = deferred<Awaited<ReturnType<typeof mocks.relocateScanSource>>>();
+    mocks.listSources
+      .mockReset()
+      .mockResolvedValueOnce(sourceDirs)
+      .mockResolvedValue(movedSources);
+    mocks.openDirectory.mockResolvedValueOnce("E:\\Moved");
+    mocks.previewScanSourceRelocation.mockResolvedValueOnce(preview);
+    mocks.relocateScanSource.mockReturnValueOnce(relocation.promise);
+    mocks.getScanSummary.mockResolvedValueOnce({
+      ...summary("completed"),
+      newClipCount: 4,
+    });
+    render(<App />);
+    await openScanWorkspace(user);
+
+    await user.click(screen.getByRole("button", { name: "重新定位 来源 1" }));
+    await user.click(screen.getByRole("button", { name: "选择新的根目录" }));
+    await user.click(await screen.findByRole("button", { name: "继续确认" }));
+    const loadsBeforeCommit = collectionLoadCounts();
+    await user.click(screen.getByRole("button", { name: "确认重新定位" }));
+    await waitFor(() => expect(mocks.relocateScanSource).toHaveBeenCalledTimes(1));
+
+    emitProgress(terminalProgress("relocation-follow-up", "completed", "同步完成"));
+    await waitFor(() => {
+      expect(screen.getAllByText("扫描完成：新增 4 个视频").length).toBeGreaterThan(0);
+    });
+    await waitFor(() => {
+      const current = collectionLoadCounts();
+      expect(current).toEqual({
+        clips: loadsBeforeCommit.clips + 1,
+        facets: loadsBeforeCommit.facets + 1,
+        sources: loadsBeforeCommit.sources + 1,
+        tags: loadsBeforeCommit.tags + 1,
+      });
+    });
+
+    await act(async () => {
+      relocation.resolve({
+        preview,
+        relocatedClipCount: 1,
+        syncJobId: "relocation-follow-up",
+        syncStarted: true,
+        syncStatus: "completed",
+        syncMessage: "同步完成",
+      });
+      await relocation.promise;
+    });
+    expect(await screen.findByText("重新定位成功，同步已完成")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "完成" }));
+    await user.click(screen.getByRole("button", { name: /识别结果/ }));
+    expect(screen.getByText("最近素材").closest("article")).toHaveTextContent(
+      "扫描完成：新增 4 个视频",
+    );
+    expect(collectionLoadCounts()).toEqual({
+      clips: loadsBeforeCommit.clips + 1,
+      facets: loadsBeforeCommit.facets + 1,
+      sources: loadsBeforeCommit.sources + 1,
+      tags: loadsBeforeCommit.tags + 1,
+    });
+  });
+
+  it("settles a relocation follow-up from the command result when all live events were missed", async () => {
+    const user = userEvent.setup();
+    Reflect.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    Reflect.defineProperty(globalThis, "isTauri", {
+      configurable: true,
+      value: true,
+    });
+    const movedSources = sourceDirs.map((item) => item.id === "1"
+      ? { ...item, path: "E:\\Moved", scanRootPath: "E:\\Moved" }
+      : item);
+    const preview = relocationPreview();
+    mocks.listSources
+      .mockReset()
+      .mockResolvedValueOnce(sourceDirs)
+      .mockResolvedValue(movedSources);
+    mocks.openDirectory.mockResolvedValueOnce("E:\\Moved");
+    mocks.previewScanSourceRelocation.mockResolvedValueOnce(preview);
+    mocks.relocateScanSource.mockResolvedValueOnce({
+      preview,
+      relocatedClipCount: 1,
+      syncJobId: "relocation-missed-events",
+      syncStarted: true,
+      syncStatus: "completed",
+      syncMessage: "同步完成",
+    });
+    mocks.getScanSummary.mockResolvedValueOnce({
+      ...summary("completed"),
+      newClipCount: 5,
+    });
+    render(<App />);
+    await openScanWorkspace(user);
+
+    await user.click(screen.getByRole("button", { name: "重新定位 来源 1" }));
+    await user.click(screen.getByRole("button", { name: "选择新的根目录" }));
+    await user.click(await screen.findByRole("button", { name: "继续确认" }));
+    const loadsBeforeCommit = collectionLoadCounts();
+    await user.click(screen.getByRole("button", { name: "确认重新定位" }));
+
+    expect(await screen.findByText("重新定位成功，同步已完成")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "完成" }));
+    await user.click(screen.getByRole("button", { name: /识别结果/ }));
+    expect(screen.getByText("最近素材").closest("article")).toHaveTextContent(
+      "扫描完成：新增 5 个视频",
+    );
+    expect(collectionLoadCounts()).toEqual({
+      clips: loadsBeforeCommit.clips + 1,
+      facets: loadsBeforeCommit.facets + 1,
+      sources: loadsBeforeCommit.sources + 1,
+      tags: loadsBeforeCommit.tags + 1,
+    });
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "blocks update installation while source relocation is pending and clears the blocker after %s",
+    async (settlement) => {
+      const user = userEvent.setup();
+      Reflect.defineProperty(window, "__TAURI_INTERNALS__", {
+        configurable: true,
+        value: {},
+      });
+      Reflect.defineProperty(globalThis, "isTauri", {
+        configurable: true,
+        value: true,
+      });
+      const preview = relocationPreview();
+      const relocation = deferred<Awaited<ReturnType<typeof mocks.relocateScanSource>>>();
+      prepareDownloadedUpdater();
+      mocks.openDirectory.mockResolvedValueOnce("E:\\Moved");
+      mocks.previewScanSourceRelocation.mockResolvedValueOnce(preview);
+      mocks.relocateScanSource.mockReturnValueOnce(relocation.promise);
+      render(<App />);
+      await openScanWorkspace(user);
+
+      await user.click(screen.getByRole("button", { name: "重新定位 来源 1" }));
+      await user.click(screen.getByRole("button", { name: "选择新的根目录" }));
+      await user.click(await screen.findByRole("button", { name: "继续确认" }));
+      await user.click(screen.getByRole("button", { name: "确认重新定位" }));
+      await waitFor(() => expect(mocks.relocateScanSource).toHaveBeenCalledTimes(1));
+
+      fireEvent.click(screen.getByRole("button", { name: /^设置/, hidden: true }));
+      expect(await screen.findByText(
+        "来源重新定位任务正在运行，请等待任务结束后再安装",
+      )).toBeVisible();
+      expect(screen.getByRole("button", { name: "安装并重启" })).toBeDisabled();
+
+      await act(async () => {
+        if (settlement === "resolve") {
+          relocation.resolve({
+            preview,
+            relocatedClipCount: 1,
+            syncJobId: null,
+            syncStarted: false,
+            syncStatus: null,
+            syncMessage: null,
+          });
+        } else {
+          relocation.reject(new Error("重新定位失败"));
+        }
+        await relocation.promise.catch(() => undefined);
+      });
+
+      await waitFor(() => {
+        expect(screen.queryByText(/来源重新定位任务正在运行/)).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "安装并重启" })).toBeEnabled();
+      });
+    },
+  );
 });
 
 async function openScanWorkspace(user: ReturnType<typeof userEvent.setup>) {
   await waitFor(() => expect(mocks.listSources).toHaveBeenCalled());
   await user.click(screen.getByRole("button", { name: "扫描目录" }));
-  await screen.findByRole("heading", { name: "扫描战术影像" });
+  await screen.findByRole("heading", { name: "扫描目录" });
+}
+
+async function openScanTaskWorkspace(user: ReturnType<typeof userEvent.setup>) {
+  await openScanWorkspace(user);
+  await user.click(screen.getByRole("button", { name: /扫描任务/ }));
 }
 
 function source(id: string, path: string): SourceDir {
@@ -247,12 +625,42 @@ function source(id: string, path: string): SourceDir {
     name: `来源 ${id}`,
     displayName: `来源 ${id}`,
     path,
+    sourceKind: "aclos",
+    scanMode: "aclos-structured",
+    scanRootPath: path,
     enabled: true,
     status: "available",
     accessibility: true,
     lastError: null,
     clipCount: 1,
     lastScanAt: null,
+  };
+}
+
+function relocationPreview(): ScanSourceRelocationPreview {
+  return {
+    sourceId: "1",
+    oldRootPath: sourceDirs[0].scanRootPath,
+    newRootPath: "E:\\Moved",
+    affectedSources: [{
+      id: "1",
+      displayName: "来源 1",
+      oldSourcePath: sourceDirs[0].path,
+      newSourcePath: "E:\\Moved",
+      clipCount: 1,
+    }],
+    exactPathMatchCount: 1,
+    identityMatchCount: 0,
+    legacyFingerprintMatchCount: 0,
+    unmatchedCount: 0,
+    newCandidateCount: 0,
+    expectedClipUpdateCount: 1,
+    expectedGroupUpdateCount: 1,
+    expectedCoverUpdateCount: 0,
+    expectedMetadataReferenceUpdateCount: 0,
+    conflicts: [],
+    blockers: [],
+    canRelocate: true,
   };
 }
 
@@ -303,6 +711,27 @@ function progress(jobId: string, message: string): ScanProgress {
   };
 }
 
+function terminalProgress(
+  jobId: string,
+  status: "completed" | "partial" | "cancelled" | "failed",
+  message: string,
+): ScanProgress {
+  return {
+    jobId,
+    phase: status,
+    currentRoot: "E:\\Moved",
+    source: null,
+    processed: 1,
+    total: 1,
+    message,
+    terminal: true,
+    status,
+    sourceDirCount: 1,
+    clipGroupCount: 1,
+    clipFileCount: 1,
+  };
+}
+
 function cancelResult(jobId: string): CancelScanResult {
   return {
     accepted: true,
@@ -336,6 +765,46 @@ async function expectCollectionsRefreshed(previous: ReturnType<typeof collection
     expect(current.facets).toBeGreaterThan(previous.facets);
     expect(current.sources).toBeGreaterThan(previous.sources);
     expect(current.tags).toBeGreaterThan(previous.tags);
+  });
+}
+
+function resetAppUpdater() {
+  Object.assign(mocks.appUpdater, {
+    runtimeInfo: {
+      currentVersion: "0.2.1",
+      channel: "stable",
+      endpoint: "https://github.com/2424521842/valoframe/releases/latest/download/latest.json",
+      configured: true,
+    },
+    runtimeStatus: "ready",
+    runtimeError: null,
+    phase: "idle",
+    update: null,
+    progress: { downloadedBytes: 0, totalBytes: null },
+    message: "更新检查尚未运行",
+    error: null,
+    canCheck: true,
+    canDownload: false,
+    canCancelDownload: false,
+    canInstall: false,
+  });
+}
+
+function prepareDownloadedUpdater() {
+  Object.assign(mocks.appUpdater, {
+    phase: "downloaded",
+    update: {
+      currentVersion: "0.2.1",
+      version: "0.2.2",
+      notes: "自动更新集成测试",
+      publishedAt: "2026-08-10T00:00:00Z",
+    },
+    message: "更新包已下载并通过签名验证，可以安装",
+    error: null,
+    canCheck: false,
+    canDownload: false,
+    canCancelDownload: false,
+    canInstall: true,
   });
 }
 

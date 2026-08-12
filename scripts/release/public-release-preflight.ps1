@@ -18,6 +18,9 @@ param(
     [string] $ExpectedSourceCommit,
 
     [Parameter()]
+    [string] $EvidenceRoot,
+
+    [Parameter()]
     [switch] $RequireReady,
 
     [Parameter()]
@@ -153,6 +156,7 @@ function Get-RepositoryHeadCommit {
 function Get-EvidenceValidationError {
     param(
         [Parameter(Mandatory)] [string] $Root,
+        [AllowNull()] [AllowEmptyString()] [string] $ExternalEvidenceRoot,
         [Parameter(Mandatory)] [object] $PolicySection,
         [Parameter(Mandatory)] [string] $PolicyRequiredProperty,
         [Parameter(Mandatory)] [string] $EvidenceRecordsProperty,
@@ -162,9 +166,16 @@ function Get-EvidenceValidationError {
     )
 
     try {
-        $policySourceCommit = Get-RequiredEvidenceString -Object $PolicySection -PropertyName 'sourceCommit' -Context "$Description policy"
-        if ($policySourceCommit -cnotmatch '^[0-9a-f]{40}$') {
-            throw "$Description policy sourceCommit must be a full lowercase Git commit hash."
+        if ([string]::IsNullOrWhiteSpace($ExternalEvidenceRoot)) {
+            throw "$Description evidence requires the protected external evidence root."
+        }
+        if ([string] $PolicySection.evidenceSource -cne 'protected-external-archive') {
+            throw "$Description policy evidenceSource must be 'protected-external-archive'."
+        }
+        foreach ($externalOnlyProperty in @('sourceCommit', 'approved', 'approvalReference')) {
+            if ($null -ne $PolicySection.PSObject.Properties[$externalOnlyProperty]) {
+                throw "$Description policy must not embed '$externalOnlyProperty'; approval and source-commit binding belong to the protected external evidence manifest."
+            }
         }
         $releaseCommit = if ([string]::IsNullOrWhiteSpace($RequiredSourceCommit)) {
             Get-RepositoryHeadCommit -Root $Root
@@ -172,10 +183,6 @@ function Get-EvidenceValidationError {
         else {
             $RequiredSourceCommit.ToLowerInvariant()
         }
-        if ($policySourceCommit -cne $releaseCommit) {
-            throw "$Description policy sourceCommit does not match the release commit."
-        }
-
         $policyCodes = @($PolicySection.$PolicyRequiredProperty)
         $policyCodeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
         foreach ($code in $policyCodes) {
@@ -189,13 +196,17 @@ function Get-EvidenceValidationError {
         }
 
         $evidenceRelativePath = Get-RequiredEvidenceString -Object $PolicySection -PropertyName 'evidenceManifest' -Context "$Description policy"
-        $evidencePath = Resolve-RepositoryFile -Root $Root -RelativePath $evidenceRelativePath -Description "$Description evidence manifest"
+        $evidencePath = Resolve-RepositoryFile -Root $ExternalEvidenceRoot -RelativePath $evidenceRelativePath -Description "$Description evidence manifest"
         $evidence = Get-Content -Raw -LiteralPath $evidencePath -Encoding UTF8 | ConvertFrom-Json -Depth 100
         if ($evidence.schemaVersion -isnot [long] -and $evidence.schemaVersion -isnot [int]) {
             throw "$Description evidence schemaVersion must be an integer."
         }
         if ([long] $evidence.schemaVersion -ne 1 -or [string] $evidence.sourceCommit -cne $releaseCommit) {
             throw "$Description evidence schema or sourceCommit is invalid."
+        }
+        if (-not (Test-BooleanTrue -Section $evidence -PropertyName 'approved') -or
+            [string]::IsNullOrWhiteSpace([string] $evidence.approvalReference)) {
+            throw "$Description external evidence is not accompanied by a real approval attestation."
         }
 
         $recordsProperty = $evidence.PSObject.Properties[$EvidenceRecordsProperty]
@@ -217,7 +228,7 @@ function Get-EvidenceValidationError {
             if ($artifactHash -cnotmatch '^[0-9a-f]{64}$') {
                 throw "$Description evidence record '$code' has an invalid SHA-256."
             }
-            $artifactPath = Resolve-RepositoryFile -Root $Root -RelativePath $artifactRelativePath -Description "$Description evidence artifact '$code'"
+            $artifactPath = Resolve-RepositoryFile -Root $ExternalEvidenceRoot -RelativePath $artifactRelativePath -Description "$Description evidence artifact '$code'"
             $actualHash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($actualHash -cne $artifactHash) {
                 throw "$Description evidence artifact '$code' does not match its SHA-256."
@@ -239,6 +250,17 @@ $policyFile = Get-CanonicalPath -LiteralPath $PolicyPath -Directory $false -Desc
 $rootPrefix = $root.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
 if (-not $policyFile.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Public release policy must be stored inside the repository root: '$policyFile'."
+}
+$externalEvidenceRoot = if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
+    $null
+}
+else {
+    $resolvedEvidenceRoot = Get-CanonicalPath -LiteralPath $EvidenceRoot -Directory $true -Description 'protected external evidence root'
+    if ($resolvedEvidenceRoot -ceq $root -or
+        $resolvedEvidenceRoot.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Protected external evidence must be staged outside the repository checkout.'
+    }
+    $resolvedEvidenceRoot
 }
 $policy = Get-Content -Raw -LiteralPath $policyFile -Encoding UTF8 | ConvertFrom-Json -Depth 100
 if ([long] $policy.schemaVersion -ne 1 -or [string] $policy.releaseMode -cne 'public') {
@@ -388,11 +410,24 @@ $requiredOperationalAssumptionScopes = @(
 $confirmedGameContentScopes = @($gameContent.confirmedScopes)
 $operationalGameContentScopes = @($gameContent.operationalAssumptionScopes)
 $missingGameContentScopes = @($requiredPublicGameContentScopes | Where-Object { $_ -cnotin $confirmedGameContentScopes })
-if (-not (Test-ApprovedReference -Section $gameContent) -or $missingGameContentScopes.Count -ne 0) {
+$extraGameContentScopes = @($confirmedGameContentScopes | Where-Object { $_ -cnotin $requiredPublicGameContentScopes })
+$confirmedScopeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$confirmedScopesValid = $true
+foreach ($scope in $confirmedGameContentScopes) {
+    if ($scope -isnot [string] -or [string]::IsNullOrWhiteSpace([string] $scope) -or
+        -not $confirmedScopeSet.Add([string] $scope)) {
+        $confirmedScopesValid = $false
+    }
+}
+$confirmedScopesExact = $confirmedScopesValid -and $missingGameContentScopes.Count -eq 0 -and $extraGameContentScopes.Count -eq 0
+$gameContentApproved = Test-ApprovedReference -Section $gameContent
+if (-not $gameContentApproved -or -not $confirmedScopesExact) {
+    $scopeIssue = @($missingGameContentScopes + $extraGameContentScopes)
+    if ($scopeIssue.Count -eq 0) { $scopeIssue = @('invalid-or-duplicate-confirmed-scope') }
     Add-Blocker `
         -Code 'GAME_CONTENT_DISTRIBUTION_RIGHTS_MISSING' `
         -PolicyField 'gameContentRights' `
-        -Message "Reviewed game-content evidence does not confirm public release scopes: $($missingGameContentScopes -join ', ')."
+        -Message "Reviewed game-content evidence does not contain the exact public release scopes: $($scopeIssue -join ', ')."
 }
 
 try {
@@ -421,10 +456,6 @@ try {
         throw 'Game-content policy does not contain the exact public release scope set.'
     }
 
-    if (-not (Test-BooleanFalse -Section $gameContent -PropertyName 'approved') -or
-        $confirmedGameContentScopes.Count -ne 0) {
-        throw 'Pending owner attestation must not be represented as reviewed approval or confirmed scope.'
-    }
     $policyOperationalScopeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($scope in $operationalGameContentScopes) {
         if ($scope -isnot [string] -or [string]::IsNullOrWhiteSpace([string] $scope) -or
@@ -453,13 +484,50 @@ try {
         throw 'Policy and asset manifest do not reference the same game-content authorization record.'
     }
     $approval = Get-Content -Raw -LiteralPath $gameContentApprovalPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
-    if ($null -ne $approval.PSObject.Properties['approved'] -or
-        [string] $approval.status -cne 'owner-attested-pending-source-evidence-review' -or
-        -not (Test-BooleanTrue -Section $approval -PropertyName 'ownerAttestationReceived') -or
-        -not (Test-BooleanFalse -Section $approval -PropertyName 'sourceDocumentReviewed') -or
-        -not (Test-BooleanFalse -Section $approval -PropertyName 'legalReviewApproved') -or
-        -not (Test-BooleanTrue -Section $approval -PropertyName 'manualReviewRequired')) {
-        throw 'Game-content rights record must remain an owner attestation pending source-evidence and legal review.'
+    $policyPending = (Test-BooleanFalse -Section $gameContent -PropertyName 'approved') -and
+        $confirmedGameContentScopes.Count -eq 0
+    if ($policyPending) {
+        if ($null -ne $approval.PSObject.Properties['approved'] -or
+            [string] $approval.status -cne 'owner-attested-pending-source-evidence-review' -or
+            -not (Test-BooleanTrue -Section $approval -PropertyName 'ownerAttestationReceived') -or
+            -not (Test-BooleanFalse -Section $approval -PropertyName 'sourceDocumentReviewed') -or
+            -not (Test-BooleanFalse -Section $approval -PropertyName 'legalReviewApproved') -or
+            -not (Test-BooleanTrue -Section $approval -PropertyName 'manualReviewRequired')) {
+            throw 'Pending game-content policy requires the reviewed owner-attestation pending shape.'
+        }
+    }
+    elseif ($gameContentApproved -and $confirmedScopesExact) {
+        if (-not (Test-BooleanTrue -Section $approval -PropertyName 'approved') -or
+            [string] $approval.status -cne 'approved-for-public-release' -or
+            -not (Test-BooleanTrue -Section $approval -PropertyName 'ownerAttestationReceived') -or
+            -not (Test-BooleanTrue -Section $approval -PropertyName 'sourceDocumentReviewed') -or
+            -not (Test-BooleanTrue -Section $approval -PropertyName 'legalReviewApproved') -or
+            -not (Test-BooleanFalse -Section $approval -PropertyName 'manualReviewRequired') -or
+            [string]::IsNullOrWhiteSpace([string] $approval.evidenceReference) -or
+            [string] $approval.evidenceDocumentSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            [string]::IsNullOrWhiteSpace([string] $approval.rightsHolderIdentity) -or
+            [string] $approval.rightsHolderIdentity -ceq 'not-provided' -or
+            [string]::IsNullOrWhiteSpace([string] $approval.licensee) -or
+            [string] $approval.licensee -ceq 'not-provided') {
+            throw 'Approved game-content policy requires a complete reviewed public-release authorization record.'
+        }
+        $approvedScopeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($scope in @($approval.approvedScopes)) {
+            if ($scope -isnot [string] -or [string]::IsNullOrWhiteSpace([string] $scope) -or
+                -not $approvedScopeSet.Add([string] $scope)) {
+                throw 'Approved game-content authorization contains an invalid or duplicate approved scope.'
+            }
+        }
+        if ($approvedScopeSet.Count -ne $requiredPublicGameContentScopes.Count -or
+            @($requiredPublicGameContentScopes | Where-Object { -not $approvedScopeSet.Contains($_) }).Count -ne 0) {
+            throw 'Approved game-content authorization does not contain the exact public release scope set.'
+        }
+        if ([string] $approval.assetSet.manifestSha256 -cne [string] $gameContent.manifestSha256) {
+            throw 'Approved game-content authorization is not bound to the policy asset manifest hash.'
+        }
+    }
+    else {
+        throw 'Game-content policy is neither a valid pending state nor a complete approved state.'
     }
     $approvalScopeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($scope in @($approval.repositoryOperationalAssumptionScopes)) {
@@ -521,7 +589,9 @@ if (-not (Test-BooleanTrue -Section $signing -PropertyName 'signtoolVerification
     Add-Blocker -Code 'SIGNTOOL_VERIFICATION_NOT_READY' -PolicyField 'authenticode.signtoolVerificationRequired' -Message 'Public artifacts must require signtool chain verification.'
 }
 
-if (-not (Test-ApprovedReference -Section $policy.cleanVmValidation)) {
+if ([string] $policy.cleanVmValidation.evidenceSource -cne 'protected-external-archive' -or
+    [string]::IsNullOrWhiteSpace([string] $policy.cleanVmValidation.evidenceManifest) -or
+    $null -eq $externalEvidenceRoot) {
     Add-Blocker -Code 'CLEAN_VM_EVIDENCE_MISSING' -PolicyField 'cleanVmValidation' -Message 'Approved clean-VM install/upgrade/uninstall evidence is missing.'
 }
 else {
@@ -529,14 +599,28 @@ else {
         'fresh-install-webview2-present',
         'fresh-install-webview2-missing-online',
         'fresh-install-webview2-missing-offline',
+        'windows-10-x64',
+        'windows-11-x64',
+        'dpi-100-percent',
+        'dpi-150-percent',
+        'dpi-200-percent',
+        'minimum-window-760x560',
+        'nvidia-real-output-import-rescan-startup-preview-review',
+        'tracker-real-output-import-rescan-startup-preview-review',
+        'same-source-subdirectory-rename-auto-reconnect-user-state-preserved',
+        'source-root-relocation-user-state-preserved',
+        'kill-death-timeline-icons-tooltips-accessibility-and-seek',
         'same-version-reinstall',
-        'supported-upgrade',
+        'v0.1.0-beta.1-manual-upgrade-to-v0.2.1',
+        'signed-updater-v0.2.1-to-v0.2.2-schema-v16-user-state-preserved',
+        'signed-updater-upgrade-to-higher-patch',
         'downgrade-rejected',
         'uninstall-user-data-preserved',
         'packaged-ffmpeg-only'
     )
     $cleanVmError = Get-EvidenceValidationError `
         -Root $root `
+        -ExternalEvidenceRoot $externalEvidenceRoot `
         -PolicySection $policy.cleanVmValidation `
         -PolicyRequiredProperty 'requiredScenarios' `
         -EvidenceRecordsProperty 'scenarios' `
@@ -557,18 +641,22 @@ elseif ($updaterDecision -ceq 'enabled' -and
     Add-Blocker -Code 'UPDATER_CONFIGURATION_INCOMPLETE' -PolicyField 'updater' -Message 'Enabled updater lacks an HTTPS endpoint or public-key reference.'
 }
 
-if (-not (Test-ApprovedReference -Section $policy.dataSafety)) {
-    Add-Blocker -Code 'DATA_SAFETY_APPROVAL_MISSING' -PolicyField 'dataSafety' -Message 'Source-media and user-data safety evidence is not approved.'
+if ([string] $policy.dataSafety.evidenceSource -cne 'protected-external-archive' -or
+    [string]::IsNullOrWhiteSpace([string] $policy.dataSafety.evidenceManifest) -or
+    $null -eq $externalEvidenceRoot) {
+    Add-Blocker -Code 'DATA_SAFETY_APPROVAL_MISSING' -PolicyField 'dataSafety' -Message 'Approved source-media and user-data safety evidence is missing.'
 }
 else {
     $requiredDataSafetyChecks = @(
         'source-media-readonly-default',
+        'index-only-removal-source-media-sha256-unchanged',
         'permanent-delete-explicit-confirmation',
         'application-data-boundary',
         'uninstall-user-data-preserved'
     )
     $dataSafetyError = Get-EvidenceValidationError `
         -Root $root `
+        -ExternalEvidenceRoot $externalEvidenceRoot `
         -PolicySection $policy.dataSafety `
         -PolicyRequiredProperty 'requiredChecks' `
         -EvidenceRecordsProperty 'checks' `
@@ -593,6 +681,10 @@ $report = [ordered]@{
         name = [string] $tauriConfig.productName
         version = [string] $tauriConfig.version
         identifier = [string] $tauriConfig.identifier
+    }
+    externalEvidence = [ordered]@{
+        source = 'protected-external-archive'
+        provided = $null -ne $externalEvidenceRoot
     }
     blockerCount = $blockers.Count
     blockers = $blockers.ToArray()

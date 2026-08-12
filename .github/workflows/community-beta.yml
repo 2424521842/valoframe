@@ -403,7 +403,16 @@ jobs:
             throw 'Installed third-party compliance evidence must be a regular directory.'
           }
 
-      - name: Build unsigned updater-free NSIS
+      - name: Prove Community Beta updater signing is disabled
+        shell: pwsh
+        run: |
+          foreach ($name in @('VALOFRAME_UPDATER_PUBLIC_KEY', 'TAURI_SIGNING_PRIVATE_KEY', 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD')) {
+            if (-not [string]::IsNullOrEmpty([System.Environment]::GetEnvironmentVariable($name))) {
+              throw "Community Beta must not receive $name."
+            }
+          }
+
+      - name: Build unsigned NSIS without updater artifacts
         run: npm run release:bundle:windows:community-beta
 
       - name: Verify Community Beta installer and retain controlled payload
@@ -414,6 +423,12 @@ jobs:
           $nsisScripts = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release\nsis') -Filter 'installer.nsi' -File -Recurse)
           if ($installers.Count -ne 1 -or $nsisScripts.Count -ne 1) {
             throw "Expected one installer and one installer.nsi; found $($installers.Count) and $($nsisScripts.Count)."
+          }
+          $updaterArtifacts = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release\bundle') -File -Recurse | Where-Object {
+            $_.Name -ceq 'latest.json' -or $_.Extension -ceq '.sig'
+          })
+          if ($updaterArtifacts.Count -ne 0) {
+            throw 'Community Beta must not produce latest.json or updater signatures.'
           }
           $verifiedPayload = Join-Path $env:RUNNER_TEMP 'vhm-community-beta-verified-payload'
           [void] (New-Item -ItemType Directory -Path $verifiedPayload)
@@ -565,15 +580,16 @@ jobs:
           if ($smoke.status -cne 'passed') {
             throw 'Community Beta startup smoke failed.'
           }
-          if ([int] $smoke.database.schemaVersion -ne 13 -or
+          if ([int] $smoke.database.schemaVersion -ne 16 -or
               [int] $smoke.database.requiredTableCount -ne 16 -or
               [long] $smoke.database.trashSnapshotCount -ne 0 -or
               [long] $smoke.database.deleteIntentCount -ne 0) {
-            throw 'Community Beta startup smoke did not prove a fresh schema-v13 database with empty trash-snapshot and delete-intent journals.'
+            throw 'Community Beta startup smoke did not prove a fresh schema-v16 database with empty trash-snapshot and delete-intent journals.'
           }
           $singleInstance = $smoke.runtime.singleInstance
           if ($singleInstance.verified -ne $true -or
               -not [string]::Equals([string] $singleInstance.sharedLaunchConfiguration.environmentOverrides.VHM_RELEASE_SMOKE_ROOT, [string] $smoke.runtime.isolationRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+              -not [string]::Equals([string] $singleInstance.sharedLaunchConfiguration.environmentOverrides.WEBVIEW2_USER_DATA_FOLDER, [string] $smoke.runtime.webView2UserDataPath, [System.StringComparison]::OrdinalIgnoreCase) -or
               [int] $singleInstance.secondInstanceExitCode -ne 0 -or
               [uint32] $singleInstance.secondInstanceJobActiveProcessesAfterExit -ne 0 -or
               $singleInstance.onlyPrimaryNamedRootAfterHandoff -ne $true -or

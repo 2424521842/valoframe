@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  absoluteTimelineCompilationMode,
   expectsOfficialRoundScore,
   matchesVideoType,
+  previewTimelineMarkerMode,
   videoTypeLabel,
   VIDEO_TYPE_FILTERS,
 } from "../src/lib/videoTypes.ts";
@@ -48,6 +50,48 @@ test("compilation and death metadata map to independent video types", () => {
   assert.equal(matchesVideoType({ highlightType: 2 }, "kill-compilation"), true);
   assert.equal(matchesVideoType({ officialVideoName: "死亡集锦" }, "death"), true);
   assert.equal(matchesVideoType({ highlightType: 3 }, "kill-compilation"), false);
+});
+
+test("absolute compilation classification stays separate from marker eligibility", () => {
+  assert.equal(previewTimelineMarkerMode({ highlightType: 2 }), "kill");
+  assert.equal(previewTimelineMarkerMode({ highlightType: 3 }), "death");
+  assert.equal(previewTimelineMarkerMode({ officialVideoType: "KILL COMPILATION" }), "kill");
+  assert.equal(previewTimelineMarkerMode({ officialVideoName: "死亡集锦" }), "death");
+  assert.equal(previewTimelineMarkerMode({ officialVideoName: "普通素材" }), null);
+  assert.equal(
+    previewTimelineMarkerMode({ officialVideoName: "击杀集锦 / 死亡集锦" }),
+    null,
+  );
+  assert.equal(
+    previewTimelineMarkerMode({ highlightType: 2, officialVideoName: "死亡集锦" }),
+    "kill",
+  );
+
+  assert.equal(absoluteTimelineCompilationMode({ highlightType: 2 }), "kill");
+  assert.equal(absoluteTimelineCompilationMode({ highlightType: 3 }), "death");
+  assert.equal(
+    absoluteTimelineCompilationMode({ officialVideoName: "击杀集锦 / 死亡集锦" }),
+    null,
+  );
+});
+
+test("ordinary multi-kills expose kill markers without entering compilation filters", () => {
+  const ordinaryMultiKills = [
+    { highlightType: 4 },
+    { highlightType: 6 },
+    { highlightType: 10 },
+    ...[3, 4, 5, 6].map((killCount) => ({ killCount })),
+    ...["三杀时刻", "四杀时刻", "五杀时刻", "六杀时刻"].map(
+      (officialVideoName) => ({ officialVideoName }),
+    ),
+  ];
+
+  for (const clip of ordinaryMultiKills) {
+    assert.equal(previewTimelineMarkerMode(clip), "kill");
+    assert.equal(absoluteTimelineCompilationMode(clip), null);
+    assert.equal(matchesVideoType(clip, "kill-compilation"), false);
+    assert.equal(matchesVideoType(clip, "death"), false);
+  }
 });
 
 test("official round scores are expected only for supported modes and kill moments", () => {

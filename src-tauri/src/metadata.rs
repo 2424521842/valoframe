@@ -26,6 +26,48 @@ pub enum DetectedVideoType {
     Death,
 }
 
+/// Describes how WonderfulDb's `event_sTime` is positioned inside an exported video.
+///
+/// Compilation exports already store an absolute video offset. Ordinary highlights
+/// store an offset relative to their containing round segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineEventTimeSemantics {
+    SegmentRelative,
+    VideoAbsolute,
+}
+
+/// Classifies the event-time convention used by a WonderfulDb video record.
+///
+/// Positive numeric highlight types are authoritative,
+/// while names/types provide compatibility with older records that did not persist
+/// `highLightType`. Unknown records deliberately remain unclassified so callers do
+/// not guess whether an event offset is relative or absolute.
+pub fn classify_timeline_event_time(
+    highlight_type: Option<i64>,
+    video_name: &str,
+    video_type: &str,
+) -> Option<TimelineEventTimeSemantics> {
+    let descriptive_text = format!("{video_name} {video_type}");
+
+    if matches!(highlight_type, Some(2 | 3))
+        || is_kill_collection_text(&descriptive_text)
+        || is_death_moment_text(&descriptive_text)
+    {
+        return Some(TimelineEventTimeSemantics::VideoAbsolute);
+    }
+
+    if highlight_type.is_some_and(|highlight_type| highlight_type > 0)
+        || contains_any(&descriptive_text, &["三杀", "3杀", "三连杀"])
+        || contains_any(&descriptive_text, &["四杀", "4杀", "四连杀"])
+        || is_five_kill_text(&descriptive_text)
+        || is_six_kill_text(&descriptive_text)
+    {
+        return Some(TimelineEventTimeSemantics::SegmentRelative);
+    }
+
+    None
+}
+
 impl DetectedVideoType {
     pub fn highlight_type(self) -> i64 {
         match self {

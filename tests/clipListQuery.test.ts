@@ -82,6 +82,24 @@ test("missing and trash modes override the legacy file-status selector", () => {
   assert.equal(buildClipListQuery({ ...base, libraryMode: "all" }).tagId, undefined);
 });
 
+test("quick-pick decisions are deliberately absent from the production list contract", () => {
+  const query = buildClipListQuery({
+    query: "",
+    accountId: "all",
+    sourceDirId: "all",
+    agentName: "all",
+    mapName: "all",
+    gameMode: "all",
+    tagId: "all",
+    highlightFilter: "all",
+    fileStatus: "all",
+    libraryMode: "all",
+    sortBy: "modified-desc",
+  });
+  assert.equal(query.reviewDecision, undefined);
+  assert.equal(query.favoriteFilter, undefined);
+});
+
 test("query generation keys ignore only the page offset", () => {
   const first = { offset: 0, limit: 50, query: "ace", sortBy: "modified-desc" as const };
   assert.equal(clipListQueryKey(first), clipListQueryKey({ ...first, offset: 50 }));

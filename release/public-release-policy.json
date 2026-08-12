@@ -1,6 +1,8 @@
 {
   "schemaVersion": 1,
   "releaseMode": "public",
+  "enforcement": "optional-future-hardening",
+  "description": "This policy records optional strict public-release hardening. It is not a gate for the personal-developer stable updater workflow; Tauri updater signing remains mandatory there.",
   "projectLicense": {
     "approved": true,
     "spdxExpression": "MIT",
@@ -64,13 +66,8 @@
   },
   "iconRights": {
     "approved": false,
-    "confirmedScopes": [
-      "public-source-repository"
-    ],
-    "requiredScopes": [
-      "windows-installer",
-      "public-download"
-    ],
+    "confirmedScopes": ["public-source-repository"],
+    "requiredScopes": ["windows-installer", "public-download"],
     "approvalReference": null
   },
   "riotTencentDisclaimer": {
@@ -82,6 +79,7 @@
     "manifest": "third_party/ffmpeg/windows-x64.json"
   },
   "authenticode": {
+    "requiredForPersonalUpdaterRelease": false,
     "certificateProvisioned": false,
     "expectedPublisherSubject": null,
     "expectedCertificateThumbprint": null,
@@ -91,37 +89,48 @@
     "approvalReference": null
   },
   "cleanVmValidation": {
-    "approved": false,
-    "evidenceManifest": null,
-    "sourceCommit": null,
+    "evidenceSource": "protected-external-archive",
+    "evidenceManifest": "clean-vm-evidence.json",
     "requiredScenarios": [
       "fresh-install-webview2-present",
       "fresh-install-webview2-missing-online",
       "fresh-install-webview2-missing-offline",
+      "windows-10-x64",
+      "windows-11-x64",
+      "dpi-100-percent",
+      "dpi-150-percent",
+      "dpi-200-percent",
+      "minimum-window-760x560",
+      "nvidia-real-output-import-rescan-startup-preview-review",
+      "tracker-real-output-import-rescan-startup-preview-review",
+      "same-source-subdirectory-rename-auto-reconnect-user-state-preserved",
+      "source-root-relocation-user-state-preserved",
+      "kill-death-timeline-icons-tooltips-accessibility-and-seek",
       "same-version-reinstall",
-      "supported-upgrade",
+      "v0.1.0-beta.1-manual-upgrade-to-v0.2.1",
+      "signed-updater-v0.2.1-to-v0.2.2-schema-v16-user-state-preserved",
+      "signed-updater-upgrade-to-higher-patch",
       "downgrade-rejected",
       "uninstall-user-data-preserved",
       "packaged-ffmpeg-only"
-    ],
-    "approvalReference": null
+    ]
   },
   "updater": {
-    "decision": "pending",
-    "approvalReference": null,
-    "endpoint": null,
-    "publicKeyReference": null
+    "decision": "enabled",
+    "approvalReference": "docs/APP_UPDATES.md#一次性密钥配置",
+    "endpoint": "https://github.com/2424521842/valoframe/releases/latest/download/latest.json",
+    "publicKeyReference": "repository-variable:VALOFRAME_UPDATER_PUBLIC_KEY",
+    "tauriSignatureRequired": true
   },
   "dataSafety": {
-    "approved": false,
-    "evidenceManifest": null,
-    "sourceCommit": null,
+    "evidenceSource": "protected-external-archive",
+    "evidenceManifest": "data-safety-evidence.json",
     "requiredChecks": [
       "source-media-readonly-default",
+      "index-only-removal-source-media-sha256-unchanged",
       "permanent-delete-explicit-confirmation",
       "application-data-boundary",
       "uninstall-user-data-preserved"
-    ],
-    "approvalReference": null
+    ]
   }
 }

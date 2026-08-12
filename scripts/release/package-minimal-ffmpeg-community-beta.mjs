@@ -315,6 +315,10 @@ function validateCandidate({ artifactRoot, candidate, contract }) {
     "--enable-demuxer=mov",
     "--enable-parser=h264",
     "--enable-decoder=h264",
+    "--enable-parser=hevc",
+    "--enable-decoder=hevc",
+    "--enable-parser=av1",
+    "--enable-decoder=av1",
     "--enable-filter=scale",
     "--enable-encoder=mjpeg",
     "--enable-muxer=image2",
@@ -399,6 +403,23 @@ function validateCandidate({ artifactRoot, candidate, contract }) {
   requirePositiveInteger(verification.smoke?.outputSizeBytes, "Windows verification smoke outputSizeBytes");
   assert(verification.smoke.outputSizeBytes <= candidate.runtimeContract.maximumOutputBytes, "Windows verification smoke output is too large.");
   requireHash(verification.smoke?.outputSha256, "Windows verification smoke outputSha256");
+  const expectedSmokeFixtures = [
+    candidate.runtimeContract.smokeFixture,
+    ...(Array.isArray(candidate.runtimeContract.additionalSmokeFixtures)
+      ? candidate.runtimeContract.additionalSmokeFixtures
+      : []),
+  ];
+  assert(Array.isArray(verification.smokeFixtures), "Windows verification smokeFixtures must be an array.");
+  assert(verification.smokeFixtures.length === expectedSmokeFixtures.length, "Windows verification smoke fixture count is invalid.");
+  for (let index = 0; index < expectedSmokeFixtures.length; index += 1) {
+    const expectedFixture = expectedSmokeFixtures[index];
+    const verifiedFixture = requireObject(verification.smokeFixtures[index], `Windows verification smokeFixtures[${index}]`);
+    assert(verifiedFixture.codec === (expectedFixture.codec ?? `fixture-${index}`), `Windows verification smoke fixture ${index} codec is invalid.`);
+    assert(verifiedFixture.fixtureSha256 === expectedFixture.sha256, `Windows verification smoke fixture ${index} hash is invalid.`);
+    requirePositiveInteger(verifiedFixture.outputSizeBytes, `Windows verification smokeFixtures[${index}].outputSizeBytes`);
+    assert(verifiedFixture.outputSizeBytes <= candidate.runtimeContract.maximumOutputBytes, `Windows verification smoke fixture ${index} output is too large.`);
+    requireHash(verifiedFixture.outputSha256, `Windows verification smokeFixtures[${index}].outputSha256`);
+  }
 
   return {
     artifactPaths,

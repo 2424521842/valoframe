@@ -62,15 +62,52 @@ pub fn reconcile_clip_thumbnails(
     clip_ids: Option<&[i64]>,
     force_retry: bool,
 ) -> DbResult<ThumbnailReconcileResult> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| readable_error("starting thumbnail reconciliation", error))?;
+    let result = reconcile_clip_thumbnails_in_transaction(&transaction, clip_ids, force_retry)?;
+    transaction
+        .commit()
+        .map_err(|error| readable_error("finishing thumbnail reconciliation", error))?;
+    Ok(result)
+}
+
+/// Reconciles thumbnail rows using a transaction already owned by a larger atomic mutation.
+/// This keeps source relocation path changes and stale-claim invalidation in the same commit.
+pub(in crate::db) fn reconcile_clip_thumbnails_in_transaction(
+    connection: &Connection,
+    clip_ids: Option<&[i64]>,
+    force_retry: bool,
+) -> DbResult<ThumbnailReconcileResult> {
     let selected_ids = clip_ids.map(normalized_clip_ids).transpose()?;
+    reconcile_normalized_clip_thumbnails_in_transaction(connection, selected_ids, force_retry)
+}
+
+/// Reconciles an internal, transaction-owned clip set without applying the public command's
+/// request-size limit. Callers must already have bounded the mutation through their own domain
+/// scope (for example, every clip belonging to the source roots being relocated).
+pub(in crate::db) fn reconcile_clip_thumbnails_unbounded_in_transaction(
+    connection: &Connection,
+    clip_ids: &[i64],
+    force_retry: bool,
+) -> DbResult<ThumbnailReconcileResult> {
+    reconcile_normalized_clip_thumbnails_in_transaction(
+        connection,
+        Some(normalized_clip_ids_unbounded(clip_ids)),
+        force_retry,
+    )
+}
+
+fn reconcile_normalized_clip_thumbnails_in_transaction(
+    connection: &Connection,
+    selected_ids: Option<Vec<i64>>,
+    force_retry: bool,
+) -> DbResult<ThumbnailReconcileResult> {
     if selected_ids.as_ref().is_some_and(Vec::is_empty) {
         return Ok(ThumbnailReconcileResult::default());
     }
 
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| readable_error("starting thumbnail reconciliation", error))?;
-    let candidates = load_reconcile_candidates(&transaction, selected_ids.as_deref())?;
+    let candidates = load_reconcile_candidates(connection, selected_ids.as_deref())?;
     let requested = selected_ids
         .as_ref()
         .map_or(candidates.len(), |ids| ids.len());
@@ -86,7 +123,7 @@ pub fn reconcile_clip_thumbnails(
 
     for candidate in candidates {
         reconcile_candidate(
-            &transaction,
+            connection,
             candidate,
             is_selected_reconcile,
             force_retry,
@@ -94,9 +131,6 @@ pub fn reconcile_clip_thumbnails(
         )?;
     }
 
-    transaction
-        .commit()
-        .map_err(|error| readable_error("finishing thumbnail reconciliation", error))?;
     Ok(result)
 }
 
@@ -752,7 +786,7 @@ fn reconcile_candidate(
     Ok(())
 }
 
-fn reset_thumbnail_state(
+pub(in crate::db) fn reset_thumbnail_state(
     connection: &Connection,
     clip_id: i64,
     fingerprint: &str,
@@ -789,13 +823,22 @@ fn reset_thumbnail_state(
 }
 
 fn normalized_clip_ids(clip_ids: &[i64]) -> DbResult<Vec<i64>> {
-    let ids = clip_ids.iter().copied().collect::<BTreeSet<_>>();
+    let ids = normalized_clip_ids_unbounded(clip_ids);
     if ids.len() > MAX_COMMAND_CLIP_IDS {
         return Err(format!(
             "thumbnail commands accept at most {MAX_COMMAND_CLIP_IDS} unique clip ids"
         ));
     }
-    Ok(ids.into_iter().collect())
+    Ok(ids)
+}
+
+fn normalized_clip_ids_unbounded(clip_ids: &[i64]) -> Vec<i64> {
+    clip_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn validate_cache_basename(cache_file: &str) -> DbResult<()> {

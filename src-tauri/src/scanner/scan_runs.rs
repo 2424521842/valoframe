@@ -1,6 +1,6 @@
 use std::fmt;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{
     de::{SeqAccess, Visitor},
     Deserialize, Deserializer,
@@ -16,52 +16,69 @@ pub fn latest_scan_summary(connection: &Connection) -> DbResult<Option<ScanSumma
     connection
         .query_row(
             "
-            SELECT
-                root_path,
-                source_dir_count,
-                clip_group_count,
-                new_clip_count,
-                updated_clip_count,
-                missing_clip_count,
-                cover_missing_count,
-                metadata_match_count,
-                metadata_enriched_clip_count,
-                metadata_event_count,
-                metadata_warning_count,
-                diagnostic_omitted_count,
-                errors_json,
-                message
+            SELECT root_path, source_dir_count, clip_group_count, new_clip_count,
+                   updated_clip_count, missing_clip_count, cover_missing_count,
+                   metadata_match_count, metadata_enriched_clip_count,
+                   metadata_event_count, metadata_warning_count,
+                   diagnostic_omitted_count, errors_json, message
             FROM scan_runs
-            WHERE status IN ('completed', 'partial')
+            WHERE summary_available = 1
+              AND status IN ('completed', 'partial')
             ORDER BY id DESC
             LIMIT 1
             ",
             [],
-            |row| {
-                let errors_json: String = row.get(12)?;
-                let bounded = parse_bounded_scan_errors(&errors_json);
-                Ok(ScanSummary {
-                    root_path: row.get(0)?,
-                    source_dir_count: row.get(1)?,
-                    clip_group_count: row.get(2)?,
-                    new_clip_count: row.get(3)?,
-                    updated_clip_count: row.get(4)?,
-                    missing_clip_count: row.get(5)?,
-                    cover_missing_count: row.get(6)?,
-                    metadata_match_count: row.get(7)?,
-                    metadata_enriched_clip_count: row.get(8)?,
-                    metadata_event_count: row.get(9)?,
-                    metadata_warning_count: row.get(10)?,
-                    omitted_error_count: row
-                        .get::<_, i64>(11)?
-                        .saturating_add(bounded.omitted_count),
-                    errors: bounded.errors,
-                    message: row.get(13)?,
-                })
-            },
+            map_scan_summary,
         )
         .optional()
         .map_err(|error| format!("Database reading scan summary failed: {error}"))
+}
+
+/// Returns an exact persisted summary for one job. A terminal fallback row deliberately returns
+/// `None`: its default zero counters are not evidence that the job added zero clips.
+pub fn scan_summary_for_job(
+    connection: &Connection,
+    job_id: &str,
+) -> DbResult<Option<ScanSummary>> {
+    connection
+        .query_row(
+            "
+            SELECT root_path, source_dir_count, clip_group_count, new_clip_count,
+                   updated_clip_count, missing_clip_count, cover_missing_count,
+                   metadata_match_count, metadata_enriched_clip_count,
+                   metadata_event_count, metadata_warning_count,
+                   diagnostic_omitted_count, errors_json, message
+            FROM scan_runs
+            WHERE job_id = ?1
+              AND summary_available = 1
+            LIMIT 1
+            ",
+            params![job_id],
+            map_scan_summary,
+        )
+        .optional()
+        .map_err(|error| format!("Database reading scan summary for job failed: {error}"))
+}
+
+fn map_scan_summary(row: &Row<'_>) -> rusqlite::Result<ScanSummary> {
+    let errors_json: String = row.get(12)?;
+    let bounded = parse_bounded_scan_errors(&errors_json);
+    Ok(ScanSummary {
+        root_path: row.get(0)?,
+        source_dir_count: row.get(1)?,
+        clip_group_count: row.get(2)?,
+        new_clip_count: row.get(3)?,
+        updated_clip_count: row.get(4)?,
+        missing_clip_count: row.get(5)?,
+        cover_missing_count: row.get(6)?,
+        metadata_match_count: row.get(7)?,
+        metadata_enriched_clip_count: row.get(8)?,
+        metadata_event_count: row.get(9)?,
+        metadata_warning_count: row.get(10)?,
+        omitted_error_count: row.get::<_, i64>(11)?.saturating_add(bounded.omitted_count),
+        errors: bounded.errors,
+        message: row.get(13)?,
+    })
 }
 
 pub fn ensure_scan_run_started(
@@ -96,6 +113,7 @@ pub fn recover_interrupted_scan_runs(connection: &Connection) -> DbResult<usize>
             UPDATE scan_runs
             SET status = 'failed',
                 message = '上次应用异常退出，扫描已中断',
+                summary_available = 0,
                 finished_at = CURRENT_TIMESTAMP
             WHERE status IN ('running', 'cancelling')
             ",
@@ -128,22 +146,34 @@ pub fn ensure_scan_run_terminal(
                 END,
                 status = ?3,
                 message = ?4,
+                summary_available = 0,
                 finished_at = CURRENT_TIMESTAMP
             WHERE job_id = ?1
+              AND status IN ('running', 'cancelling')
             ",
             params![job_id, root_path, status, message],
         )
         .map_err(|error| format!("Database finalizing scan run failed: {error}"))?;
     if changed == 0 {
-        transaction
-            .execute(
-                "
+        let existing_status = transaction
+            .query_row(
+                "SELECT status FROM scan_runs WHERE job_id = ?1",
+                params![job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("Database checking terminal scan run failed: {error}"))?;
+        if existing_status.is_none() {
+            transaction
+                .execute(
+                    "
             INSERT INTO scan_runs (job_id, root_path, status, message)
             VALUES (?1, ?2, ?3, ?4)
             ",
-                params![job_id, root_path, status, message],
-            )
-            .map_err(|error| format!("Database recording terminal scan run failed: {error}"))?;
+                    params![job_id, root_path, status, message],
+                )
+                .map_err(|error| format!("Database recording terminal scan run failed: {error}"))?;
+        }
     }
     transaction
         .commit()
@@ -234,6 +264,7 @@ fn finish_scan_run(
                 diagnostic_omitted_count = ?14,
                 errors_json = ?15,
                 message = ?16,
+                summary_available = 1,
                 finished_at = CURRENT_TIMESTAMP
             WHERE id = ?1
             ",
@@ -303,6 +334,7 @@ impl Drop for ScanRunGuard<'_> {
             UPDATE scan_runs
             SET status = 'failed',
                 message = '扫描任务意外终止',
+                summary_available = 0,
                 finished_at = CURRENT_TIMESTAMP
             WHERE id = ?1
               AND status IN ('running', 'cancelling')
@@ -427,5 +459,118 @@ mod tests {
         }
 
         assert_eq!(recover_interrupted_scan_runs(&connection).unwrap(), 0);
+    }
+
+    #[test]
+    fn exact_job_summary_distinguishes_a_real_zero_from_a_fallback_row() {
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        ensure_scan_run_started(&connection, "exact-zero", "D:/clips")
+            .expect("scan run should start");
+        let mut zero_summary = ScanSummary::empty("D:/clips".to_string());
+        zero_summary.message = Some("completed".to_string());
+        finalize_scan_run_for_job(
+            &connection,
+            "exact-zero",
+            ScanExecutionStatus::Completed,
+            &zero_summary,
+        )
+        .expect("full summary should finalize");
+        assert_eq!(
+            scan_summary_for_job(&connection, "exact-zero")
+                .unwrap()
+                .expect("real zero summary should load")
+                .new_clip_count,
+            0,
+        );
+
+        ensure_scan_run_terminal(
+            &connection,
+            "fallback-only",
+            "D:/fallback",
+            "cancelled",
+            "cancelled before a summary was available",
+        )
+        .expect("fallback terminal row should persist");
+        assert_eq!(
+            scan_summary_for_job(&connection, "fallback-only").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn late_terminal_fallback_cannot_erase_a_completed_summary() {
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        ensure_scan_run_started(&connection, "late-fallback", "D:/clips")
+            .expect("scan run should start");
+        let mut summary = ScanSummary::empty("D:/clips".to_string());
+        summary.new_clip_count = 5;
+        finalize_scan_run_for_job(
+            &connection,
+            "late-fallback",
+            ScanExecutionStatus::Completed,
+            &summary,
+        )
+        .expect("summary should finalize");
+
+        ensure_scan_run_terminal(
+            &connection,
+            "late-fallback",
+            "D:/wrong-root",
+            "failed",
+            "late fallback",
+        )
+        .expect("late fallback should be an idempotent no-op");
+
+        let (status, available): (String, i64) = connection
+            .query_row(
+                "SELECT status, summary_available FROM scan_runs WHERE job_id = 'late-fallback'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("scan row should load");
+        assert_eq!(status, "completed");
+        assert_eq!(available, 1);
+        assert_eq!(
+            scan_summary_for_job(&connection, "late-fallback")
+                .unwrap()
+                .expect("summary should remain")
+                .new_clip_count,
+            5,
+        );
+    }
+
+    #[test]
+    fn latest_compatibility_query_ignores_newer_cancelled_summaries() {
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+        for (job_id, status, new_clip_count) in [
+            ("completed-job", ScanExecutionStatus::Completed, 3),
+            ("cancelled-job", ScanExecutionStatus::Cancelled, 9),
+        ] {
+            ensure_scan_run_started(&connection, job_id, "D:/clips")
+                .expect("scan run should start");
+            let mut summary = ScanSummary::empty("D:/clips".to_string());
+            summary.new_clip_count = new_clip_count;
+            finalize_scan_run_for_job(&connection, job_id, status, &summary)
+                .expect("scan run should finalize");
+        }
+
+        assert_eq!(
+            latest_scan_summary(&connection)
+                .unwrap()
+                .expect("latest successful summary should load")
+                .new_clip_count,
+            3,
+        );
+        assert_eq!(
+            scan_summary_for_job(&connection, "cancelled-job")
+                .unwrap()
+                .expect("exact cancelled summary should load")
+                .new_clip_count,
+            9,
+        );
     }
 }

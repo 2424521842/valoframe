@@ -28,13 +28,22 @@ test("full motion stays restrained", () => {
 });
 
 test("application root delegates reduced motion to the user preference", () => {
-  const source = readFileSync(
+  const mainSource = readFileSync(
     new URL("../src/main.tsx", import.meta.url),
     "utf8",
   );
+  const appSource = readFileSync(
+    new URL("../src/App.tsx", import.meta.url),
+    "utf8",
+  );
 
-  assert.match(source, /<MotionConfig reducedMotion="user">/);
-  assert.match(source, /<LazyMotion features=\{domAnimation\}/);
+  assert.match(
+    appSource,
+    /<MotionConfig reducedMotion=\{preferences\.motionMode === "reduced" \? "always" : "user"\}>/,
+  );
+  assert.match(appSource, /document\.documentElement\.dataset\.motion = "reduced"/);
+  assert.match(appSource, /delete document\.documentElement\.dataset\.motion/);
+  assert.match(mainSource, /<LazyMotion features=\{domAnimation\}/);
 });
 
 test("ambient backdrop is decorative and exposes both cinematic light fields", async () => {

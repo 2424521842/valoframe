@@ -380,28 +380,42 @@ $tempParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).Tri
 $smokeRoot = Join-Path $tempParent ('vhm-minimal-ffmpeg-' + [Guid]::NewGuid().ToString('N'))
 [void] [System.IO.Directory]::CreateDirectory($smokeRoot)
 try {
-    $fixturePath = Join-Path $smokeRoot 'fixture.mp4'
-    $thumbnailPath = Join-Path $smokeRoot 'thumbnail.jpg'
-    $fixtureBytes = [Convert]::FromBase64String([string] $manifest.runtimeContract.smokeFixture.base64)
-    Assert-Condition -Condition ($fixtureBytes.Length -eq [long] $manifest.runtimeContract.smokeFixture.sizeBytes) -Message 'Smoke fixture size mismatch.'
-    [System.IO.File]::WriteAllBytes($fixturePath, $fixtureBytes)
-    $fixtureHash = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    Assert-Condition -Condition ($fixtureHash -ceq [string] $manifest.runtimeContract.smokeFixture.sha256) -Message 'Smoke fixture SHA-256 mismatch.'
-    $arguments = @($manifest.runtimeContract.thumbnailArguments | ForEach-Object {
-            if ([string] $_ -ceq '{input}') { $fixturePath }
-            elseif ([string] $_ -ceq '{output}') { $thumbnailPath }
-            else { [string] $_ }
-        })
-    [void] (Invoke-CheckedProcess -Executable $ffmpeg -Arguments $arguments -TimeoutSeconds ([int] $manifest.runtimeContract.processTimeoutSeconds) -Description 'minimal FFmpeg thumbnail smoke')
-    $output = Get-Item -LiteralPath $thumbnailPath -Force -ErrorAction Stop
-    Assert-Condition -Condition ($output.Length -gt 4 -and $output.Length -le [long] $manifest.runtimeContract.maximumOutputBytes) -Message 'Thumbnail output size is invalid.'
-    $bytes = [System.IO.File]::ReadAllBytes($thumbnailPath)
-    Assert-Condition -Condition ($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xD8 -and $bytes[-2] -eq 0xFF -and $bytes[-1] -eq 0xD9) -Message 'Thumbnail output is not a complete JPEG.'
-    $smoke = [ordered]@{
-        fixtureSha256 = $fixtureHash
-        outputSizeBytes = $output.Length
-        outputSha256 = (Get-FileHash -LiteralPath $thumbnailPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $smokeFixtures = @($manifest.runtimeContract.smokeFixture)
+    if ($manifest.runtimeContract.PSObject.Properties.Name -contains 'additionalSmokeFixtures') {
+        $smokeFixtures += @($manifest.runtimeContract.additionalSmokeFixtures)
     }
+    Assert-Condition -Condition ($smokeFixtures.Count -ge 1) -Message 'At least one smoke fixture is required.'
+    $smokeReports = @()
+    for ($fixtureIndex = 0; $fixtureIndex -lt $smokeFixtures.Count; $fixtureIndex++) {
+        $fixture = $smokeFixtures[$fixtureIndex]
+        $codecProperty = $fixture.PSObject.Properties['codec']
+        $codec = if ($null -eq $codecProperty -or [string]::IsNullOrWhiteSpace([string] $codecProperty.Value)) { "fixture-$fixtureIndex" } else { [string] $codecProperty.Value }
+        Assert-Condition -Condition ([string] $fixture.encoding -ceq 'base64') -Message "Unsupported $codec smoke fixture encoding."
+        $fixtureInputPath = Join-Path $smokeRoot ("fixture-$fixtureIndex.mp4")
+        $thumbnailResultPath = Join-Path $smokeRoot ("thumbnail-$fixtureIndex.jpg")
+        $fixtureBytes = [Convert]::FromBase64String([string] $fixture.base64)
+        Assert-Condition -Condition ($fixtureBytes.Length -eq [long] $fixture.sizeBytes) -Message "$codec smoke fixture size mismatch."
+        [System.IO.File]::WriteAllBytes($fixtureInputPath, $fixtureBytes)
+        $fixtureHash = (Get-FileHash -LiteralPath $fixtureInputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Assert-Condition -Condition ($fixtureHash -ceq [string] $fixture.sha256) -Message "$codec smoke fixture SHA-256 mismatch."
+        $arguments = @($manifest.runtimeContract.thumbnailArguments | ForEach-Object {
+                if ([string] $_ -ceq '{input}') { $fixtureInputPath }
+                elseif ([string] $_ -ceq '{output}') { $thumbnailResultPath }
+                else { [string] $_ }
+            })
+        [void] (Invoke-CheckedProcess -Executable $ffmpeg -Arguments $arguments -TimeoutSeconds ([int] $manifest.runtimeContract.processTimeoutSeconds) -Description "minimal FFmpeg $codec thumbnail smoke")
+        $thumbnailResult = Get-Item -LiteralPath $thumbnailResultPath -Force -ErrorAction Stop
+        Assert-Condition -Condition ($thumbnailResult.Length -gt 4 -and $thumbnailResult.Length -le [long] $manifest.runtimeContract.maximumOutputBytes) -Message "$codec thumbnail output size is invalid."
+        $thumbnailBytes = [System.IO.File]::ReadAllBytes($thumbnailResultPath)
+        Assert-Condition -Condition ($thumbnailBytes[0] -eq 0xFF -and $thumbnailBytes[1] -eq 0xD8 -and $thumbnailBytes[-2] -eq 0xFF -and $thumbnailBytes[-1] -eq 0xD9) -Message "$codec thumbnail output is not a complete JPEG."
+        $smokeReports += [ordered]@{
+            codec = $codec
+            fixtureSha256 = $fixtureHash
+            outputSizeBytes = $thumbnailResult.Length
+            outputSha256 = (Get-FileHash -LiteralPath $thumbnailResultPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    $smoke = $smokeReports[0]
 }
 finally {
     $smokeFull = [System.IO.Path]::GetFullPath($smokeRoot)
@@ -423,6 +437,7 @@ $report = [ordered]@{
     artifactEvidence = $artifactEvidence
     requiredCapabilities = $capabilityReports
     smoke = $smoke
+    smokeFixtures = @($smokeReports)
     promotionAuthorized = $false
 }
 $json = $report | ConvertTo-Json -Depth 10

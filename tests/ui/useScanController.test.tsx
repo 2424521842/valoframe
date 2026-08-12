@@ -14,11 +14,14 @@ const mocks = vi.hoisted(() => ({
   cancelScan: vi.fn(),
   discoverAndScanFixedDrives: vi.fn(),
   getScanStatus: vi.fn(),
+  getScanSummary: vi.fn(),
   isTauri: false,
   listeners: new Set<ProgressListener>(),
   listenToScanProgress: vi.fn(),
   scanDefaultAclosDir: vi.fn(),
   scanRoots: vi.fn(),
+  syncEnabledSources: vi.fn(),
+  syncScanSource: vi.fn(),
   unlisteners: [] as Array<ReturnType<typeof vi.fn>>,
 }));
 
@@ -32,6 +35,7 @@ vi.mock("../../src/api/backend", () => ({
     error instanceof Error ? error.message : String(error),
   discoverAndScanFixedDrives: mocks.discoverAndScanFixedDrives,
   getScanStatus: mocks.getScanStatus,
+  getScanSummary: mocks.getScanSummary,
   listenToScanProgress: mocks.listenToScanProgress,
   scanCommandErrorActiveJobId: (error: unknown) => {
     if (typeof error !== "object" || error === null || !("activeJobId" in error)) {
@@ -49,6 +53,8 @@ vi.mock("../../src/api/backend", () => ({
       : null,
   scanDefaultAclosDir: mocks.scanDefaultAclosDir,
   scanRoots: mocks.scanRoots,
+  syncEnabledSources: mocks.syncEnabledSources,
+  syncScanSource: mocks.syncScanSource,
 }));
 
 import { useScanController } from "../../src/hooks/useScanController";
@@ -59,15 +65,19 @@ describe("useScanController", () => {
     mocks.cancelScan.mockReset();
     mocks.discoverAndScanFixedDrives.mockReset();
     mocks.getScanStatus.mockReset();
+    mocks.getScanSummary.mockReset();
     mocks.listenToScanProgress.mockReset();
     mocks.scanDefaultAclosDir.mockReset();
     mocks.scanRoots.mockReset();
+    mocks.syncEnabledSources.mockReset();
+    mocks.syncScanSource.mockReset();
     mocks.isTauri = false;
     mocks.listeners.clear();
     mocks.unlisteners.length = 0;
 
     mocks.cancelScan.mockResolvedValue(cancelResult("scan-current"));
     mocks.getScanStatus.mockResolvedValue(idleStatus());
+    mocks.getScanSummary.mockResolvedValue(summary());
     mocks.listenToScanProgress.mockImplementation(async (listener: ProgressListener) => {
       mocks.listeners.add(listener);
       const unlisten = vi.fn(() => {
@@ -78,6 +88,8 @@ describe("useScanController", () => {
     });
     mocks.scanDefaultAclosDir.mockResolvedValue(jobResult("scan-default", "completed"));
     mocks.scanRoots.mockResolvedValue(jobResult("scan-current", "completed"));
+    mocks.syncEnabledSources.mockResolvedValue(jobResult("sync-enabled", "completed"));
+    mocks.syncScanSource.mockResolvedValue(jobResult("sync-source", "completed"));
   });
 
   it("creates one progress listener and cleans it up on unmount", async () => {
@@ -114,6 +126,62 @@ describe("useScanController", () => {
     expect(result.current.isScanning).toBe(false);
   });
 
+  it("routes single-source synchronization through the shared scan lifecycle", async () => {
+    const { result, refresh } = renderController();
+
+    await act(async () => {
+      await result.current.syncSource("42");
+    });
+
+    expect(mocks.syncScanSource).toHaveBeenCalledWith("42");
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe("completed");
+    expect(result.current.summary).toEqual(summary());
+  });
+
+  it("synchronizes all enabled sources as one shared scan job", async () => {
+    const { result, refresh } = renderController();
+
+    await act(async () => {
+      await result.current.syncEnabledSources();
+    });
+
+    expect(mocks.syncEnabledSources).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe("completed");
+  });
+
+  it("adopts backend startup synchronization and refreshes at its terminal event", async () => {
+    const { result, refresh } = renderController();
+    await waitFor(() => expect(mocks.listeners.size).toBe(1));
+
+    act(() => {
+      emitProgress(progress("startup-sync", "正在后台同步启用来源"));
+    });
+    expect(result.current.isScanning).toBe(true);
+    expect(result.current.activeJobId).toBe("startup-sync");
+
+    act(() => {
+      emitProgress(terminalScanProgress("startup-sync", "completed", "启动同步完成"));
+    });
+    await waitFor(() => expect(result.current.isScanning).toBe(false));
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe("completed");
+  });
+
+  it("recovers a startup synchronization that finished before event subscription", async () => {
+    mocks.isTauri = true;
+    mocks.getScanStatus.mockResolvedValue(
+      terminalStatus("startup-finished", "completed", "启动同步已完成"),
+    );
+    const { result, refresh } = renderController();
+
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.isScanning).toBe(false));
+    expect(result.current.status).toBe("completed");
+    expect(result.current.progress?.jobId).toBe("startup-finished");
+  });
+
   it("recovers the active job id when the first progress event is missed", async () => {
     mocks.isTauri = true;
     const scan = deferred<ScanJobResult<ScanSummary>>();
@@ -133,6 +201,53 @@ describe("useScanController", () => {
       scan.resolve(jobResult("scan-recovered", "completed"));
       await request;
     });
+  });
+
+  it("settles a locally requested job from polling when its invoke never resolves", async () => {
+    mocks.isTauri = true;
+    const lostInvoke = deferred<ScanJobResult<ScanSummary>>();
+    const nextInvoke = deferred<ScanJobResult<ScanSummary>>();
+    mocks.scanRoots
+      .mockReturnValueOnce(lostInvoke.promise)
+      .mockReturnValueOnce(nextInvoke.promise);
+    mocks.getScanStatus.mockResolvedValue(runningStatus("scan-lost-invoke"));
+    const { result, refresh } = renderController();
+    let lostRequest!: Promise<void>;
+    let nextRequest!: Promise<void>;
+
+    act(() => {
+      lostRequest = result.current.startScan();
+    });
+    await waitFor(() => expect(result.current.activeJobId).toBe("scan-lost-invoke"));
+
+    mocks.getScanStatus.mockResolvedValue(
+      terminalStatus("scan-lost-invoke", "completed", "轮询恢复终态"),
+    );
+    await waitFor(() => expect(result.current.isScanning).toBe(false), { timeout: 1_500 });
+    expect(result.current.activeJobId).toBeNull();
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      nextRequest = result.current.startScan();
+      emitProgress(progress("scan-after-lost-invoke", "新任务正在扫描"));
+    });
+    expect(result.current.isScanning).toBe(true);
+    expect(result.current.activeJobId).toBe("scan-after-lost-invoke");
+
+    await act(async () => {
+      lostInvoke.resolve(jobResult("scan-lost-invoke", "completed"));
+      await lostRequest;
+    });
+    expect(result.current.isScanning).toBe(true);
+    expect(result.current.activeJobId).toBe("scan-after-lost-invoke");
+    expect(result.current.progress?.message).toBe("新任务正在扫描");
+
+    await act(async () => {
+      nextInvoke.resolve(jobResult("scan-after-lost-invoke", "completed"));
+      await nextRequest;
+    });
+    expect(result.current.isScanning).toBe(false);
+    expect(refresh).toHaveBeenCalledTimes(2);
   });
 
   it("ignores delayed progress from a stale job while a new job is active", async () => {
@@ -227,7 +342,7 @@ describe("useScanController", () => {
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
-  it("does not let late running progress overwrite a recovered terminal state", async () => {
+  it("releases a recovered terminal state without waiting for a hanging refresh", async () => {
     mocks.isTauri = true;
     mocks.scanRoots.mockRejectedValueOnce(alreadyRunningError("scan-recovered"));
     mocks.getScanStatus.mockResolvedValue(runningStatus("scan-recovered"));
@@ -242,6 +357,8 @@ describe("useScanController", () => {
       terminalStatus("scan-recovered", "completed", "后台扫描完成"),
     );
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1), { timeout: 1_500 });
+    expect(result.current.isScanning).toBe(false);
+    expect(result.current.activeJobId).toBeNull();
 
     act(() => {
       emitProgress(progress("scan-recovered", "迟到的运行中事件"));
@@ -253,7 +370,6 @@ describe("useScanController", () => {
       refreshResult.resolve(true);
       await refreshResult.promise;
     });
-    await waitFor(() => expect(result.current.isScanning).toBe(false));
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
@@ -378,6 +494,159 @@ describe("useScanController", () => {
     for (const unlisten of mocks.unlisteners) {
       expect(unlisten).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it("deduplicates the terminal event and promise result by job id", async () => {
+    const scan = deferred<ScanJobResult<ScanSummary>>();
+    const zeroSummary = { ...summary(), newClipCount: 0 };
+    mocks.scanRoots.mockReturnValue(scan.promise);
+    mocks.getScanSummary.mockResolvedValue(zeroSummary);
+    const { result, refresh, notify } = renderController();
+    let request!: Promise<void>;
+
+    await waitFor(() => expect(mocks.listeners.size).toBe(1));
+    act(() => {
+      request = result.current.startScan();
+      emitProgress(progress("scan-double", "正在扫描"));
+      emitProgress(terminalScanProgress("scan-double", "completed", "完成"));
+    });
+    await waitFor(() => expect(notify).toHaveBeenCalledWith({
+      kind: "success",
+      message: "扫描完成：新增 0 个视频",
+    }));
+
+    await act(async () => {
+      scan.resolve({
+        jobId: "scan-double",
+        status: "completed",
+        result: zeroSummary,
+        message: "完成",
+      });
+      await request;
+    });
+
+    expect(mocks.getScanSummary).toHaveBeenCalledWith("scan-double");
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls.filter((call) => (
+      call[0].message === "扫描完成：新增 0 个视频"
+    ))).toHaveLength(1);
+  });
+
+  it("recovers an adopted job summary by exact job id", async () => {
+    const recovered = { ...summary(), newClipCount: 4 };
+    mocks.getScanSummary.mockResolvedValue(recovered);
+    const { result, notify } = renderController();
+    await waitFor(() => expect(mocks.listeners.size).toBe(1));
+
+    act(() => {
+      emitProgress(terminalScanProgress("startup-exact", "partial", "部分完成"));
+    });
+
+    await waitFor(() => expect(result.current.isScanning).toBe(false));
+    expect(mocks.getScanSummary).toHaveBeenCalledWith("startup-exact");
+    expect(notify).toHaveBeenCalledWith({
+      kind: "warning",
+      message: "扫描部分完成：已安全新增 4 个视频",
+    });
+  });
+
+  it("does not guess zero when an adopted job has no persisted summary", async () => {
+    mocks.getScanSummary.mockResolvedValue(null);
+    const { result, notify } = renderController();
+    await waitFor(() => expect(mocks.listeners.size).toBe(1));
+
+    act(() => {
+      emitProgress(terminalScanProgress("startup-unknown", "cancelled", "已取消"));
+    });
+
+    await waitFor(() => expect(result.current.isScanning).toBe(false));
+    expect(result.current.summary).toBeNull();
+    expect(notify).toHaveBeenCalledWith({
+      kind: "warning",
+      message: "扫描已取消：新增数量不可用",
+    });
+  });
+
+  it("recovers safe additions for a failed command before refreshing", async () => {
+    mocks.scanRoots.mockRejectedValueOnce({
+      code: "scan-failed",
+      message: "磁盘暂时不可读",
+      jobId: "scan-failed-summary",
+    });
+    mocks.getScanSummary.mockResolvedValue({ ...summary(), newClipCount: 2 });
+    const { result, refresh, notify } = renderController();
+
+    await act(async () => {
+      await result.current.startScan();
+    });
+
+    expect(result.current.status).toBe("failed");
+    expect(mocks.getScanSummary).toHaveBeenCalledWith("scan-failed-summary");
+    expect(notify).toHaveBeenCalledWith({
+      kind: "error",
+      message: "扫描失败：已安全新增 2 个视频",
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("settles a relocation follow-up terminal by exact job id when all events were missed", async () => {
+    const recovered = { ...summary(), newClipCount: 7 };
+    mocks.getScanSummary.mockResolvedValueOnce(recovered);
+    const { result, refresh, notify } = renderController();
+
+    await act(async () => {
+      await result.current.settleExternalTerminal({
+        jobId: "relocation-missed-events",
+        status: "completed",
+        message: "重新定位后的同步完成",
+      });
+    });
+
+    expect(mocks.getScanSummary).toHaveBeenCalledWith("relocation-missed-events");
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith({
+      kind: "success",
+      message: "扫描完成：新增 7 个视频",
+    });
+    expect(result.current.isScanning).toBe(false);
+    expect(result.current.status).toBe("completed");
+  });
+
+  it("deduplicates an external terminal settlement against the same live event", async () => {
+    const { result, refresh, notify } = renderController();
+    await waitFor(() => expect(mocks.listeners.size).toBe(1));
+    act(() => emitProgress(terminalScanProgress("relocation-dedup", "partial", "部分完成")));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      await result.current.settleExternalTerminal({
+        jobId: "relocation-dedup",
+        status: "partial",
+        message: "部分完成",
+      });
+    });
+
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls.filter((call) => (
+      call[0].message === "扫描部分完成：已安全新增 1 个视频"
+    ))).toHaveLength(1);
+  });
+
+  it("keeps the exact terminal count in the unified refresh failure message", async () => {
+    const { result, refresh, notify } = renderController();
+    refresh.mockResolvedValueOnce(false);
+
+    await act(async () => {
+      await result.current.startScan();
+    });
+
+    expect(notify).toHaveBeenCalledWith({
+      kind: "warning",
+      message: "扫描完成：新增 1 个视频；终态已确定，但刷新索引视图失败",
+    });
+    expect(result.current.errorMessage).toBe(
+      "扫描完成：新增 1 个视频；终态已确定，但刷新索引视图失败",
+    );
   });
 });
 

@@ -87,13 +87,18 @@ test("community beta artifacts survive failed-job and full-run retries", () => {
   assert.equal(workflow.match(/\n\s+overwrite: true/gu)?.length, 2);
 });
 
-test("community beta workflow is unsigned, updater-free, and visibly labeled", () => {
+test("community beta workflow keeps the updater runtime dormant and is visibly labeled", () => {
   assert.match(workflow, /release:bundle:windows:community-beta/u);
   assert.match(
     String(packageJson.scripts["release:bundle:windows:community-beta"]),
     /--no-sign/u,
   );
-  assert.doesNotMatch(workflow, /TAURI_SIGNING_PRIVATE_KEY/u);
+  assert.doesNotMatch(
+    workflow,
+    /TAURI_SIGNING_PRIVATE_KEY(?:_PASSWORD)?:\s*\$\{\{/u,
+  );
+  assert.match(workflow, /VALOFRAME_UPDATER_PUBLIC_KEY/u);
+  assert.match(workflow, /Community Beta must not receive \$name/u);
   assert.doesNotMatch(workflow, /certificateThumbprint/u);
   assert.match(workflow, /NotSigned/u);
   assert.match(
@@ -101,6 +106,7 @@ test("community beta workflow is unsigned, updater-free, and visibly labeled", (
     /UNSIGNED COMMUNITY BETA — NOT A FORMAL PUBLIC RELEASE/u,
   );
   assert.match(workflow, /-name 'latest\.json'/u);
+  assert.match(workflow, /must not produce latest\.json or updater signatures/u);
   assert.doesNotMatch(workflow, /createUpdaterArtifacts:\s*true/u);
 });
 
@@ -250,6 +256,10 @@ test("startup smoke consumes only the exact bundle-gate payload", () => {
     "Verified Community Beta startup payload files do not exactly match",
     "normalization.rawEmbeddedSha256",
     "-ExpectedExecutableSha256 $expectedMainHash",
+    "smoke.database.schemaVersion -ne 16",
+    "fresh schema-v16 database",
+    "singleInstance.sharedLaunchConfiguration.environmentOverrides.WEBVIEW2_USER_DATA_FOLDER",
+    "smoke.runtime.webView2UserDataPath",
   ]) {
     assert.match(
       workflow,

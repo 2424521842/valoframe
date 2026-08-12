@@ -7,6 +7,7 @@ dist/
 dist-ssr/
 src-tauri/target/
 target-codex-test/
+.codex-target/
 src-tauri/gen/schemas/
 
 # Reproducible release staging (generated from tracked manifests)

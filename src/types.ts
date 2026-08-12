@@ -1,14 +1,116 @@
+export type SourceKind = "aclos" | "nvidia" | "tracker" | "generic";
+
+export type ScanMode = "aclos-structured" | "recursive-mp4";
+
+export type ReviewDecision = "unreviewed" | "liked" | "disliked";
+
+/**
+ * A decision made inside a single quick-pick session. It deliberately does not
+ * share the legacy clip-level `ReviewDecision` values above: a quick-pick is a
+ * temporary editorial decision, never a favorite, tag, or recycle-bin action.
+ */
+export type ReviewItemDecision = "unreviewed" | "selected" | "pending" | "skipped";
+
+export type ReviewSessionStatus = "active" | "completed";
+
+export type ReviewSessionSort =
+  | "library"
+  | "latest"
+  | "oldest"
+  | "kills"
+  | "score";
+
+export type ReviewCandidateScope = "all" | "not-selected" | "recent";
+
 export type SourceDir = {
   id: string;
   name: string;
   displayName: string;
   path: string;
+  sourceKind: SourceKind;
+  scanMode: ScanMode;
+  scanRootPath: string;
   enabled: boolean;
   status: string;
   accessibility: boolean;
   lastError: string | null;
   clipCount: number;
   lastScanAt: string | null;
+};
+
+export type RegisterScanSourceInput = {
+  sourceKind: SourceKind;
+  scanRootPath: string;
+  displayName: string;
+  enabled: boolean;
+  allowOverlap?: boolean;
+};
+
+export type ScanSourceOverlap = {
+  id: string;
+  displayName: string;
+  sourceKind: SourceKind;
+  scanRootPath: string;
+};
+
+export type RegisterScanSourceResult = {
+  sources: SourceDir[];
+  createdCount: number;
+  duplicateCount: number;
+  normalizedRootPath: string;
+  requiresOverlapConfirmation: boolean;
+  overlaps: ScanSourceOverlap[];
+};
+
+export type SourceRelocationConflict = {
+  code: string;
+  message: string;
+  oldClipIds: string[];
+  candidatePaths: string[];
+};
+
+export type SourceRelocationBlocker = {
+  code: string;
+  message: string;
+};
+
+export type AffectedRelocationSource = {
+  id: string;
+  displayName: string;
+  oldSourcePath: string;
+  newSourcePath: string;
+  clipCount: number;
+};
+
+export type ScanSourceRelocationPreview = {
+  sourceId: string;
+  oldRootPath: string;
+  newRootPath: string;
+  affectedSources: AffectedRelocationSource[];
+  exactPathMatchCount: number;
+  identityMatchCount: number;
+  legacyFingerprintMatchCount: number;
+  unmatchedCount: number;
+  newCandidateCount: number;
+  expectedClipUpdateCount: number;
+  expectedGroupUpdateCount: number;
+  expectedCoverUpdateCount: number;
+  expectedMetadataReferenceUpdateCount: number;
+  conflicts: SourceRelocationConflict[];
+  blockers: SourceRelocationBlocker[];
+  canRelocate: boolean;
+};
+
+export type RelocateScanSourceResult = {
+  preview: ScanSourceRelocationPreview;
+  relocatedClipCount: number;
+  syncJobId: string | null;
+  syncStarted: boolean;
+  syncStatus: Extract<
+    ScanJobStatus,
+    "completed" | "partial" | "cancelled" | "failed"
+  > | null;
+  syncMessage: string | null;
 };
 
 export type AccountIdentitySource = "match-account-id" | "openid" | "source-dir";
@@ -39,6 +141,10 @@ export type Clip = {
   sourceDirId: string;
   sourceDirName: string;
   sourceDirPath: string;
+  sourceKind: SourceKind;
+  scanMode: ScanMode;
+  scanRootPath: string;
+  sourceRelativeDir: string;
   clipGroupId: string | null;
   clipGroupName: string;
   accountId: string;
@@ -76,6 +182,8 @@ export type Clip = {
   sizeBytes: number;
   durationMs: number | null;
   isFavorite: boolean;
+  reviewDecision: ReviewDecision;
+  reviewedAt: string | null;
   isMissing: boolean;
   fileStatus: string;
   tags: string[];
@@ -114,6 +222,7 @@ export type ClipEvent = {
   killerName: string;
   killedName: string;
   killerIsMe: boolean;
+  killedIsMe: boolean;
 };
 
 export type AccountSummary = {
@@ -157,7 +266,7 @@ export type FavoriteFilter = "all" | "favorite" | "not-favorite";
 
 export type LibraryMode = "all" | "today" | "favorites" | "missing" | "trash";
 
-export type AppScreen = "scan" | "library" | "tags" | "preview";
+export type AppScreen = "scan" | "library" | "review" | "tags" | "settings" | "preview";
 
 export type LibraryViewMode = "grid" | "list";
 
@@ -182,6 +291,10 @@ export type ScanTarget = {
 export type BackendClip = {
   id: number;
   sourceDirId: number;
+  sourceKind: SourceKind;
+  scanMode: ScanMode;
+  scanRootPath: string;
+  sourceRelativeDir: string;
   clipGroupId: number | null;
   clipGroupName?: string | null;
   videoPath: string;
@@ -198,6 +311,8 @@ export type BackendClip = {
   thumbnailRevision?: string | null;
   status: string;
   favorite: boolean;
+  reviewDecision: ReviewDecision;
+  reviewedAt: string | null;
   note: string | null;
   extractedText?: string | null;
   accountIdentityKey: string;
@@ -260,6 +375,7 @@ export type ClipListQuery = {
   tagId?: number;
   highlightFilter?: HighlightFilter;
   favoriteFilter?: FavoriteFilter;
+  reviewDecision?: ReviewDecision;
   fileStatus?: string;
   metadataStatus?: string;
   /** Inclusive Unix timestamp in seconds. */
@@ -269,6 +385,48 @@ export type ClipListQuery = {
   sizeMinBytes?: number;
   sizeMaxBytes?: number;
   sortBy?: ClipSort;
+};
+
+/** A frozen, serializable record of one quick-pick round. */
+export type ReviewSessionFilters = {
+  /** The library query at the moment the session was started, without pagination. */
+  query: Omit<ClipListQuery, "offset" | "limit" | "reviewDecision">;
+  labels: string[];
+  sort: ReviewSessionSort;
+  candidateScope: ReviewCandidateScope;
+};
+
+export type ReviewSessionItem = {
+  videoId: string;
+  decision: ReviewItemDecision;
+};
+
+export type ReviewSession = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  filters: ReviewSessionFilters;
+  totalCount: number;
+  /** Index in `items` of the active candidate; `totalCount` means the pass is complete. */
+  currentIndex: number;
+  status: ReviewSessionStatus;
+  items: ReviewSessionItem[];
+};
+
+export type ReviewQueueQuery = {
+  accountId?: string;
+  agentName?: string;
+  mapName?: string;
+  gameMode?: string;
+  sourceDirIds?: number[];
+  tagIds?: number[];
+  /** Inclusive Unix timestamp in seconds, using the effective recorded time. */
+  recordedFrom?: number;
+  /** Inclusive Unix timestamp in seconds, using the effective recorded time. */
+  recordedTo?: number;
+  snapshotMaxClipId?: number;
+  cursor?: string;
+  limit?: number;
 };
 
 export type BackendClipPage = {
@@ -282,6 +440,44 @@ export type BackendClipPage = {
 
 export type ClipPage = Omit<BackendClipPage, "items"> & {
   items: ClipSummary[];
+};
+
+export type BackendReviewClipPage = {
+  items: BackendClipSummary[];
+  snapshotMaxClipId: number;
+  candidateCount: number;
+  limit: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
+export type ReviewClipPage = Omit<BackendReviewClipPage, "items"> & {
+  items: ClipSummary[];
+};
+
+export type BackendReviewClipState = {
+  clipId: number;
+  reviewDecision: ReviewDecision;
+  reviewedAt: string | null;
+  favorite: boolean;
+};
+
+export type ReviewClipState = Omit<BackendReviewClipState, "clipId"> & {
+  clipId: string;
+};
+
+export type BackendReviewDecisionMutation = {
+  before: BackendReviewClipState;
+  after: BackendReviewClipState;
+  changed: boolean;
+};
+
+export type ReviewDecisionMutation = Omit<
+  BackendReviewDecisionMutation,
+  "before" | "after"
+> & {
+  before: ReviewClipState;
+  after: ReviewClipState;
 };
 
 /** Whole-index counts include trashed clips; activeCount excludes only trashed clips. */
@@ -356,12 +552,46 @@ export type BackendSource = {
   id: number;
   path: string;
   displayName: string;
+  sourceKind: SourceKind;
+  scanMode: ScanMode;
+  scanRootPath: string;
   enabled: boolean;
   status: string;
   accessibility: boolean;
   lastError: string | null;
   clipCount: number;
   lastScanAt: string | null;
+};
+
+export type BackendScanSourceOverlap = Omit<ScanSourceOverlap, "id"> & {
+  id: number;
+};
+
+export type BackendRegisterScanSourceResult = Omit<
+  RegisterScanSourceResult,
+  "sources" | "overlaps"
+> & {
+  sources: BackendSource[];
+  overlaps: BackendScanSourceOverlap[];
+};
+
+export type BackendAffectedRelocationSource = Omit<AffectedRelocationSource, "id"> & {
+  id: number;
+};
+
+export type BackendScanSourceRelocationPreview = Omit<
+  ScanSourceRelocationPreview,
+  "sourceId" | "affectedSources"
+> & {
+  sourceId: number;
+  affectedSources: BackendAffectedRelocationSource[];
+};
+
+export type BackendRelocateScanSourceResult = Omit<
+  RelocateScanSourceResult,
+  "preview"
+> & {
+  preview: BackendScanSourceRelocationPreview;
 };
 
 export type BackendClipEvent = {
@@ -375,6 +605,7 @@ export type BackendClipEvent = {
   killerName?: string | null;
   killedName?: string | null;
   killerIsMe: boolean;
+  killedIsMe: boolean;
 };
 
 export type BackendTag = {
@@ -397,6 +628,34 @@ export type BatchMutationResult = {
   updated: number;
   missingIds: string[];
   clips: Clip[];
+};
+
+export type BackendIndexRemovalProblem = {
+  clipId: number;
+  code: string;
+  message: string;
+};
+
+export type BackendRemoveClipsFromIndexResult = {
+  requested: number;
+  removedIds: number[];
+  missingIds: number[];
+  blocked: BackendIndexRemovalProblem[];
+  failures: BackendIndexRemovalProblem[];
+};
+
+export type IndexRemovalProblem = Omit<BackendIndexRemovalProblem, "clipId"> & {
+  clipId: string;
+};
+
+export type RemoveClipsFromIndexResult = Omit<
+  BackendRemoveClipsFromIndexResult,
+  "removedIds" | "missingIds" | "blocked" | "failures"
+> & {
+  removedIds: string[];
+  missingIds: string[];
+  blocked: IndexRemovalProblem[];
+  failures: IndexRemovalProblem[];
 };
 
 export type BackendPermanentDeleteFailure = {

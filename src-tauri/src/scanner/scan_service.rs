@@ -170,6 +170,7 @@ fn scan_discovered_aclos_roots_with_progress_inner(
             ScanBatchInput {
                 requested_roots: roots,
                 source_paths: Vec::new(),
+                persistent_sources: Vec::new(),
                 metadata_config: MetadataScanConfig {
                     anchor: None,
                     allow_external_fallback: true,
@@ -296,6 +297,7 @@ fn scan_roots_inner(
         ScanBatchInput {
             requested_roots: roots.clone(),
             source_paths,
+            persistent_sources: Vec::new(),
             metadata_config: MetadataScanConfig {
                 anchor: None,
                 allow_external_fallback: true,
@@ -349,6 +351,7 @@ fn scan_custom_directory_inner(
             ScanBatchInput {
                 requested_roots: discovery.roots.clone(),
                 source_paths: discovery.sources,
+                persistent_sources: Vec::new(),
                 metadata_config: MetadataScanConfig {
                     anchor: discovery.roots.first().cloned(),
                     allow_external_fallback: true,
@@ -368,6 +371,7 @@ fn scan_custom_directory_inner(
         ScanBatchInput {
             requested_roots: roots.clone(),
             source_paths: roots,
+            persistent_sources: Vec::new(),
             metadata_config: MetadataScanConfig {
                 anchor: None,
                 allow_external_fallback: true,
@@ -403,6 +407,7 @@ pub(super) fn scan_library_roots(
         ScanBatchInput {
             requested_roots: discovery.roots,
             source_paths: discovery.sources,
+            persistent_sources: Vec::new(),
             metadata_config: MetadataScanConfig {
                 anchor: metadata_anchor,
                 allow_external_fallback: all_roots_external,
@@ -411,6 +416,149 @@ pub(super) fn scan_library_roots(
             },
             initial_errors: discovery.errors,
             empty_message: discovery.empty_message,
+        },
+        progress,
+        runtime,
+    )
+}
+
+/// Synchronizes an explicit set of persisted sources without changing their enabled setting.
+/// This non-event entry point is primarily useful for maintenance/tests; production commands use
+/// the coordinated variants below.
+pub fn sync_scan_sources(connection: &Connection, source_ids: &[i64]) -> DbResult<ScanSummary> {
+    let sources = persisted_sources_by_id(connection, source_ids)?;
+    sync_persistent_sources_inner(connection, sources, None, ScanRuntime::default())
+        .map(|execution| execution.summary)
+}
+
+pub fn sync_scan_source_with_progress_and_cancel<F>(
+    connection: &Connection,
+    source_id: i64,
+    job_id: &str,
+    cancellation: &AtomicBool,
+    progress: F,
+) -> DbResult<ScanExecution>
+where
+    F: Fn(ScanProgress),
+{
+    let source = crate::db::find_source_dir_by_id(connection, source_id)?;
+    sync_persistent_sources_inner(
+        connection,
+        vec![source],
+        Some(&progress),
+        ScanRuntime {
+            job_id: Some(job_id),
+            cancellation: Some(cancellation),
+        },
+    )
+}
+
+/// Synchronizes an explicit affected-source set as one coordinated scan job. Relocation uses this
+/// after releasing its exclusive lease so all source rows sharing the old root settle under one
+/// job id and one terminal summary.
+pub fn sync_scan_sources_with_progress_and_cancel<F>(
+    connection: &Connection,
+    source_ids: &[i64],
+    job_id: &str,
+    cancellation: &AtomicBool,
+    progress: F,
+) -> DbResult<ScanExecution>
+where
+    F: Fn(ScanProgress),
+{
+    let sources = persisted_sources_by_id(connection, source_ids)?;
+    sync_persistent_sources_inner(
+        connection,
+        sources,
+        Some(&progress),
+        ScanRuntime {
+            job_id: Some(job_id),
+            cancellation: Some(cancellation),
+        },
+    )
+}
+
+pub fn sync_enabled_scan_sources_with_progress_and_cancel<F>(
+    connection: &Connection,
+    job_id: &str,
+    cancellation: &AtomicBool,
+    progress: F,
+) -> DbResult<ScanExecution>
+where
+    F: Fn(ScanProgress),
+{
+    let sources = crate::db::list_enabled_source_dirs(connection)?;
+    sync_persistent_sources_inner(
+        connection,
+        sources,
+        Some(&progress),
+        ScanRuntime {
+            job_id: Some(job_id),
+            cancellation: Some(cancellation),
+        },
+    )
+}
+
+fn persisted_sources_by_id(
+    connection: &Connection,
+    source_ids: &[i64],
+) -> DbResult<Vec<crate::db::SourceDir>> {
+    let mut unique_ids = HashSet::new();
+    let mut sources = Vec::new();
+    for source_id in source_ids {
+        if unique_ids.insert(*source_id) {
+            sources.push(crate::db::find_source_dir_by_id(connection, *source_id)?);
+        }
+    }
+    Ok(sources)
+}
+
+fn sync_persistent_sources_inner(
+    connection: &Connection,
+    sources: Vec<crate::db::SourceDir>,
+    progress: Option<ScanProgressReporter<'_>>,
+    runtime: ScanRuntime<'_>,
+) -> DbResult<ScanExecution> {
+    let mut requested_roots = Vec::new();
+    let mut persistent_sources = Vec::new();
+    let mut recursive_roots = HashSet::new();
+    let mut initial_errors = Vec::new();
+
+    for source in sources {
+        let scan_root = PathBuf::from(&source.scan_root_path);
+        push_unique_scan_root(&mut requested_roots, scan_root);
+
+        if source.scan_mode == crate::db::ScanMode::RecursiveMp4 {
+            let root_key = scan_path_key(Path::new(&source.scan_root_path));
+            if !recursive_roots.insert(root_key) {
+                initial_errors.push(format!(
+                    "Skipped duplicate recursive scan root for source '{}'",
+                    source.name
+                ));
+                continue;
+            }
+        }
+        persistent_sources.push(source);
+    }
+
+    let metadata_anchor = persistent_sources
+        .iter()
+        .find(|source| source.scan_mode == crate::db::ScanMode::AclosStructured)
+        .map(|source| PathBuf::from(&source.scan_root_path));
+    run_scan_batch(
+        connection,
+        ScanBatchInput {
+            requested_roots,
+            source_paths: Vec::new(),
+            persistent_sources,
+            metadata_config: MetadataScanConfig {
+                anchor: metadata_anchor.clone(),
+                allow_external_fallback: true,
+                account_hint_scope: metadata_anchor,
+                use_local_account_hint_scope: true,
+            },
+            initial_errors,
+            empty_message: Some("没有可同步的视频来源".to_string()),
         },
         progress,
         runtime,

@@ -1,6 +1,6 @@
 use aes::Aes256;
 use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::error::Error;
@@ -10,7 +10,10 @@ use std::io;
 use std::path::Path;
 use std::string::FromUtf8Error;
 
-use crate::display_names;
+use crate::{
+    display_names,
+    metadata::{classify_timeline_event_time, TimelineEventTimeSemantics},
+};
 
 type Aes256CbcDec = cbc::Decryptor<Aes256>;
 
@@ -173,7 +176,17 @@ pub struct WonderfulEventRecord {
     pub killer_name: Option<String>,
     pub killed_name: Option<String>,
     pub killer_is_me: bool,
+    pub killed_is_me: Option<bool>,
+    pub normalization_warnings: Vec<WonderfulEventNormalizationWarning>,
     pub raw_json: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WonderfulEventNormalizationWarning {
+    InvalidTopLevelKilledIsMe,
+    InvalidExtendedKilledIsMe,
+    VideoTimeOverflow,
+    VideoTimeOutOfBounds,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -308,6 +321,8 @@ struct RawEventRecord {
     killed_name: Option<Value>,
     #[serde(alias = "killerIsMe")]
     killer_is_me: bool,
+    #[serde(rename = "KilledIsMe", alias = "killedIsMe", alias = "killed_is_me")]
+    killed_is_me: PresentValue,
     event_ext: Option<RawEventExt>,
 }
 
@@ -332,6 +347,26 @@ struct RawEventExt {
     killed_player_name: Option<Value>,
     #[serde(rename = "KillerIsMe")]
     killer_is_me: Option<Value>,
+    #[serde(rename = "KilledIsMe", alias = "killedIsMe", alias = "killed_is_me")]
+    killed_is_me: PresentValue,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PresentValue {
+    present: bool,
+    value: Value,
+}
+
+impl<'de> Deserialize<'de> for PresentValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self {
+            present: true,
+            value: Value::deserialize(deserializer)?,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -738,23 +773,53 @@ fn normalize_video(
             })
             .collect()
     };
+    let video_id = value_to_string(&raw.video_id).unwrap_or_default();
+    let video_name = value_to_string(&raw.video_name).unwrap_or_default();
+    let video_type = value_to_string(&raw.video_type).unwrap_or_default();
+    let highlight_type = raw.highlight_type.as_ref().and_then(value_to_i64);
+    let time_semantics = classify_timeline_event_time(highlight_type, &video_name, &video_type);
+    let duration_ms = raw_video_duration_ms(&segment_records);
+
     Ok(WonderfulVideoRecord {
-        video_id: value_to_string(&raw.video_id).unwrap_or_default(),
-        video_name: value_to_string(&raw.video_name).unwrap_or_default(),
-        video_type: value_to_string(&raw.video_type).unwrap_or_default(),
-        highlight_type: raw.highlight_type.as_ref().and_then(value_to_i64),
+        video_id,
+        video_name,
+        video_type,
+        highlight_type,
         video_src: raw.video_src.as_ref().and_then(value_to_string),
         round_score: raw.round_score.as_ref().and_then(value_to_i64),
         segments: segment_records
             .into_iter()
-            .map(|segment| normalize_segment(openid, segment))
+            .map(|segment| normalize_segment(openid, segment, time_semantics, duration_ms))
             .collect::<Result<_, _>>()?,
     })
+}
+
+fn raw_video_duration_ms(segments: &[RawSegmentRecord]) -> Option<i64> {
+    segments
+        .iter()
+        .filter_map(|segment| {
+            segment
+                .clip_end_ms
+                .as_ref()
+                .and_then(value_to_i64)
+                .or_else(|| {
+                    segment
+                        .clip_start_ms
+                        .as_ref()
+                        .and_then(value_to_i64)
+                        .zip(segment.clip_duration.as_ref().and_then(value_to_i64))
+                        .and_then(|(start_ms, duration_ms)| start_ms.checked_add(duration_ms))
+                })
+        })
+        .filter(|duration_ms| *duration_ms >= 0)
+        .max()
 }
 
 fn normalize_segment(
     openid: &str,
     raw: RawSegmentRecord,
+    time_semantics: Option<TimelineEventTimeSemantics>,
+    video_duration_ms: Option<i64>,
 ) -> Result<WonderfulSegmentRecord, WonderfulDbError> {
     let round_id = raw.round_id.as_ref().and_then(value_to_i64);
     let clip_start_ms = raw.clip_start_ms.as_ref().and_then(value_to_i64);
@@ -767,7 +832,16 @@ fn normalize_segment(
     let events = raw
         .clip_events
         .into_iter()
-        .map(|event| normalize_event(openid, clip_start_ms, round_id, event))
+        .map(|event| {
+            normalize_event(
+                openid,
+                clip_start_ms,
+                round_id,
+                time_semantics,
+                video_duration_ms,
+                event,
+            )
+        })
         .collect::<Result<_, _>>()?;
 
     Ok(WonderfulSegmentRecord {
@@ -783,6 +857,8 @@ fn normalize_event(
     openid: &str,
     clip_start_ms: Option<i64>,
     segment_round_id: Option<i64>,
+    time_semantics: Option<TimelineEventTimeSemantics>,
+    video_duration_ms: Option<i64>,
     value: Value,
 ) -> Result<WonderfulEventRecord, WonderfulDbError> {
     let raw_json =
@@ -797,10 +873,27 @@ fn normalize_event(
         })?;
     let event_start_ms = raw.event_start_ms.as_ref().and_then(value_to_i64);
     let raw_round_id = raw.round_id.as_ref().and_then(value_to_i64);
-    let video_time_ms = clip_start_ms
-        .zip(event_start_ms)
-        .and_then(|(clip_start, event_start)| clip_start.checked_add(event_start));
     let event_ext = raw.event_ext.as_ref();
+    let mut normalization_warnings = Vec::new();
+    let video_time_ms = normalize_event_video_time(
+        time_semantics,
+        clip_start_ms,
+        event_start_ms,
+        video_duration_ms,
+        &mut normalization_warnings,
+    );
+    let top_level_killed_is_me = parse_event_flag(
+        &raw.killed_is_me,
+        WonderfulEventNormalizationWarning::InvalidTopLevelKilledIsMe,
+        &mut normalization_warnings,
+    );
+    let extended_killed_is_me = event_ext.filter(|ext| ext.killed_is_me.present).map(|ext| {
+        parse_event_flag(
+            &ext.killed_is_me,
+            WonderfulEventNormalizationWarning::InvalidExtendedKilledIsMe,
+            &mut normalization_warnings,
+        )
+    });
 
     Ok(WonderfulEventRecord {
         event_id: value_to_string(&raw.event_id).unwrap_or_default(),
@@ -847,8 +940,70 @@ fn normalize_event(
             .and_then(|ext| ext.killer_is_me.as_ref())
             .map(killer_is_me_from_value)
             .unwrap_or(raw.killer_is_me),
+        killed_is_me: extended_killed_is_me.unwrap_or(top_level_killed_is_me),
+        normalization_warnings,
         raw_json,
     })
+}
+
+fn normalize_event_video_time(
+    semantics: Option<TimelineEventTimeSemantics>,
+    clip_start_ms: Option<i64>,
+    event_start_ms: Option<i64>,
+    video_duration_ms: Option<i64>,
+    warnings: &mut Vec<WonderfulEventNormalizationWarning>,
+) -> Option<i64> {
+    let event_start_ms = event_start_ms?;
+    let video_time_ms = match semantics? {
+        TimelineEventTimeSemantics::SegmentRelative => {
+            let clip_start_ms = clip_start_ms?;
+            let Some(video_time_ms) = clip_start_ms.checked_add(event_start_ms) else {
+                warnings.push(WonderfulEventNormalizationWarning::VideoTimeOverflow);
+                return None;
+            };
+            video_time_ms
+        }
+        TimelineEventTimeSemantics::VideoAbsolute => event_start_ms,
+    };
+
+    if video_time_ms < 0 || video_duration_ms.is_some_and(|duration_ms| video_time_ms > duration_ms)
+    {
+        warnings.push(WonderfulEventNormalizationWarning::VideoTimeOutOfBounds);
+        return None;
+    }
+
+    Some(video_time_ms)
+}
+
+fn parse_event_flag(
+    raw: &PresentValue,
+    invalid_warning: WonderfulEventNormalizationWarning,
+    warnings: &mut Vec<WonderfulEventNormalizationWarning>,
+) -> Option<bool> {
+    if !raw.present {
+        return None;
+    }
+    let parsed = match &raw.value {
+        Value::Bool(value) => Some(*value),
+        Value::Number(value) => match value
+            .as_i64()
+            .or_else(|| value.as_f64().and_then(integral_f64_to_i64))
+        {
+            Some(0) => Some(false),
+            Some(1) => Some(true),
+            _ => None,
+        },
+        Value::String(value) => match value.trim() {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        },
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    };
+    if parsed.is_none() {
+        warnings.push(invalid_warning);
+    }
+    parsed
 }
 
 fn value_to_string(value: &Value) -> Option<String> {

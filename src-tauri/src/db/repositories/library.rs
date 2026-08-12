@@ -34,6 +34,7 @@ pub fn list_clip_events_for_clip(
                 clip_events.killer_name,
                 clip_events.killed_name,
                 clip_events.killer_is_me,
+                clip_events.killed_is_me,
                 clip_events.raw_json,
                 clip_events.created_at
             FROM clip_events
@@ -810,7 +811,13 @@ pub(crate) const CLIP_SUMMARY_SELECT_SQL: &str = "
         CASE
             WHEN clip_thumbnails.status = 'ready' THEN clip_thumbnails.revision
             ELSE NULL
-        END AS thumbnail_revision
+        END AS thumbnail_revision,
+        source_dirs.source_kind,
+        source_dirs.scan_mode,
+        source_dirs.scan_root_path,
+        clips.source_relative_dir,
+        clips.review_decision,
+        clips.reviewed_at
 ";
 
 pub(crate) struct ClipListFilter {
@@ -961,6 +968,11 @@ pub(crate) fn build_clip_list_filter(
         FavoriteFilter::NotFavorite => conditions.push("clips.is_favorite = 0".to_string()),
     }
 
+    if let Some(review_decision) = query.review_decision {
+        conditions.push("clips.review_decision = ?".to_string());
+        values.push(Value::Text(review_decision.as_str().to_string()));
+    }
+
     if let Some(file_status) = normalized_filter_value(query.file_status.as_deref()) {
         conditions.push("clips.file_status = ?".to_string());
         values.push(Value::Text(file_status.to_string()));
@@ -995,7 +1007,7 @@ pub(crate) fn build_clip_list_filter(
     })
 }
 
-fn append_account_filter(
+pub(crate) fn append_account_filter(
     connection: &Connection,
     account_id: Option<&str>,
     conditions: &mut Vec<String>,
@@ -1061,7 +1073,7 @@ fn source_dir_ids_for_openid(connection: &Connection, openid: &str) -> DbResult<
     Ok(source_dir_ids)
 }
 
-fn append_exact_text_filter(
+pub(crate) fn append_exact_text_filter(
     expression: &str,
     selected_value: Option<&str>,
     conditions: &mut Vec<String>,
@@ -1073,7 +1085,7 @@ fn append_exact_text_filter(
     }
 }
 
-fn append_agent_filter(
+pub(crate) fn append_agent_filter(
     selected_value: Option<&str>,
     conditions: &mut Vec<String>,
     values: &mut Vec<Value>,
@@ -1105,7 +1117,7 @@ fn append_agent_filter(
     );
 }
 
-fn append_map_filter(
+pub(crate) fn append_map_filter(
     connection: &Connection,
     selected_value: Option<&str>,
     conditions: &mut Vec<String>,
@@ -1199,7 +1211,7 @@ fn known_match_map_ids(connection: &Connection) -> DbResult<Vec<(String, String)
     Ok(known)
 }
 
-fn normalized_filter_value(value: Option<&str>) -> Option<&str> {
+pub(crate) fn normalized_filter_value(value: Option<&str>) -> Option<&str> {
     normalize_optional(value).filter(|value| !value.eq_ignore_ascii_case("all"))
 }
 
@@ -1343,7 +1355,13 @@ pub(in crate::db) const CLIP_SELECT_SQL: &str = "
         CASE
             WHEN clip_thumbnails.status = 'ready' THEN clip_thumbnails.revision
             ELSE NULL
-        END AS thumbnail_revision
+        END AS thumbnail_revision,
+        source_dirs.source_kind,
+        source_dirs.scan_mode,
+        source_dirs.scan_root_path,
+        clips.source_relative_dir,
+        clips.review_decision,
+        clips.reviewed_at
     FROM clips
     JOIN source_dirs
         ON source_dirs.id = clips.source_dir_id
@@ -1415,6 +1433,10 @@ pub(in crate::db) fn map_clip(row: &Row<'_>) -> rusqlite::Result<Clip> {
     Ok(Clip {
         id: row.get(0)?,
         source_dir_id,
+        source_kind: row.get(47)?,
+        scan_mode: row.get(48)?,
+        scan_root_path: row.get(49)?,
+        source_relative_dir: row.get(50)?,
         clip_group_id: row.get(2)?,
         clip_group_name: row.get(3)?,
         video_path: row.get(4)?,
@@ -1431,6 +1453,8 @@ pub(in crate::db) fn map_clip(row: &Row<'_>) -> rusqlite::Result<Clip> {
         thumbnail_revision: row.get(46)?,
         status: row.get(14)?,
         favorite: favorite != 0,
+        review_decision: row.get(51)?,
+        reviewed_at: row.get(52)?,
         note: row.get(16)?,
         extracted_text: row.get(17)?,
         account_identity_key,
@@ -1502,6 +1526,10 @@ pub(crate) fn map_clip_summary(row: &Row<'_>) -> rusqlite::Result<ClipSummary> {
         source_dir_id,
         source_dir_path,
         source_dir_name,
+        source_kind: row.get(39)?,
+        scan_mode: row.get(40)?,
+        scan_root_path: row.get(41)?,
+        source_relative_dir: row.get(42)?,
         clip_group_id: row.get(2)?,
         clip_group_name: row.get(3)?,
         video_path: row.get(4)?,
@@ -1516,6 +1544,8 @@ pub(crate) fn map_clip_summary(row: &Row<'_>) -> rusqlite::Result<ClipSummary> {
         thumbnail_revision: row.get(38)?,
         status: row.get(12)?,
         favorite: row.get::<_, i64>(13)? != 0,
+        review_decision: row.get(43)?,
+        reviewed_at: row.get(44)?,
         account_identity_key,
         account_identity_source,
         account_display_name,
@@ -1544,7 +1574,7 @@ pub(crate) fn map_clip_summary(row: &Row<'_>) -> rusqlite::Result<ClipSummary> {
     })
 }
 
-fn attach_clip_summary_tags(
+pub(crate) fn attach_clip_summary_tags(
     connection: &Connection,
     summaries: &mut [ClipSummary],
 ) -> DbResult<()> {
@@ -1636,6 +1666,7 @@ fn list_clip_events_for_clips(
             clip_events.killer_name,
             clip_events.killed_name,
             clip_events.killer_is_me,
+            clip_events.killed_is_me,
             clip_events.raw_json,
             clip_events.created_at
         FROM clip_events
@@ -1682,8 +1713,9 @@ fn map_clip_event(row: &Row<'_>) -> rusqlite::Result<ClipEvent> {
         killer_name: row.get(12)?,
         killed_name: row.get(13)?,
         killer_is_me: row.get::<_, i64>(14)? != 0,
-        raw_json: row.get(15)?,
-        created_at: row.get(16)?,
+        killed_is_me: row.get::<_, Option<i64>>(15)?.map(|value| value != 0),
+        raw_json: row.get(16)?,
+        created_at: row.get(17)?,
     })
 }
 

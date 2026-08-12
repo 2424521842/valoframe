@@ -1,5 +1,4 @@
 import {
-  FunnelSimple,
   ListBullets,
   MagnifyingGlass,
   SquaresFour,
@@ -165,96 +164,106 @@ export function LibraryToolbar({
           </UiPopover>
         </UiCommand>
 
-        <div className="library-search-actions">
-          <button
-            className="library-clear-button"
-            disabled={!hasActiveFilters}
-            type="button"
-            onClick={onClearAll}
-          >
-            <X weight="bold" />
-            清空
-          </button>
-        </div>
+        <UiTooltipProvider delayDuration={300}>
+          <div className="library-search-actions">
+            {hasActiveFilters ? (
+              <UiTooltip>
+                <UiTooltipTrigger asChild>
+                  <button
+                    aria-label="清空搜索与所有筛选"
+                    className="library-clear-button"
+                    type="button"
+                    onClick={onClearAll}
+                  >
+                    <X weight="bold" />
+                  </button>
+                </UiTooltipTrigger>
+                <UiTooltipContent side="bottom">清空搜索与所有筛选</UiTooltipContent>
+              </UiTooltip>
+            ) : null}
+
+            <div className="library-view-switch" aria-label="素材视图">
+              <ViewToggle
+                active={viewMode === "grid"}
+                label="网格视图"
+                onClick={() => onViewModeChange("grid")}
+              >
+                <SquaresFour weight={viewMode === "grid" ? "fill" : "regular"} />
+              </ViewToggle>
+              <ViewToggle
+                active={viewMode === "list"}
+                label="列表视图"
+                onClick={() => onViewModeChange("list")}
+              >
+                <ListBullets weight={viewMode === "list" ? "bold" : "regular"} />
+              </ViewToggle>
+            </div>
+          </div>
+        </UiTooltipProvider>
       </div>
 
       <div className="library-filter-row">
-        <FilterSelect
-          label="账号"
-          options={[
-            { label: "全部账号", value: "all" },
-            ...accounts.map((account) => ({ label: account.displayName, value: account.id })),
-          ]}
-          value={accountId}
-          onChange={onAccountChange}
-        />
-        <OptionFilter label="英雄" value={agentName} options={agentNames} onChange={onAgentChange} />
-        <OptionFilter label="地图" value={mapName} options={mapNames} onChange={onMapChange} />
-        <OptionFilter label="模式" value={gameMode} options={gameModes} onChange={onGameModeChange} />
-        <FilterSelect
-          label="日期"
-          options={[
-            { label: "全部日期", value: "all" },
-            { label: "今天", value: "today" },
-            { label: "近 7 天", value: "week" },
-            { label: "近 30 天", value: "month" },
-          ]}
-          value={datePreset}
-          onChange={(value) => onDatePresetChange(value as LibraryDatePreset)}
-        />
-        <FilterSelect
-          label="视频类型"
-          options={[
-            { label: "全部类型", value: "all" },
-            ...videoTypes.map((value) => ({
-              label: videoTypeLabel(value),
-              value,
-            })),
-          ]}
-          value={highlightFilter}
-          onChange={(value) => onHighlightFilterChange(value as HighlightFilter)}
-        />
-        <FilterSelect
-          label="自定义标签"
-          options={[
-            { label: "全部自定义标签", value: "all" },
-            ...tags.map((tag) => ({ label: tag.label, value: tag.id })),
-          ]}
-          value={tagId}
-          onChange={onTagChange}
-        />
-        <FilterSelect
-          label="排序"
-          options={[
-            { label: "最新优先", value: "modified-desc" },
-            { label: "最早优先", value: "modified-asc" },
-            { label: "体积最大", value: "size-desc" },
-            { label: "体积最小", value: "size-asc" },
-            { label: "文件名", value: "name-asc" },
-          ]}
-          value={sortBy}
-          onChange={(value) => onSortChange(value as ClipSort)}
-        />
+        <div className="library-filter-controls">
+          <FilterSelect
+            label="账号"
+            options={[
+              { label: "全部账号", value: "all" },
+              ...accounts.map((account) => ({ label: account.displayName, value: account.id })),
+            ]}
+            value={accountId}
+            onChange={onAccountChange}
+          />
+          <OptionFilter label="英雄" value={agentName} options={agentNames} onChange={onAgentChange} />
+          <OptionFilter label="地图" value={mapName} options={mapNames} onChange={onMapChange} />
+          <OptionFilter label="模式" value={gameMode} options={gameModes} onChange={onGameModeChange} />
+          <FilterSelect
+            label="日期"
+            options={[
+              { label: "全部日期", value: "all" },
+              { label: "今天", value: "today" },
+              { label: "近 7 天", value: "week" },
+              { label: "近 30 天", value: "month" },
+            ]}
+            value={datePreset}
+            onChange={(value) => onDatePresetChange(value as LibraryDatePreset)}
+          />
+          <FilterSelect
+            label="视频类型"
+            options={[
+              { label: "全部类型", value: "all" },
+              ...videoTypes.map((value) => ({
+                label: videoTypeLabel(value),
+                value,
+              })),
+            ]}
+            value={highlightFilter}
+            onChange={(value) => onHighlightFilterChange(value as HighlightFilter)}
+          />
+          <FilterSelect
+            label="自定义标签"
+            options={[
+              { label: "全部自定义标签", value: "all" },
+              ...tags.map((tag) => ({ label: tag.label, value: tag.id })),
+            ]}
+            value={tagId}
+            onChange={onTagChange}
+          />
+        </div>
 
-        <UiTooltipProvider delayDuration={300}>
-          <div className="library-view-switch" aria-label="素材视图">
-            <FunnelSimple aria-hidden="true" weight="bold" />
-            <ViewToggle
-              active={viewMode === "grid"}
-              label="网格视图"
-              onClick={() => onViewModeChange("grid")}
-            >
-              <SquaresFour weight={viewMode === "grid" ? "fill" : "regular"} />
-            </ViewToggle>
-            <ViewToggle
-              active={viewMode === "list"}
-              label="列表视图"
-              onClick={() => onViewModeChange("list")}
-            >
-              <ListBullets weight={viewMode === "list" ? "bold" : "regular"} />
-            </ViewToggle>
-          </div>
-        </UiTooltipProvider>
+        <div className="library-sort-control">
+          <FilterSelect
+            label="排序"
+            options={[
+              { label: "最新优先", value: "modified-desc" },
+              { label: "最早优先", value: "modified-asc" },
+              { label: "体积最大", value: "size-desc" },
+              { label: "体积最小", value: "size-asc" },
+              { label: "文件名", value: "name-asc" },
+            ]}
+            value={sortBy}
+            onChange={(value) => onSortChange(value as ClipSort)}
+          />
+        </div>
       </div>
     </section>
   );

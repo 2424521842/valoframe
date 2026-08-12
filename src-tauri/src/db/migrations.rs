@@ -1,10 +1,14 @@
 //! Database schema creation and versioned migrations.
 
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use std::collections::BTreeMap;
+
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use serde_json::Value;
 
 use super::{configure_connection, readable_error, DbResult};
+use crate::metadata::{classify_timeline_event_time, TimelineEventTimeSemantics};
 
-pub(super) const SCHEMA_VERSION: i64 = 13;
+pub(super) const SCHEMA_VERSION: i64 = 16;
 
 /// Applies the idempotent schema migration to a caller-controlled connection.
 pub fn initialize_schema(connection: &Connection) -> DbResult<()> {
@@ -42,6 +46,13 @@ fn initialize_schema_versioned(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 path TEXT NOT NULL UNIQUE,
                 name TEXT NOT NULL,
+                source_kind TEXT NOT NULL DEFAULT 'aclos' CHECK (
+                    source_kind IN ('aclos', 'nvidia', 'tracker', 'generic')
+                ),
+                scan_mode TEXT NOT NULL DEFAULT 'aclos-structured' CHECK (
+                    scan_mode IN ('aclos-structured', 'recursive-mp4')
+                ),
+                scan_root_path TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
                 status TEXT NOT NULL DEFAULT 'available',
                 last_error TEXT,
@@ -71,18 +82,41 @@ fn initialize_schema_versioned(
                 extension TEXT NOT NULL DEFAULT 'mp4',
                 size_bytes INTEGER NOT NULL DEFAULT 0,
                 modified_at TEXT,
+                file_volume_serial INTEGER CHECK (
+                    file_volume_serial IS NULL OR file_volume_serial BETWEEN 0 AND 4294967295
+                ),
+                file_index_high INTEGER CHECK (
+                    file_index_high IS NULL OR file_index_high BETWEEN 0 AND 4294967295
+                ),
+                file_index_low INTEGER CHECK (
+                    file_index_low IS NULL OR file_index_low BETWEEN 0 AND 4294967295
+                ),
                 duration_ms INTEGER,
                 recorded_at TEXT,
+                source_relative_dir TEXT NOT NULL DEFAULT '',
                 cover_path TEXT,
                 cover_source TEXT NOT NULL DEFAULT 'missing',
                 file_status TEXT NOT NULL DEFAULT 'available',
                 is_favorite INTEGER NOT NULL DEFAULT 0 CHECK (is_favorite IN (0, 1)),
+                review_decision TEXT NOT NULL DEFAULT 'unreviewed' CHECK (
+                    review_decision IN ('unreviewed', 'liked', 'disliked')
+                ),
+                reviewed_at TEXT,
                 note TEXT,
                 first_indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (source_dir_id) REFERENCES source_dirs(id) ON DELETE CASCADE,
-                FOREIGN KEY (clip_group_id) REFERENCES clip_groups(id) ON DELETE SET NULL
+                FOREIGN KEY (clip_group_id) REFERENCES clip_groups(id) ON DELETE SET NULL,
+                CHECK (
+                    (file_volume_serial IS NULL
+                        AND file_index_high IS NULL
+                        AND file_index_low IS NULL)
+                    OR
+                    (file_volume_serial IS NOT NULL
+                        AND file_index_high IS NOT NULL
+                        AND file_index_low IS NOT NULL)
+                )
             );
 
             CREATE TABLE IF NOT EXISTS clip_thumbnails (
@@ -244,6 +278,7 @@ fn initialize_schema_versioned(
                 killer_name TEXT,
                 killed_name TEXT,
                 killer_is_me INTEGER NOT NULL DEFAULT 0 CHECK (killer_is_me IN (0, 1)),
+                killed_is_me INTEGER NOT NULL DEFAULT 0 CHECK (killed_is_me IN (0, 1)),
                 raw_json TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE (clip_id, event_key)
@@ -320,6 +355,7 @@ fn initialize_schema_versioned(
                 metadata_event_count INTEGER NOT NULL DEFAULT 0,
                 metadata_warning_count INTEGER NOT NULL DEFAULT 0,
                 diagnostic_omitted_count INTEGER NOT NULL DEFAULT 0,
+                summary_available INTEGER NOT NULL DEFAULT 0 CHECK (summary_available IN (0, 1)),
                 errors_json TEXT NOT NULL DEFAULT '[]',
                 message TEXT,
                 started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -510,6 +546,24 @@ fn initialize_schema_versioned(
         .map_err(|error| readable_error("initializing schema", error))?;
 
     ensure_column(connection, "clips", "modified_at", "TEXT")?;
+    ensure_column(
+        connection,
+        "clips",
+        "file_volume_serial",
+        "INTEGER CHECK (file_volume_serial IS NULL OR file_volume_serial BETWEEN 0 AND 4294967295)",
+    )?;
+    ensure_column(
+        connection,
+        "clips",
+        "file_index_high",
+        "INTEGER CHECK (file_index_high IS NULL OR file_index_high BETWEEN 0 AND 4294967295)",
+    )?;
+    ensure_column(
+        connection,
+        "clips",
+        "file_index_low",
+        "INTEGER CHECK (file_index_low IS NULL OR file_index_low BETWEEN 0 AND 4294967295)",
+    )?;
     ensure_column(connection, "clips", "cover_path", "TEXT")?;
     ensure_column(
         connection,
@@ -523,6 +577,43 @@ fn initialize_schema_versioned(
         "clips",
         "is_favorite",
         "INTEGER NOT NULL DEFAULT 0 CHECK (is_favorite IN (0, 1))",
+    )?;
+    ensure_column(
+        connection,
+        "source_dirs",
+        "source_kind",
+        "TEXT NOT NULL DEFAULT 'aclos' CHECK (source_kind IN ('aclos', 'nvidia', 'tracker', 'generic'))",
+    )?;
+    ensure_column(
+        connection,
+        "source_dirs",
+        "scan_mode",
+        "TEXT NOT NULL DEFAULT 'aclos-structured' CHECK (scan_mode IN ('aclos-structured', 'recursive-mp4'))",
+    )?;
+    ensure_column(
+        connection,
+        "source_dirs",
+        "scan_root_path",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        connection,
+        "clips",
+        "source_relative_dir",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        connection,
+        "clips",
+        "review_decision",
+        "TEXT NOT NULL DEFAULT 'unreviewed' CHECK (review_decision IN ('unreviewed', 'liked', 'disliked'))",
+    )?;
+    ensure_column(connection, "clips", "reviewed_at", "TEXT")?;
+    ensure_column(
+        connection,
+        "clip_events",
+        "killed_is_me",
+        "INTEGER NOT NULL DEFAULT 0 CHECK (killed_is_me IN (0, 1))",
     )?;
     ensure_column(connection, "tags", "created_at", "TEXT")?;
     ensure_column(connection, "tags", "updated_at", "TEXT")?;
@@ -626,7 +717,25 @@ fn initialize_schema_versioned(
         "diagnostic_omitted_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    ensure_column(
+        connection,
+        "scan_runs",
+        "summary_available",
+        "INTEGER NOT NULL DEFAULT 0 CHECK (summary_available IN (0, 1))",
+    )?;
     migrate_legacy_favorite_column(connection)?;
+    if previous_schema_version < 14 {
+        migrate_source_and_review_model_v14(connection)?;
+    }
+    if previous_schema_version < 15 {
+        migrate_scan_summary_availability_v15(connection)?;
+        migrate_deterministic_clip_event_fields_v15(connection)?;
+    }
+    if previous_schema_version < 16 {
+        migrate_windows_verbatim_clip_duplicates_v16(connection)?;
+        migrate_windows_verbatim_source_paths_v16(connection)?;
+    }
+    create_clip_identity_validation_triggers(connection)?;
     create_schema_indexes(connection)?;
     if previous_schema_version < 7 {
         migrate_clip_paging_indexes(connection)?;
@@ -707,6 +816,988 @@ fn migrate_legacy_favorite_column(connection: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+fn migrate_source_and_review_model_v14(connection: &Connection) -> DbResult<()> {
+    connection
+        .execute(
+            "
+            UPDATE source_dirs
+            SET source_kind = 'aclos',
+                scan_mode = 'aclos-structured',
+                scan_root_path = path
+            ",
+            [],
+        )
+        .map_err(|error| readable_error("backfilling source profiles", error))?;
+
+    let clip_locations = {
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT
+                    clips.id,
+                    clips.file_path,
+                    source_dirs.scan_root_path,
+                    source_dirs.path,
+                    clip_groups.group_key
+                FROM clips
+                JOIN source_dirs ON source_dirs.id = clips.source_dir_id
+                LEFT JOIN clip_groups ON clip_groups.id = clips.clip_group_id
+                ORDER BY clips.id
+                ",
+            )
+            .map_err(|error| readable_error("preparing source-relative migration", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|error| readable_error("querying source-relative migration", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| readable_error("reading source-relative migration", error))?;
+        rows
+    };
+
+    for (clip_id, video_path, scan_root_path, source_path, group_key) in clip_locations {
+        let relative_dir = super::source_relative_directory(
+            &video_path,
+            &scan_root_path,
+            &source_path,
+            group_key.as_deref(),
+        );
+        connection
+            .execute(
+                "UPDATE clips SET source_relative_dir = ?2 WHERE id = ?1",
+                params![clip_id, relative_dir],
+            )
+            .map_err(|error| readable_error("backfilling clip source-relative directory", error))?;
+    }
+
+    connection
+        .execute(
+            "
+            UPDATE clips
+            SET review_decision = CASE
+                    WHEN is_favorite != 0 THEN 'liked'
+                    ELSE 'unreviewed'
+                END,
+                reviewed_at = CASE
+                    WHEN is_favorite != 0 THEN updated_at
+                    ELSE NULL
+                END
+            ",
+            [],
+        )
+        .map_err(|error| readable_error("backfilling clip review decisions", error))?;
+
+    Ok(())
+}
+
+fn migrate_scan_summary_availability_v15(connection: &Connection) -> DbResult<()> {
+    // Before v15, completed and partial rows were written only by the full summary persistence
+    // path. Cancelled/failed recovery rows may contain default counters, so they deliberately stay
+    // unavailable rather than presenting an invented zero.
+    connection
+        .execute(
+            "
+            UPDATE scan_runs
+            SET summary_available = CASE
+                    WHEN status IN ('completed', 'partial') THEN 1
+                    ELSE 0
+                END
+            ",
+            [],
+        )
+        .map_err(|error| readable_error("backfilling scan summary availability", error))?;
+
+    Ok(())
+}
+
+fn migrate_deterministic_clip_event_fields_v15(connection: &Connection) -> DbResult<()> {
+    #[derive(Debug)]
+    struct HistoricalEvent {
+        id: i64,
+        raw_json: Option<String>,
+        duration_ms: Option<i64>,
+        highlight_type: Option<String>,
+        official_video_name: Option<String>,
+        official_video_type: Option<String>,
+    }
+
+    let events = {
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT
+                    clip_events.id,
+                    clip_events.raw_json,
+                    clips.duration_ms,
+                    clip_metadata.highlight_type,
+                    clip_metadata.official_video_name,
+                    clip_metadata.official_video_type
+                FROM clip_events
+                JOIN clips ON clips.id = clip_events.clip_id
+                LEFT JOIN clip_metadata ON clip_metadata.clip_id = clips.id
+                ORDER BY clip_events.id
+                ",
+            )
+            .map_err(|error| {
+                readable_error("preparing deterministic clip event migration", error)
+            })?;
+        let collected = statement
+            .query_map([], |row| {
+                Ok(HistoricalEvent {
+                    id: row.get(0)?,
+                    raw_json: row.get(1)?,
+                    duration_ms: row.get(2)?,
+                    highlight_type: row.get(3)?,
+                    official_video_name: row.get(4)?,
+                    official_video_type: row.get(5)?,
+                })
+            })
+            .map_err(|error| readable_error("reading historical clip events", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| readable_error("collecting historical clip events", error))?;
+        collected
+    };
+
+    for event in events {
+        let raw_event = event
+            .raw_json
+            .as_deref()
+            .and_then(|raw_json| serde_json::from_str::<Value>(raw_json).ok());
+
+        if let Some(killed_is_me) = raw_event.as_ref().and_then(historical_killed_is_me) {
+            connection
+                .execute(
+                    "UPDATE clip_events SET killed_is_me = ?2 WHERE id = ?1",
+                    params![event.id, i64::from(killed_is_me)],
+                )
+                .map_err(|error| {
+                    readable_error("backfilling historical killed-is-me flag", error)
+                })?;
+        }
+
+        let highlight_type = event
+            .highlight_type
+            .as_deref()
+            .and_then(historical_integral_i64);
+        let time_semantics = classify_timeline_event_time(
+            highlight_type,
+            event.official_video_name.as_deref().unwrap_or_default(),
+            event.official_video_type.as_deref().unwrap_or_default(),
+        );
+        if time_semantics != Some(TimelineEventTimeSemantics::VideoAbsolute) {
+            // Segment-relative and unknown records retain their v14 value. Without a confirmed
+            // compilation classification, clearing the time could destroy a correct ordinary
+            // highlight marker.
+            continue;
+        }
+
+        let repaired_video_time_ms = event
+            .duration_ms
+            .filter(|duration_ms| *duration_ms >= 0)
+            .zip(raw_event.as_ref().and_then(historical_event_start_ms))
+            .and_then(|(duration_ms, event_start_ms)| {
+                (event_start_ms >= 0 && event_start_ms <= duration_ms).then_some(event_start_ms)
+            });
+        connection
+            .execute(
+                "UPDATE clip_events SET video_time_ms = ?2 WHERE id = ?1",
+                params![event.id, repaired_video_time_ms],
+            )
+            .map_err(|error| {
+                readable_error("repairing historical compilation event time", error)
+            })?;
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct VerbatimClipRowV16 {
+    id: i64,
+    source_dir_id: i64,
+    file_path: String,
+    file_status: String,
+    is_favorite: bool,
+    note: Option<String>,
+    review_decision: String,
+    reviewed_at: Option<String>,
+    has_trash_snapshot: bool,
+    has_delete_intent: bool,
+}
+
+/// Repairs the Windows canonical-path regression that allowed `D:\x` and `\\?\D:\x` to be
+/// indexed as separate clips. Stable file identity alone is deliberately insufficient because
+/// hard links share it. A pair is merged only when all of the following are true:
+///
+/// - exactly two rows share a complete identity inside one source;
+/// - exactly one path uses the Win32 verbatim namespace;
+/// - removing only that namespace produces the same normalized path; and
+/// - the verbatim duplicate owns no trash snapshot, trash state, or permanent-delete intent.
+///
+/// The ordinary-path row remains the keeper, preserving its clip id and all authorization state.
+fn migrate_windows_verbatim_clip_duplicates_v16(connection: &Connection) -> DbResult<()> {
+    let rows = {
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT
+                    clips.id,
+                    clips.source_dir_id,
+                    clips.file_path,
+                    clips.file_status,
+                    clips.is_favorite,
+                    clips.note,
+                    clips.review_decision,
+                    clips.reviewed_at,
+                    EXISTS (
+                        SELECT 1 FROM clip_trash_snapshots
+                        WHERE clip_trash_snapshots.clip_id = clips.id
+                    ),
+                    EXISTS (
+                        SELECT 1 FROM clip_delete_intents
+                        WHERE clip_delete_intents.clip_id = clips.id
+                    ),
+                    clips.file_volume_serial,
+                    clips.file_index_high,
+                    clips.file_index_low
+                FROM clips
+                WHERE clips.file_volume_serial IS NOT NULL
+                  AND clips.file_index_high IS NOT NULL
+                  AND clips.file_index_low IS NOT NULL
+                ORDER BY
+                    clips.source_dir_id,
+                    clips.file_volume_serial,
+                    clips.file_index_high,
+                    clips.file_index_low,
+                    clips.id
+                ",
+            )
+            .map_err(|error| readable_error("preparing v16 verbatim clip repair", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    (
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(12)?,
+                    ),
+                    VerbatimClipRowV16 {
+                        id: row.get(0)?,
+                        source_dir_id: row.get(1)?,
+                        file_path: row.get(2)?,
+                        file_status: row.get(3)?,
+                        is_favorite: row.get::<_, i64>(4)? != 0,
+                        note: row.get(5)?,
+                        review_decision: row.get(6)?,
+                        reviewed_at: row.get(7)?,
+                        has_trash_snapshot: row.get::<_, i64>(8)? != 0,
+                        has_delete_intent: row.get::<_, i64>(9)? != 0,
+                    },
+                ))
+            })
+            .map_err(|error| readable_error("querying v16 verbatim clip repair", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| readable_error("reading v16 verbatim clip repair", error))?;
+        rows
+    };
+
+    let mut by_identity = BTreeMap::<(i64, i64, i64, i64), Vec<VerbatimClipRowV16>>::new();
+    for (identity, row) in rows {
+        by_identity.entry(identity).or_default().push(row);
+    }
+
+    let mut repaired = 0usize;
+    let mut skipped_protected = 0usize;
+    let mut skipped_review_conflict = 0usize;
+    for identity_rows in by_identity.into_values() {
+        if identity_rows.len() != 2 {
+            continue;
+        }
+        let ordinary = identity_rows
+            .iter()
+            .find(|row| !super::has_windows_verbatim_prefix(&row.file_path));
+        let verbatim = identity_rows
+            .iter()
+            .find(|row| super::has_windows_verbatim_prefix(&row.file_path));
+        let (Some(keeper), Some(duplicate)) = (ordinary, verbatim) else {
+            continue;
+        };
+        if stable_path_exact_alias_v16(&keeper.file_path)
+            != stable_path_exact_alias_v16(&duplicate.file_path)
+        {
+            continue;
+        }
+        if duplicate.file_status == "trashed"
+            || duplicate.has_trash_snapshot
+            || duplicate.has_delete_intent
+        {
+            skipped_protected = skipped_protected.saturating_add(1);
+            continue;
+        }
+        if keeper.review_decision != "unreviewed"
+            && duplicate.review_decision != "unreviewed"
+            && keeper.review_decision != duplicate.review_decision
+        {
+            skipped_review_conflict = skipped_review_conflict.saturating_add(1);
+            continue;
+        }
+
+        merge_verbatim_clip_pair_v16(connection, keeper, duplicate)?;
+        repaired = repaired.saturating_add(1);
+    }
+
+    normalize_remaining_verbatim_clip_paths_v16(connection)?;
+    if skipped_protected > 0 || skipped_review_conflict > 0 {
+        eprintln!(
+            "schema v16 left ambiguous verbatim clip pairs unchanged: protected={skipped_protected}, review_conflict={skipped_review_conflict}"
+        );
+    }
+    if repaired > 0 {
+        eprintln!("schema v16 merged {repaired} deterministic verbatim clip duplicates");
+    }
+    Ok(())
+}
+
+fn stable_path_exact_alias_v16(path: &str) -> String {
+    super::stable_path_for_storage(path).replace('\\', "/")
+}
+
+/// Normalizes a legacy source only when it is the sole row for that stable Windows path. Source
+/// aliases can own different clips and user state, so ambiguous rows are retained and reported
+/// instead of attempting an implicit cross-source merge.
+fn migrate_windows_verbatim_source_paths_v16(connection: &Connection) -> DbResult<()> {
+    let rows = {
+        let mut statement = connection
+            .prepare("SELECT id, path, scan_root_path FROM source_dirs ORDER BY id")
+            .map_err(|error| readable_error("preparing v16 source path repair", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| readable_error("querying v16 source path repair", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| readable_error("reading v16 source path repair", error))?;
+        rows
+    };
+    let mut key_counts = BTreeMap::<String, usize>::new();
+    for (_, path, _) in &rows {
+        let key = super::normalize_path(path)
+            .trim_end_matches('/')
+            .to_string();
+        *key_counts.entry(key).or_default() += 1;
+    }
+
+    let mut repaired = 0usize;
+    let mut ambiguous = 0usize;
+    for (id, path, scan_root_path) in rows {
+        let stable_path = super::stable_path_for_storage(&path);
+        let stable_scan_root = super::stable_path_for_storage(&scan_root_path);
+        if stable_path == path && stable_scan_root == scan_root_path {
+            continue;
+        }
+        let key = super::normalize_path(&path)
+            .trim_end_matches('/')
+            .to_string();
+        if key_counts.get(&key).copied().unwrap_or_default() != 1 {
+            ambiguous = ambiguous.saturating_add(1);
+            continue;
+        }
+        connection
+            .execute(
+                "UPDATE source_dirs
+                 SET path = ?2, scan_root_path = ?3, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?1",
+                params![id, stable_path, stable_scan_root],
+            )
+            .map_err(|error| readable_error("repairing v16 source paths", error))?;
+        repaired = repaired.saturating_add(1);
+    }
+    if ambiguous > 0 {
+        eprintln!(
+            "schema v16 left {ambiguous} ambiguous verbatim source rows unchanged; manual source reconciliation is required"
+        );
+    }
+    if repaired > 0 {
+        eprintln!("schema v16 normalized {repaired} unambiguous source paths");
+    }
+    Ok(())
+}
+
+fn merge_verbatim_clip_pair_v16(
+    connection: &Connection,
+    keeper: &VerbatimClipRowV16,
+    duplicate: &VerbatimClipRowV16,
+) -> DbResult<()> {
+    debug_assert_eq!(keeper.source_dir_id, duplicate.source_dir_id);
+    let merged_note = merge_clip_notes_v16(keeper.note.as_deref(), duplicate.note.as_deref());
+    let (review_decision, reviewed_at) = merge_clip_review_v16(keeper, duplicate);
+    let file_status = if keeper.file_status == "trashed" {
+        "trashed"
+    } else if keeper.file_status == "available" || duplicate.file_status == "available" {
+        "available"
+    } else {
+        "missing"
+    };
+
+    connection
+        .execute(
+            "
+            UPDATE clips
+            SET clip_group_id = COALESCE(
+                    clip_group_id,
+                    (SELECT clip_group_id FROM clips AS duplicate WHERE duplicate.id = ?2)
+                ),
+                modified_at = COALESCE(
+                    modified_at,
+                    (SELECT modified_at FROM clips AS duplicate WHERE duplicate.id = ?2)
+                ),
+                duration_ms = COALESCE(
+                    duration_ms,
+                    (SELECT duration_ms FROM clips AS duplicate WHERE duplicate.id = ?2)
+                ),
+                recorded_at = COALESCE(
+                    recorded_at,
+                    (SELECT recorded_at FROM clips AS duplicate WHERE duplicate.id = ?2)
+                ),
+                source_relative_dir = CASE
+                    WHEN NULLIF(TRIM(source_relative_dir), '') IS NULL THEN COALESCE(
+                        (SELECT source_relative_dir FROM clips AS duplicate WHERE duplicate.id = ?2),
+                        ''
+                    )
+                    ELSE source_relative_dir
+                END,
+                cover_path = COALESCE(
+                    cover_path,
+                    (SELECT cover_path FROM clips AS duplicate WHERE duplicate.id = ?2)
+                ),
+                cover_source = CASE
+                    WHEN cover_source = 'missing' THEN COALESCE(
+                        (SELECT cover_source FROM clips AS duplicate WHERE duplicate.id = ?2),
+                        cover_source
+                    )
+                    ELSE cover_source
+                END,
+                file_status = ?3,
+                is_favorite = ?4,
+                review_decision = ?5,
+                reviewed_at = ?6,
+                note = ?7,
+                first_indexed_at = MIN(
+                    first_indexed_at,
+                    (SELECT first_indexed_at FROM clips AS duplicate WHERE duplicate.id = ?2)
+                ),
+                last_seen_at = MAX(
+                    last_seen_at,
+                    (SELECT last_seen_at FROM clips AS duplicate WHERE duplicate.id = ?2)
+                ),
+                updated_at = MAX(
+                    updated_at,
+                    (SELECT updated_at FROM clips AS duplicate WHERE duplicate.id = ?2)
+                )
+            WHERE id = ?1
+            ",
+            params![
+                keeper.id,
+                duplicate.id,
+                file_status,
+                i64::from(keeper.is_favorite || duplicate.is_favorite),
+                review_decision,
+                reviewed_at,
+                merged_note,
+            ],
+        )
+        .map_err(|error| readable_error("merging v16 clip state", error))?;
+
+    connection
+        .execute(
+            "
+            INSERT OR IGNORE INTO clip_tags (clip_id, tag_id, created_at)
+            SELECT ?1, tag_id, created_at
+            FROM clip_tags
+            WHERE clip_id = ?2
+            ",
+            params![keeper.id, duplicate.id],
+        )
+        .map_err(|error| readable_error("merging v16 clip tags", error))?;
+
+    merge_clip_metadata_v16(connection, keeper.id, duplicate.id)?;
+    merge_clip_timeline_v16(connection, keeper.id, duplicate.id)?;
+    merge_clip_thumbnail_v16(connection, keeper.id, duplicate.id)?;
+
+    connection
+        .execute("DELETE FROM clips WHERE id = ?1", params![duplicate.id])
+        .map_err(|error| readable_error("deleting v16 verbatim duplicate", error))?;
+
+    let stable_path = super::stable_path_for_storage(&keeper.file_path);
+    let normalized_path = super::normalize_path(&stable_path);
+    connection
+        .execute(
+            "UPDATE clips SET file_path = ?2, normalized_path = ?3 WHERE id = ?1",
+            params![keeper.id, stable_path, normalized_path],
+        )
+        .map_err(|error| readable_error("normalizing v16 keeper path", error))?;
+    Ok(())
+}
+
+fn merge_clip_notes_v16(keeper: Option<&str>, duplicate: Option<&str>) -> Option<String> {
+    let keeper = keeper.map(str::trim).filter(|value| !value.is_empty());
+    let duplicate = duplicate.map(str::trim).filter(|value| !value.is_empty());
+    match (keeper, duplicate) {
+        (None, None) => None,
+        (Some(value), None) | (None, Some(value)) => Some(value.to_string()),
+        (Some(left), Some(right)) if left == right => Some(left.to_string()),
+        (Some(left), Some(right)) => Some(format!("{left}\n\n{right}")),
+    }
+}
+
+fn merge_clip_review_v16(
+    keeper: &VerbatimClipRowV16,
+    duplicate: &VerbatimClipRowV16,
+) -> (String, Option<String>) {
+    if keeper.review_decision == "unreviewed" && duplicate.review_decision != "unreviewed" {
+        return (
+            duplicate.review_decision.clone(),
+            duplicate.reviewed_at.clone(),
+        );
+    }
+    let reviewed_at = match (&keeper.reviewed_at, &duplicate.reviewed_at) {
+        (Some(left), Some(right)) if keeper.review_decision == duplicate.review_decision => {
+            Some(left.max(right).clone())
+        }
+        _ => keeper.reviewed_at.clone(),
+    };
+    (keeper.review_decision.clone(), reviewed_at)
+}
+
+fn merge_clip_metadata_v16(
+    connection: &Connection,
+    keeper_id: i64,
+    duplicate_id: i64,
+) -> DbResult<()> {
+    connection
+        .execute(
+            "
+            INSERT OR IGNORE INTO clip_metadata (
+                clip_id, metadata_status, json_path, account_name, player_name, agent_name,
+                map_name, game_mode, match_id, round_label, scoreline, kda, weapon_name,
+                kill_count, official_video_id, official_video_name, official_video_type,
+                highlight_type, round_score, round_score_source, metadata_source, raw_title,
+                extracted_text, extra_json, parse_error, updated_at
+            )
+            SELECT
+                ?1, metadata_status, json_path, account_name, player_name, agent_name,
+                map_name, game_mode, match_id, round_label, scoreline, kda, weapon_name,
+                kill_count, official_video_id, official_video_name, official_video_type,
+                highlight_type, round_score, round_score_source, metadata_source, raw_title,
+                extracted_text, extra_json, parse_error, updated_at
+            FROM clip_metadata
+            WHERE clip_id = ?2
+            ",
+            params![keeper_id, duplicate_id],
+        )
+        .map_err(|error| readable_error("copying v16 clip metadata", error))?;
+
+    connection
+        .execute(
+            "
+            UPDATE clip_metadata
+            SET metadata_status = CASE
+                    WHEN metadata_status = 'enriched' THEN metadata_status
+                    WHEN (SELECT metadata_status FROM clip_metadata AS donor WHERE donor.clip_id = ?2) = 'enriched'
+                        THEN 'enriched'
+                    WHEN metadata_status = 'not_found' THEN COALESCE(
+                        (SELECT metadata_status FROM clip_metadata AS donor WHERE donor.clip_id = ?2),
+                        metadata_status
+                    )
+                    ELSE metadata_status
+                END,
+                json_path = COALESCE(NULLIF(TRIM(json_path), ''), (SELECT json_path FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                account_name = COALESCE(NULLIF(TRIM(account_name), ''), (SELECT account_name FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                player_name = COALESCE(NULLIF(TRIM(player_name), ''), (SELECT player_name FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                agent_name = COALESCE(NULLIF(TRIM(agent_name), ''), (SELECT agent_name FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                map_name = COALESCE(NULLIF(TRIM(map_name), ''), (SELECT map_name FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                game_mode = COALESCE(NULLIF(TRIM(game_mode), ''), (SELECT game_mode FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                match_id = COALESCE(NULLIF(TRIM(match_id), ''), (SELECT match_id FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                round_label = COALESCE(NULLIF(TRIM(round_label), ''), (SELECT round_label FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                scoreline = COALESCE(NULLIF(TRIM(scoreline), ''), (SELECT scoreline FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                kda = COALESCE(NULLIF(TRIM(kda), ''), (SELECT kda FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                weapon_name = COALESCE(NULLIF(TRIM(weapon_name), ''), (SELECT weapon_name FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                kill_count = COALESCE(kill_count, (SELECT kill_count FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                official_video_id = COALESCE(NULLIF(TRIM(official_video_id), ''), (SELECT official_video_id FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                official_video_name = COALESCE(NULLIF(TRIM(official_video_name), ''), (SELECT official_video_name FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                official_video_type = COALESCE(NULLIF(TRIM(official_video_type), ''), (SELECT official_video_type FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                highlight_type = COALESCE(NULLIF(TRIM(highlight_type), ''), (SELECT highlight_type FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                round_score = COALESCE(NULLIF(TRIM(round_score), ''), (SELECT round_score FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                round_score_source = COALESCE(NULLIF(TRIM(round_score_source), ''), (SELECT round_score_source FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                metadata_source = COALESCE(NULLIF(TRIM(metadata_source), ''), (SELECT metadata_source FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                raw_title = COALESCE(NULLIF(TRIM(raw_title), ''), (SELECT raw_title FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                extracted_text = COALESCE(NULLIF(TRIM(extracted_text), ''), (SELECT extracted_text FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                extra_json = COALESCE(NULLIF(TRIM(extra_json), ''), (SELECT extra_json FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                parse_error = COALESCE(NULLIF(TRIM(parse_error), ''), (SELECT parse_error FROM clip_metadata AS donor WHERE donor.clip_id = ?2)),
+                updated_at = MAX(updated_at, COALESCE(
+                    (SELECT updated_at FROM clip_metadata AS donor WHERE donor.clip_id = ?2),
+                    updated_at
+                ))
+            WHERE clip_id = ?1
+              AND EXISTS (SELECT 1 FROM clip_metadata AS donor WHERE donor.clip_id = ?2)
+            ",
+            params![keeper_id, duplicate_id],
+        )
+        .map_err(|error| readable_error("merging v16 clip metadata", error))?;
+    Ok(())
+}
+
+fn merge_clip_timeline_v16(
+    connection: &Connection,
+    keeper_id: i64,
+    duplicate_id: i64,
+) -> DbResult<()> {
+    connection
+        .execute(
+            "
+            INSERT OR IGNORE INTO clip_segments (
+                clip_id, segment_key, round_id, start_ms, duration_ms, game_start_ms, game_end_ms
+            )
+            SELECT ?1, segment_key, round_id, start_ms, duration_ms, game_start_ms, game_end_ms
+            FROM clip_segments
+            WHERE clip_id = ?2
+            ",
+            params![keeper_id, duplicate_id],
+        )
+        .map_err(|error| readable_error("merging v16 clip segments", error))?;
+
+    connection
+        .execute(
+            "
+            UPDATE clip_events
+            SET killer_is_me = CASE
+                    WHEN killer_is_me != 0 OR COALESCE((
+                        SELECT donor.killer_is_me
+                        FROM clip_events AS donor
+                        WHERE donor.clip_id = ?2 AND donor.event_key = clip_events.event_key
+                    ), 0) != 0 THEN 1 ELSE 0
+                END,
+                killed_is_me = CASE
+                    WHEN killed_is_me != 0 OR COALESCE((
+                        SELECT donor.killed_is_me
+                        FROM clip_events AS donor
+                        WHERE donor.clip_id = ?2 AND donor.event_key = clip_events.event_key
+                    ), 0) != 0 THEN 1 ELSE 0
+                END
+            WHERE clip_id = ?1
+              AND EXISTS (
+                  SELECT 1 FROM clip_events AS donor
+                  WHERE donor.clip_id = ?2 AND donor.event_key = clip_events.event_key
+              )
+            ",
+            params![keeper_id, duplicate_id],
+        )
+        .map_err(|error| readable_error("merging v16 clip event flags", error))?;
+
+    connection
+        .execute(
+            "
+            INSERT OR IGNORE INTO clip_events (
+                clip_id, segment_id, event_key, event_type, video_time_ms, event_time, round_id,
+                player_name, agent_name, weapon_name, killer_name, killed_name, killer_is_me,
+                killed_is_me, raw_json, created_at
+            )
+            SELECT
+                ?1,
+                (
+                    SELECT target_segment.id
+                    FROM clip_segments AS donor_segment
+                    JOIN clip_segments AS target_segment
+                      ON target_segment.clip_id = ?1
+                     AND target_segment.segment_key = donor_segment.segment_key
+                    WHERE donor_segment.id = donor_event.segment_id
+                ),
+                donor_event.event_key,
+                donor_event.event_type,
+                donor_event.video_time_ms,
+                donor_event.event_time,
+                donor_event.round_id,
+                donor_event.player_name,
+                donor_event.agent_name,
+                donor_event.weapon_name,
+                donor_event.killer_name,
+                donor_event.killed_name,
+                donor_event.killer_is_me,
+                donor_event.killed_is_me,
+                donor_event.raw_json,
+                donor_event.created_at
+            FROM clip_events AS donor_event
+            WHERE donor_event.clip_id = ?2
+            ",
+            params![keeper_id, duplicate_id],
+        )
+        .map_err(|error| readable_error("merging v16 clip events", error))?;
+    Ok(())
+}
+
+fn merge_clip_thumbnail_v16(
+    connection: &Connection,
+    keeper_id: i64,
+    duplicate_id: i64,
+) -> DbResult<()> {
+    let thumbnail = |clip_id| -> DbResult<Option<(String, String)>> {
+        connection
+            .query_row(
+                "SELECT status, updated_at FROM clip_thumbnails WHERE clip_id = ?1",
+                params![clip_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| readable_error("reading v16 clip thumbnail", error))
+    };
+    let keeper_thumbnail = thumbnail(keeper_id)?;
+    let duplicate_thumbnail = thumbnail(duplicate_id)?;
+    let duplicate_is_better = match (&keeper_thumbnail, &duplicate_thumbnail) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(keeper), Some(duplicate)) => {
+            thumbnail_sort_key_v16(duplicate) > thumbnail_sort_key_v16(keeper)
+        }
+    };
+    if duplicate_is_better {
+        connection
+            .execute(
+                "DELETE FROM clip_thumbnails WHERE clip_id = ?1",
+                params![keeper_id],
+            )
+            .map_err(|error| readable_error("replacing v16 clip thumbnail", error))?;
+        connection
+            .execute(
+                "UPDATE clip_thumbnails SET clip_id = ?1 WHERE clip_id = ?2",
+                params![keeper_id, duplicate_id],
+            )
+            .map_err(|error| readable_error("moving v16 clip thumbnail", error))?;
+    }
+    Ok(())
+}
+
+fn thumbnail_sort_key_v16(thumbnail: &(String, String)) -> (u8, &str) {
+    let rank = match thumbnail.0.as_str() {
+        "ready" => 6,
+        "pending" => 5,
+        "running" => 4,
+        "suppressed" => 3,
+        "evicted" => 2,
+        "failed" => 1,
+        _ => 0,
+    };
+    (rank, thumbnail.1.as_str())
+}
+
+fn normalize_remaining_verbatim_clip_paths_v16(connection: &Connection) -> DbResult<()> {
+    let paths = {
+        let mut statement = connection
+            .prepare("SELECT id, file_path, cover_path FROM clips ORDER BY id")
+            .map_err(|error| readable_error("preparing v16 remaining path normalization", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(|error| readable_error("querying v16 remaining path normalization", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| readable_error("reading v16 remaining path normalization", error))?;
+        rows
+    };
+
+    let mut skipped_conflicts = 0usize;
+    for (clip_id, file_path, cover_path) in paths {
+        let stable_file_path = super::stable_path_for_storage(&file_path);
+        let normalized_path = super::normalize_path(&stable_file_path);
+        if stable_file_path != file_path {
+            let conflicts = connection
+                .query_row(
+                    "
+                    SELECT COUNT(*)
+                    FROM clips
+                    WHERE id != ?1
+                      AND (normalized_path = ?2 OR file_path = ?3)
+                    ",
+                    params![clip_id, normalized_path, stable_file_path],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| readable_error("checking v16 path conflicts", error))?;
+            if conflicts == 0 {
+                connection
+                    .execute(
+                        "UPDATE clips SET file_path = ?2, normalized_path = ?3 WHERE id = ?1",
+                        params![clip_id, stable_file_path, normalized_path],
+                    )
+                    .map_err(|error| readable_error("normalizing v16 clip path", error))?;
+            } else {
+                skipped_conflicts = skipped_conflicts.saturating_add(1);
+            }
+        }
+        if let Some(cover_path) = cover_path {
+            let stable_cover_path = super::stable_path_for_storage(&cover_path);
+            if stable_cover_path != cover_path {
+                connection
+                    .execute(
+                        "UPDATE clips SET cover_path = ?2 WHERE id = ?1",
+                        params![clip_id, stable_cover_path],
+                    )
+                    .map_err(|error| readable_error("normalizing v16 clip cover path", error))?;
+            }
+        }
+    }
+    if skipped_conflicts > 0 {
+        eprintln!(
+            "schema v16 left {skipped_conflicts} verbatim clip paths unchanged because a database path conflict remains"
+        );
+    }
+    Ok(())
+}
+
+fn historical_killed_is_me(event: &Value) -> Option<bool> {
+    let event = event.as_object()?;
+    let top_level = historical_present_field(event, &["KilledIsMe", "killedIsMe", "killed_is_me"]);
+    let extended = historical_present_field(event, &["event_ext", "eventExt"])
+        .and_then(Value::as_object)
+        .and_then(|event_ext| {
+            historical_present_field(event_ext, &["KilledIsMe", "killedIsMe", "killed_is_me"])
+        });
+
+    // An explicitly present extension value is authoritative even when malformed. Falling back
+    // to the top-level value in that case would convert an uncertain historical event into a
+    // false certainty.
+    match extended {
+        Some(value) => historical_strict_bool(value),
+        None => top_level.and_then(historical_strict_bool),
+    }
+}
+
+fn historical_event_start_ms(event: &Value) -> Option<i64> {
+    let event = event.as_object()?;
+    historical_present_field(
+        event,
+        &[
+            "event_sTime",
+            "eventStart",
+            "event_start_ms",
+            "eventStartMs",
+        ],
+    )
+    .and_then(historical_json_i64)
+}
+
+fn historical_present_field<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Option<&'a Value> {
+    keys.iter().find_map(|key| object.get(*key))
+}
+
+fn historical_strict_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        Value::Number(value) => match historical_json_number_i64(value) {
+            Some(0) => Some(false),
+            Some(1) => Some(true),
+            _ => None,
+        },
+        Value::String(value) => match value.trim() {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        },
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn historical_json_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(value) => historical_json_number_i64(value),
+        Value::String(value) => historical_integral_i64(value),
+        Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn historical_json_number_i64(value: &serde_json::Number) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_f64().and_then(historical_integral_f64_i64))
+}
+
+fn historical_integral_i64(value: &str) -> Option<i64> {
+    value.trim().parse().ok().or_else(|| {
+        value
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .and_then(historical_integral_f64_i64)
+    })
+}
+
+fn historical_integral_f64_i64(value: f64) -> Option<i64> {
+    (value.is_finite()
+        && value.fract() == 0.0
+        && value >= i64::MIN as f64
+        // i64::MAX rounds up to 2^63 as f64. A strict upper bound avoids accepting an
+        // unrepresentable historical value and silently saturating it during the cast.
+        && value < i64::MAX as f64)
+        .then_some(value as i64)
+}
+
+fn create_clip_identity_validation_triggers(connection: &Connection) -> DbResult<()> {
+    // SQLite cannot add a table-level CHECK with ALTER TABLE. Fresh v15 databases have the CHECK
+    // in CREATE TABLE; these equivalent triggers enforce all-null/all-set for upgraded databases.
+    connection
+        .execute_batch(
+            "
+            CREATE TRIGGER IF NOT EXISTS validate_clip_file_identity_on_insert
+            BEFORE INSERT ON clips
+            WHEN NOT (
+                (NEW.file_volume_serial IS NULL
+                    AND NEW.file_index_high IS NULL
+                    AND NEW.file_index_low IS NULL)
+                OR
+                (NEW.file_volume_serial IS NOT NULL
+                    AND NEW.file_index_high IS NOT NULL
+                    AND NEW.file_index_low IS NOT NULL)
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'clip file identity must be entirely null or entirely set');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS validate_clip_file_identity_on_update
+            BEFORE UPDATE OF file_volume_serial, file_index_high, file_index_low ON clips
+            WHEN NOT (
+                (NEW.file_volume_serial IS NULL
+                    AND NEW.file_index_high IS NULL
+                    AND NEW.file_index_low IS NULL)
+                OR
+                (NEW.file_volume_serial IS NOT NULL
+                    AND NEW.file_index_high IS NOT NULL
+                    AND NEW.file_index_low IS NOT NULL)
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'clip file identity must be entirely null or entirely set');
+            END;
+            ",
+        )
+        .map_err(|error| readable_error("creating clip identity validation triggers", error))
+}
+
 fn create_schema_indexes(connection: &Connection) -> DbResult<()> {
     connection
         .execute_batch(
@@ -718,6 +1809,24 @@ fn create_schema_indexes(connection: &Connection) -> DbResult<()> {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_runs_job_id
                 ON scan_runs(job_id)
                 WHERE job_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_source_dirs_sync_profile
+                ON source_dirs(enabled, scan_mode, scan_root_path);
+            CREATE INDEX IF NOT EXISTS idx_clips_source_relative_dir
+                ON clips(source_dir_id, source_relative_dir);
+            CREATE INDEX IF NOT EXISTS idx_clips_source_file_identity
+                ON clips(source_dir_id, file_volume_serial, file_index_high, file_index_low)
+                WHERE file_volume_serial IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_clips_source_legacy_fingerprint
+                ON clips(source_dir_id, file_name COLLATE NOCASE, size_bytes, modified_at);
+            CREATE INDEX IF NOT EXISTS idx_clips_review_queue
+                ON clips(
+                    review_decision,
+                    file_status,
+                    source_dir_id,
+                    recorded_at DESC,
+                    modified_at DESC,
+                    id DESC
+                );
             ",
         )
         .map_err(|error| readable_error("creating schema indexes", error))

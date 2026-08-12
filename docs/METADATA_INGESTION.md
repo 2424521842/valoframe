@@ -10,7 +10,7 @@
 - 对局 ID / battle ID
 - 英雄、地图、模式
 - KDA、比分、胜负、战斗分
-- 录制时间、对局时间、击杀事件时间
+- 录制时间、对局时间、本人击杀与本人死亡事件时间
 - 英雄头像 URL 等可展示资源
 
 ## 2. 数据源
@@ -55,8 +55,8 @@ flowchart LR
 
 | 模块 | 职责 |
 | --- | --- |
-| `wonderful_db.rs` | 读取数字账号文件，在内存中完成 AES-256-CBC/PKCS#7 解密并容错归一化官方 match/video/segment/event 记录。 |
-| `wonderful_ingest.rs` | 以官方路径或账号 + match + video 文件名匹配 clip，写入官方分类及 clip 自有时间线。 |
+| `wonderful_db.rs` | 读取数字账号文件，在内存中完成 AES-256-CBC/PKCS#7 解密，解析 `KillerIsMe`/`KilledIsMe` 并容错归一化官方 match/video/segment/event 记录。 |
+| `wonderful_ingest.rs` | 以官方路径或账号 + match + video 文件名匹配 clip，按普通高光相对时间/集锦绝对时间规则写入官方分类及 clip 自有时间线，并拒绝越界事件。 |
 | `leveldb_reader.rs` | 只读读取 Chromium Local Storage LevelDB，提取 `acloshighlight_battle_list_*`。 |
 | `highlight_log_parser.rs` | 解析 `highlight.log` 的明文记录，并对 `event: "H4sI..."` 做 Base64 + gzip 解码。 |
 | `metadata_ingest.rs` | 合并 LevelDB 与日志，生成统一对局元数据，并按字段补齐导出 JSON 留空项或纠正 inferred/fallback 值。 |
@@ -91,7 +91,7 @@ WonderfulDb 事件中的最新有效 `PlayerName` 是账号展示名称的最高
 
 | 字段 | 优先来源 |
 | --- | --- |
-| 官方 video ID、标题、分类、分段、视频内击杀事件 | WonderfulDb clip record |
+| 官方 video ID、标题、分类、分段、视频内本人击杀/本人死亡事件 | WonderfulDb clip record |
 | `game_id`、`battle_id`、KDA、对局日期、英雄头像 | WonderfulDb/导出 JSON 未提供时优先使用有效完整日志，缺失项再由 LevelDB 补齐 |
 | 玩家名 | WonderfulDb 最新有效 `PlayerName`，其次导出 JSON、`highlight.log`、LevelDB 和账号 ID |
 | 地图 ID、模式、战斗分、对局级回退事件 | `highlight.log`，不覆盖 WonderfulDb 的 clip 时间线 |
@@ -101,7 +101,7 @@ WonderfulDb 事件中的最新有效 `PlayerName` 是账号展示名称的最高
 
 ## 5. 当前数据库表
 
-schema v13 使用 `source_dirs`、`clip_groups`、`clips`、`clip_metadata`、`clip_tags`、独立的 `clip_thumbnails`、回收身份快照 `clip_trash_snapshots` 和永久删除 outbox `clip_delete_intents` 等当前命名，不再使用早期文档里的 `assets` 命名。v10 将旧自动分类标签迁移为 `clip_metadata` 视频类型；v11 增加字段级 `round_score_source`，区分 WonderfulDb 原值与官方日志精确恢复值；v12 增加崩溃可恢复的永久删除意图；v13 把永久删除授权绑定到素材进入回收站时的不可变 Windows 文件身份，不改变元数据摄取优先级。
+schema v16 使用 `source_dirs`、`clip_groups`、`clips`、`clip_metadata`、`clip_tags`、独立的 `clip_thumbnails`、回收身份快照 `clip_trash_snapshots` 和永久删除 outbox `clip_delete_intents` 等当前命名，不再使用早期文档里的 `assets` 命名。v10 将旧自动分类标签迁移为 `clip_metadata` 视频类型；v11 增加字段级 `round_score_source`；v12 增加崩溃可恢复的永久删除意图；v13 把永久删除授权绑定到素材进入回收站时的不可变 Windows 文件身份；v14 增加来源类型、扫描模式/根、来源相对目录和卡片审核状态；v15 为 `clip_events` 增加 `killed_is_me` 并修复可确定的集锦时间语义；v16 统一 Windows 普通/verbatim 路径键。M2 的非 ACLOS 递归导入只写文件系统摘要，结构化元数据保持为空。
 
 `matches`：
 
@@ -167,10 +167,10 @@ WonderfulDb 视频时间线使用：
 - `clips` 保存本地文件与官方 video 身份对应关系。
 - `clip_metadata` 保存官方标题、分类、`kill_count` 与来源标记。
 - `clip_segments` 保存该视频内的剪辑/组装区间。
-- `clip_events` 保存相对该视频的事件时间与 `killer_is_me`。
+- `clip_events` 保存归一化后的视频绝对毫秒、`killer_is_me` 与 `killed_is_me`。普通三杀/四杀/五杀/六杀等高光使用 `segmentStart + eventStart`；击杀/死亡集锦（`highlightType = 2/3` 或等价名称/类型）中的 `eventStart` 已是视频绝对时间，不再重复叠加 segment 起点。
 - `match_events` 只保存整场对局级回退事件；它不能用来计算某个 clip 的官方击杀数。
 
-`clip_metadata.kill_count` 必须只统计当前 `clip_id` 的 `clip_events` 中 `event_type = 'kill' AND killer_is_me = 1` 的事件。禁止把同一 match 的 `match_events` 或其他视频事件累加到当前 clip；这正是避免六杀视频被误计为整场 26 杀的边界。
+`clip_metadata.kill_count` 必须只统计当前 `clip_id` 的 `clip_events` 中 `event_type = 'kill' AND killer_is_me = 1` 的事件。死亡集锦预览只接受 `event_type = 'death' AND killed_is_me = 1`。助攻、市场、空类型和其他事件不生成时间轴标记。禁止把同一 match 的 `match_events` 或其他视频事件累加到当前 clip；这正是避免六杀视频被误计为整场 26 杀的边界。任何归一化后超出 `[0, duration]` 的事件不裁剪、不展示，并记录有界元数据 warning。
 
 扩展使用现有表：
 
@@ -181,14 +181,14 @@ WonderfulDb 视频时间线使用：
 
 ## 6. 采集流程
 
-应用启动只负责单实例交接、数据库迁移、索引加载，以及异常中断扫描/永久删除意图的恢复，不会隐式触发新的素材扫描。用户启动默认、自定义或多根扫描后，后端统一进入以下流程：
+应用启动先完成单实例交接、数据库迁移、索引加载，以及异常中断扫描/永久删除意图的恢复。主窗口可用后，对所有启用来源异步触发一次非阻塞增量同步；用户也可同步单一来源或全部启用来源。后端按扫描模式进入以下流程：
 
-1. `scan_roots` 规范化并去重全部来源，创建一个扫描 job 和一个 scan run；共享元数据只采集一次。
-2. 扫描 `wonderfulVideos*` 或自定义根目录，写入 `source_dirs`、`clip_groups`、`clips`；对每个 clip 解析命中的 `videoExportTmp/config-*.json` 并 upsert `clip_metadata`。
+1. 来源调度器按规范化扫描根去重，创建一个扫描 job 和一个 scan run；ACLOS 批次的共享元数据只采集一次。
+2. `aclos-structured` 扫描 `wonderfulVideos*`，写入 `source_dirs`、`clip_groups`、`clips`；对每个 clip 解析命中的 `videoExportTmp/config-*.json` 并 upsert `clip_metadata`。`recursive-mp4` 则流式递归用户授权根，只索引稳定、未越界的普通 MP4 并跳过后续结构化元数据步骤。
 3. 解析 `highlight.log`（包括可解码的 gzip payload）和 LevelDB，按 `match_id/battle_id`、账号 ID、时间范围合并对局记录。
 4. upsert `matches`、`match_stats`、`match_events`，并只补齐导出 JSON 留空的 clip 字段；没有导出/Wonderful 来源的 inferred/fallback 字段可被纠正。
 5. 枚举 WonderfulDb 数字账号文件；每个文件独立读取、内存解密和解析。
-6. 用官方路径优先、账号 + match + video 文件名兜底的方式匹配本地 clip，权威写入 `clip_metadata`，再替换 `clip_segments` 和 `clip_events`。
+6. 用官方路径优先、账号 + match + video 文件名兜底的方式匹配本地 clip，权威写入 `clip_metadata`，再按高光类型归一化事件时间、解析本人击杀/死亡标记并替换 `clip_segments` 和 `clip_events`。
 7. 持续发布进度，检查取消信号，依次提交各阶段写入并返回统一统计、终态和非致命 warning。
 
 整个扫描不是单个数据库事务。普通文件/对局写入按现有语句执行；每个 WonderfulDb clip 的官方元数据在一个短事务中提交，时间线替换随后在独立事务中提交。视频类型完全来自元数据，不创建、删除或重命名用户标签。因此进程若恰好在两次提交之间中断，可能短暂出现元数据与时间线版本不一致；下一次重扫会按相同权威来源覆盖并修复。
@@ -201,7 +201,9 @@ WonderfulDb 视频时间线使用：
 - 单条 LevelDB 记录 JSON 损坏时，只丢弃该条或保留可读字段，不中断扫描。
 - `highlight.log` 单行 JSON 损坏时跳过该行。
 - `event: "H4sI..."` 会尝试 Base64 + gzip 解码并解析结构化事件；解码或 JSON 失败计入坏行/警告并继续。它只作为对局级回退，不能替代 WonderfulDb 的 clip-scoped 时间线。
+- WonderfulDb 的事件单位、类型或 duration 无法验证时不猜测。越界事件形成有界 warning 并使本次扫描保持 partial，因此不会把含已知时间线问题的任务伪装为完整成功或刷新来源新鲜度。
 - 任意元数据源失败都不能阻断 mp4 入库、收藏、标签和备注展示。
+- NVIDIA、Tracker 和 generic 来源不读取第三方数据库、令牌或私有接口；来源路径、相对目录、文件大小、mtime 与首次索引时间是其唯一自动整理依据。
 
 ## 8. 测试要求
 
@@ -209,7 +211,9 @@ WonderfulDb 视频时间线使用：
 - `highlight.log` fixture：覆盖 `first request data is [...]` 和 `template param == {...}`。
 - 合并测试：LevelDB 提供 KDA/日期，日志补玩家名/地图/英雄/击杀事件。
 - 扫描集成测试：`wonderfulVideos<account_id>/<match_id>/*.mp4` 能被精确关联到 match。
-- WonderfulDb 集成测试：验证账号文件隔离、官方路径优先、clip-scoped type 4/6/10 击杀数，以及六杀视频不会回归到 26。
+- WonderfulDb 集成测试：验证账号文件隔离、官方路径优先、clip-scoped type 4/6/10 击杀数、`KilledIsMe` 顶层/`event_ext` 形状，以及六杀视频不会回归到 26。
+- 时间语义 fixture：普通高光断言 `segmentStart + eventStart`，击杀/死亡集锦断言绝对 `eventStart`；同时验证本人击杀/本人死亡筛选、红色 Crosshair、紫色 Skull、tooltip/无障碍名称、跳转秒数和越界事件不渲染。
+- v14→v15 迁移 fixture：只从可确定的 `raw_json` 回填 `killed_is_me`/集锦时间；无法确定的旧值置空并等待下次 ACLOS 重扫，不制造猜测数据。
 - 手动真实库回归只接收 workspace 中的生产索引副本；测试再复制为 working DB，绝不把 `VHM_REAL_SCAN_DB` 指向 live SQLite。
 - 容错测试：LevelDB 缺失、日志坏行、导出 JSON 损坏都不影响 mp4 扫描。
 

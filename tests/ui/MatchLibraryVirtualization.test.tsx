@@ -161,6 +161,7 @@ function propsFor(matchGroups: ClipMatchGroup[], overrides: Partial<Props> = {})
     onCopyPath: vi.fn(),
     onOpenOriginal: vi.fn(),
     isTrashMode: false,
+    removableFromIndexIds: new Set(),
     onSelectionGesture: vi.fn(),
     onRequestTrash: vi.fn(),
     onRequestPermanentDelete: vi.fn(),

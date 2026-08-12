@@ -4,6 +4,7 @@ import test from "node:test";
 
 const css = readFileSync(new URL("../src/cinematic.css", import.meta.url), "utf8");
 const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+const balancedFilterRules = extractBlocks(css, "@media (max-width: 1120px)");
 const mediumRules = extractBlocks(css, "@media (max-width: 1190px)");
 const compactRules = extractBlocks(css, "@media (max-width: 919px)");
 const smallestRules = extractBlocks(css, "@media (max-width: 680px)");
@@ -17,7 +18,7 @@ test("wide shell uses the production sidebar and one content column", () => {
   assert.match(app, /className=\{`app-root app-root--\$\{activeScreen\}`\}/);
   assert.match(
     css,
-    /\.app-shell,\s*\.app-shell--library,\s*\.app-shell--scan,\s*\.app-shell--tags\s*\{[^}]*grid-template-columns:\s*214px\s+minmax\(0,\s*1fr\);/s,
+    /\.app-shell,\s*\.app-shell--library,\s*\.app-shell--scan,\s*\.app-shell--tags,\s*\.app-shell--review,\s*\.app-shell--settings\s*\{[^}]*grid-template-columns:\s*214px\s+minmax\(0,\s*1fr\);/s,
   );
   assert.match(
     css,
@@ -50,7 +51,7 @@ test("wide shell uses the production sidebar and one content column", () => {
 test("medium shell narrows the production sidebar without adding a detail column", () => {
   assert.match(
     mediumRules,
-    /\.app-shell,\s*\.app-shell--library,\s*\.app-shell--scan,\s*\.app-shell--tags\s*\{[^}]*grid-template-columns:\s*190px\s+minmax\(0,\s*1fr\);/s,
+    /\.app-shell,\s*\.app-shell--library,\s*\.app-shell--scan,\s*\.app-shell--tags,\s*\.app-shell--review,\s*\.app-shell--settings\s*\{[^}]*grid-template-columns:\s*190px\s+minmax\(0,\s*1fr\);/s,
   );
   assert.match(
     mediumRules,
@@ -95,13 +96,65 @@ test("smallest layout keeps current library controls and cards in one column", (
   );
   assert.match(
     smallestRules,
-    /\.library-search-row\s*\{[^}]*grid-template-columns:\s*1fr;/s,
+    /\.library-search-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/s,
   );
   assert.match(
     smallestRules,
     /\.match-board-clips\s*\{[^}]*grid-template-columns:\s*1fr;/s,
   );
   assert.match(smallestRules, /\.library-batch-toolbar\s*\{[^}]*left:\s*8px;/s);
+});
+
+test("library filters keep sort aligned across wide, medium, and narrow layouts", () => {
+  assert.match(
+    css,
+    /\.library-filter-row\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+108px;/s,
+  );
+  assert.match(
+    css,
+    /\.library-filter-controls\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*repeat\(8,\s*minmax\(0,\s*1fr\)\);/s,
+  );
+  assert.match(
+    css,
+    /\.library-filter-select\s*\{[^}]*min-width:\s*0;[^}]*width:\s*100%;/s,
+  );
+  assert.doesNotMatch(css, /\.library-filter-select\s*\{[^}]*flex:/s);
+  assert.match(
+    balancedFilterRules,
+    /\.library-filter-controls\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\);/s,
+  );
+  assert.match(
+    smallestRules,
+    /\.library-filter-row\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);/s,
+  );
+  assert.match(smallestRules, /\.library-filter-controls\s*\{[^}]*display:\s*contents;/s);
+  assert.match(
+    css,
+    /\.scan-directory-grid\s*\{[^}]*max-height:\s*185px;[^}]*overflow-x:\s*hidden;[^}]*overflow-y:\s*auto;/s,
+  );
+  assert.match(
+    css,
+    /\.scan-directory-row\s*\{[^}]*grid-template-columns:\s*32px\s+minmax\(0,\s*1fr\)\s+max-content\s+max-content;/s,
+  );
+});
+
+test("source relocation preview remains usable on narrow screens", () => {
+  assert.match(
+    css,
+    /\.source-relocation-dialog\s*\{[^}]*width:\s*min\(760px,\s*calc\(100vw\s*-\s*32px\)\);/s,
+  );
+  assert.match(
+    smallestRules,
+    /\.source-relocation-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s,
+  );
+  assert.match(
+    smallestRules,
+    /\.source-relocation-footer\s*\{[^}]*flex-direction:\s*column;/s,
+  );
+  assert.match(
+    smallestRules,
+    /\.source-relocation-footer\s*>\s*div\s*\{[^}]*grid-template-columns:\s*1fr;/s,
+  );
 });
 
 test("thumbnail ratio and overlay stacking remain explicit", () => {

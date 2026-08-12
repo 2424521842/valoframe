@@ -9,7 +9,7 @@ use std::{
 use serde::Serialize;
 use tauri::State;
 
-use crate::{db, AppState};
+use crate::{critical_tasks::CriticalTaskKind, db, AppState};
 
 const MAX_COLLISION_SUFFIX: u32 = 100_000;
 
@@ -53,7 +53,12 @@ pub async fn export_clips(
     destination_dir: String,
 ) -> Result<ExportClipsResult, String> {
     let database_path = state.database_path.clone();
+    let export_lease = state
+        .critical_tasks
+        .enter(CriticalTaskKind::Export)
+        .map_err(str::to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _export_lease = export_lease;
         export_clips_for_database(database_path, &clip_ids, destination_dir)
     })
     .await

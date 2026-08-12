@@ -49,6 +49,24 @@ test("deriveActiveFilters omits defaults", () => {
   );
 });
 
+test("deriveActiveFilters does not mix a quick-pick session decision into library filters", () => {
+  const filters = deriveActiveFilters({
+    libraryMode: "all",
+    query: "",
+    accountId: "all",
+    accountLabel: "",
+    sourceDirId: "all",
+    sourceDirLabel: "",
+    agentName: "all",
+    mapName: "all",
+    gameMode: "all",
+    tagId: "all",
+    tagLabel: "",
+    fileStatus: "all",
+  });
+  assert.deepEqual(filters, []);
+});
+
 test("recycle bin is a distinct library mode instead of the missing-file filter", () => {
   assert.deepEqual(
     deriveActiveFilters({

@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   addTagToClip,
   addTagToClips,
   commandErrorMessage,
   deleteClipsPermanently,
   mergeClipsWithSources,
-  removeClipFromIndex,
+  removeClipsFromIndex as removeClipsFromIndexCommand,
   removeTagFromClip,
   removeTagFromClips,
   setClipFavorite,
@@ -20,6 +20,7 @@ import type {
   ClipDetail,
   ClipListQuery,
   ClipSummary,
+  RemoveClipsFromIndexResult,
   SourceDir,
   Tag,
 } from "../types";
@@ -47,6 +48,7 @@ export type UseClipMutationControllerOptions = {
 };
 
 export type ClipMutationController = {
+  isPermanentDeleteActive: boolean;
   toggleFavorite: (clipId: string) => Promise<void>;
   setFavoriteForClips: (clipIds: string[], isFavorite: boolean) => Promise<boolean>;
   setTagForClips: (
@@ -56,7 +58,7 @@ export type ClipMutationController = {
   ) => Promise<boolean>;
   setTrashedForClips: (clipIds: string[], isTrashed: boolean) => Promise<boolean>;
   deleteClipsPermanently: (clipIds: string[]) => Promise<boolean>;
-  removeClipsFromIndex: (clipIds: string[]) => Promise<boolean>;
+  removeClipsFromIndex: (clipIds: string[]) => Promise<RemoveClipsFromIndexResult | null>;
   updateNote: (clipId: string, note: string) => Promise<void>;
   toggleTag: (
     clipId: string,
@@ -69,6 +71,7 @@ export function useClipMutationController(
   options: UseClipMutationControllerOptions,
 ): ClipMutationController {
   const mountedRef = useRef(false);
+  const [permanentDeleteCount, setPermanentDeleteCount] = useState(0);
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
@@ -225,38 +228,47 @@ export function useClipMutationController(
 
   const removeClipsFromIndex = useCallback(async (
     clipIds: string[],
-  ): Promise<boolean> => {
-    const removedIds: string[] = [];
-    const errors: string[] = [];
-    for (const clipId of clipIds) {
-      try {
-        await removeClipFromIndex(clipId);
-        removedIds.push(clipId);
-      } catch (requestError) {
-        errors.push(commandErrorMessage(requestError));
+  ): Promise<RemoveClipsFromIndexResult | null> => {
+    try {
+      const result = await removeClipsFromIndexCommand(clipIds);
+      if (!mountedRef.current) return null;
+      const current = optionsRef.current;
+      const removed = new Set(result.removedIds);
+      current.removeSummaries(removed);
+      for (const clipId of removed) current.removeDetail(clipId);
+      current.clearSelectedClip(removed);
+      if (result.missingIds.length > 0) {
+        await Promise.all([current.refreshClips(), current.refreshFacets()]);
+      } else if (removed.size > 0) {
+        await current.refreshFacets();
       }
+      if (!mountedRef.current) return null;
+
+      const problemCount = result.blocked.length + result.failures.length;
+      const missingNote = result.missingIds.length > 0
+        ? `，另有 ${result.missingIds.length} 条索引记录已不存在`
+        : "";
+      const firstProblem = result.blocked[0] ?? result.failures[0];
+      current.onActivityMessage(
+        problemCount === 0
+          ? `已从索引移除 ${result.removedIds.length} 条素材${missingNote}；磁盘视频未删除、移动或修改`
+          : `仅移除索引部分完成：成功 ${result.removedIds.length} 条，失败 ${problemCount} 条${missingNote}：${firstProblem.message}`,
+      );
+      return result;
+    } catch (requestError) {
+      if (mountedRef.current) {
+        optionsRef.current.onActivityMessage(
+          `仅移除索引失败，当前批次未更新：${commandErrorMessage(requestError)}`,
+        );
+      }
+      return null;
     }
-    if (!mountedRef.current) return false;
-    const current = optionsRef.current;
-    const removed = new Set(removedIds);
-    current.removeSummaries(removed);
-    for (const clipId of removed) current.removeDetail(clipId);
-    current.clearSelectedClip(removed);
-    if (removed.size > 0) {
-      await Promise.all([current.refreshClips(), current.refreshFacets()]);
-    }
-    if (!mountedRef.current) return false;
-    current.onActivityMessage(
-      errors.length === 0
-        ? `已从索引移除 ${removedIds.length} 条素材，原视频文件未删除`
-        : `已移除 ${removedIds.length} 条，失败 ${errors.length} 条：${errors[0]}`,
-    );
-    return errors.length === 0;
   }, []);
 
   const permanentlyDeleteClips = useCallback(async (
     clipIds: string[],
   ): Promise<boolean> => {
+    setPermanentDeleteCount((count) => count + 1);
     try {
       const result = await deleteClipsPermanently(clipIds);
       if (!mountedRef.current) return false;
@@ -304,6 +316,10 @@ export function useClipMutationController(
         );
       }
       return false;
+    } finally {
+      if (mountedRef.current) {
+        setPermanentDeleteCount((count) => Math.max(0, count - 1));
+      }
     }
   }, []);
 
@@ -360,6 +376,7 @@ export function useClipMutationController(
   }, [applyUpdatedClips]);
 
   return {
+    isPermanentDeleteActive: permanentDeleteCount > 0,
     toggleFavorite,
     setFavoriteForClips,
     setTagForClips,

@@ -70,11 +70,11 @@ test("App owns only the compact navigation drawer", () => {
   assert.match(app, /const hasSidebarOverlay = isSidebarOverlay && isSidebarOpen/);
 });
 
-test("scan page owns a staged directory queue and visible failure state", () => {
-  assert.match(app, /scanTargetFromPath\(path\)/);
-  assert.match(app, /setManualScanTargets/);
-  assert.match(scanWorkspaceSource, /待扫描目录/);
-  assert.match(scanWorkspaceSource, /从扫描队列移除/);
+test("scan page owns persistent source registration and visible failure state", () => {
+  assert.match(app, /registerScanSource\(input\)/);
+  assert.match(app, /setScanSourceEnabled/);
+  assert.match(scanWorkspaceSource, /SourceWizardDialog/);
+  assert.match(scanWorkspaceSource, /立即同步/);
   assert.match(scanWorkspaceSource, /role="alert"/);
 });
 

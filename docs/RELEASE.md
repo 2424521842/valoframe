@@ -2,6 +2,8 @@
 
 本文定义 Windows 安装包的发布边界和可复现流程。当前默认产物是 NSIS 安装器；MSI 尚未作为受支持渠道配置或验证。
 
+当前发布路线为：用户手动安装 `v0.2.1`，再用 `v0.2.2` 完成第一次应用内更新。v0.2.0/v0.2.1 的旧版本计划保留为历史工程资料，不再作为个人开发者稳定发布的严格审批门禁。
+
 ## 发布渠道
 
 ### 内部未签名 RC
@@ -16,14 +18,16 @@
 
 ### 公开发布
 
-当前仓库不能据此文档直接宣称“严格正式公开发布”。在 `WINDOWS_RELEASE_CHECKLIST.md` 的公开发布阻断项全部关闭前，不得把 Community Beta 描述为已签名正式版。
+个人开发者稳定发布由规范的 `vMAJOR.MINOR.PATCH` tag 触发。Tauri updater 签名、版本单调递增、下载地址/安装器版本绑定、512 MiB 上限和 draft 远端复核是强制门禁。旧的品牌、法律审批、完整 VM 矩阵和 Authenticode policy 继续作为未来增强检查，但不阻止个人 updater 发布。
+
+没有 Authenticode 的安装器可能显示“未知发布者”或 SmartScreen 提示；发布说明和下载页面必须明确披露。Community Beta 仍不得冒充稳定更新版本。
 
 ### 未签名 Community Beta
 
 `Unsigned community beta` workflow 是给免费社区工具准备的独立 GitHub Prerelease 通道。它必须从默认分支手动触发，绑定完整 40 位源码 SHA，并输入 `UNSIGNED-COMMUNITY-BETA <tag> <SHA>`，只接受 `v<version>-beta.<序号>` 标签。该通道：
 
 - 保留当前清单中的游戏图片和项目图标，并绑定发布负责人的 beta 渠道决定；
-- 不启用 updater，不生成 `latest.json` 或更新签名；
+- Rust 中保留同源 updater 运行时，但不嵌入公钥、不启用检查，也不生成 `latest.json` 或更新签名；
 - 明确公开安装器、内嵌主程序均为 `NotSigned`，并在发布说明中提示 Unknown Publisher/SmartScreen；
 - 从固定 FFmpeg commit 构建零外部库的最小 LGPL 版本，在 Windows x64 复核后才进入安装包；
 - 将 FFmpeg 二进制/构建证据、许可证和精确对应源码与安装器一起上传；
@@ -46,15 +50,17 @@
 
 目录级映射让受版本控制的许可证/来源元数据可以保证资源根存在，因此普通 `cargo check/test` 不要求先下载大体积 FFmpeg。发布构建仍必须由静态检查确认实际 `ffmpeg.exe` 已 staged 且与受审 manifest 一致；目录存在不等于发布资源齐备。
 
-配置没有填入尚未确定的 publisher、证书、第三方合规审批、更新端点或更新公钥。项目自有代码已选择 MIT；不得用占位值绕过其余公开发布阻断。
+稳定更新端点已经固定，正式公钥在构建时从仓库 Variable `VALOFRAME_UPDATER_PUBLIC_KEY` 注入；未注入公钥的开发构建保持 updater 未配置。仓库不写入真实私钥、公钥占位值或虚构审批信息。
 
 ## 版本和身份
 
 每次 RC 或公开发布前，确认以下版本完全一致：
 
-- `package.json` 的 `version`
-- `src-tauri/Cargo.toml` 的 `package.version`
+- `package.json` 与 `package-lock.json` 顶层/root package 的 `version`
+- `src-tauri/Cargo.toml` 的 `package.version` 与 `src-tauri/Cargo.lock` 中 `valorant-highlight-manager` package 的版本
 - `src-tauri/tauri.conf.json` 的 `version`
+
+稳定标签必须精确为 `vMAJOR.MINOR.PATCH`。`v0.2.1` 是手动安装起点，`v0.2.2` 是首次 OTA 验收版本。存在对应 `release/notes/vX.Y.Z.md` 时使用该说明，否则 workflow 生成默认说明；不得只修改某一个 manifest，也不得改写第三方依赖中碰巧相同的版本。
 
 公开首发前必须审核并冻结产品名称、合法 publisher 和应用 identifier。公开发布后更改 identifier、安装范围或安装器渠道，可能被 Windows 视为不同产品或破坏升级路径，必须通过干净虚拟机验证。
 
@@ -70,7 +76,7 @@
 
 不要仅凭“FFmpeg”名称推断许可证。许可证义务取决于实际构建及其启用组件；无法追溯的二进制不得进入公开安装包。
 
-当前固定的 BtbN `win64-lgpl` 二进制继续只用于内部 RC，不进入 Community Beta。它实际启用了大量本应用不需要的外部组件，因此仓库另设最小构建链：从固定 FFmpeg commit 交叉编译只保留 `file/mov/h264/scale/mjpeg/image2`，同时生成精确源码包、构建参数、工具链和 Windows 合成视频烟测证据。Windows 门禁会复核 `SHA256SUMS.txt`、`BUILD-METADATA.json`、12 位固定 commit 标识，并直接解析 PE import table；实际导入必须与交叉工具链 `objdump` 结果一致且仅命中固定的 Windows 系统 DLL allowlist。候选报告固定为 `passed-candidate-not-promoted` 且 `promotionAuthorized = false`；只有 Community Beta workflow 在发布负责人渠道决定、源码 sidecar 和 beta 专用门禁同时成立时才可把它用于未签名 Prerelease。Beta 证据会如实标记 MinGW/工具链运行时许可复核与目标市场编解码器专利复核尚未完成，不得写成已审批；严格正式发布仍保留真实素材回归、签名、VM 及完整审阅要求。
+当前固定的 BtbN `win64-lgpl` 二进制继续只用于内部 RC，不进入 Community Beta。它实际启用了大量本应用不需要的外部组件，因此仓库另设最小构建链：从固定 FFmpeg commit 交叉编译只保留 `file/mov`、H.264/HEVC/AV1 原生 parser+decoder、`scale/mjpeg/image2`，同时生成精确源码包、构建参数、工具链和三种无用户内容合成 MP4 的逐项缩略图烟测证据。Windows 门禁会复核 `SHA256SUMS.txt`、`BUILD-METADATA.json`、12 位固定 commit 标识，并直接解析 PE import table；实际导入必须与交叉工具链 `objdump` 结果一致且仅命中固定的 Windows 系统 DLL allowlist。候选报告固定为 `passed-candidate-not-promoted` 且 `promotionAuthorized = false`；只有 Community Beta workflow 在发布负责人渠道决定、源码 sidecar 和 beta 专用门禁同时成立时才可把它用于未签名 Prerelease。Beta 证据会如实标记 MinGW/工具链运行时许可复核与目标市场编解码器专利复核尚未完成，不得写成已审批；严格正式发布仍保留 NVIDIA/Tracker 真实 H.264、HEVC、AV1 素材回归、签名、VM 及完整审阅要求。
 
 `scripts/release/generate-compliance-evidence.mjs` 从 `package-lock.json`、Windows x64 Cargo 解析图和 FFmpeg manifest 生成两份 npm SPDX 2.3、Windows Cargo SPDX 2.3、FFmpeg 组件快照、第三方声明、去重后的许可证全文、索引、阻断摘要和逐文件 SHA-256 manifest。可在不存在输出目录时运行 `npm run release:compliance:generate`。发布归档漏带正文的精确依赖由 `third_party/licenses/license-text-overrides.json` 补充：manifest 固定版本、锁文件 checksum/integrity、上游提交、SPDX 正文覆盖、正文大小和 SHA-256，生成器只在包内正文确实为空时离线应用，并拒绝未使用、重复、越界、symlink/junction、未进入 Git index、版本/SPDX/VCS/哈希不一致的 override。`license-text-override-approvals.json` 使用绑定组件与正文哈希的独立结构化记录；没有匹配批准时仍输出稳定 pending blocker。bundle 门禁固定生成器、Windows target、全部锁文件、两份 override manifest 及每份正文的哈希；技术证据不能被自动写成“已批准”。
 
@@ -110,7 +116,19 @@ CI 将已通过检查的全部 NSIS 载荷保留到 `RUNNER_TEMP` 下的预先�
 
 该检查不会运行安装器，只证明最终压缩包中存在与本次输入一致的主程序、FFmpeg 和全部声明的合规文件；它不证明安装、升级、卸载、WebView2 引导或应用运行行为。下面的干净虚拟机矩阵仍是发布必需证据，不能由静态解包替代。
 
-`release/public-release-policy.json` 与 `scripts/release/public-release-preflight.ps1` 是整体公开发布预检。它覆盖项目许可/是否另设 EULA 的决定、第三方材料、品牌和图标分发范围、publisher/identifier、Riot/腾讯声明、FFmpeg、代码签名/时间戳、干净 VM、updater 决策和数据安全证据，并输出稳定 blocker code。审批字段必须是真正的 JSON Boolean。项目自有代码已选择 MIT，当前明确不另设重复 EULA；这不会放宽第三方或品牌门禁。干净 VM 与数据安全 evidence manifest 必须使用 schema v1、绑定本次 40 位 release commit、完整覆盖固定场景/检查集合，并让每项证据文件通过 SHA-256 复核。内部 workflow 要求该预检保持 `blocked`；bundle gate 通过本身永远不是整体公开发布批准。
+`release/public-release-policy.json` 与 `scripts/release/public-release-preflight.ps1` 保留为严格公开发行的未来加固检查。它们可以报告第三方材料、品牌、publisher、identifier、代码签名和 VM 等未完成项，但不再被个人开发者 `stable-release` workflow 当作 updater 发布阻断。Tauri updater 签名仍不可跳过。
+
+旧的干净 VM 与数据安全归档流程继续作为未来严格发行的可选证据机制。它要求归档在 checkout 外安全展开、manifest 绑定精确提交并逐项校验 SHA-256，但个人 updater 发布不再要求通过受保护 Environment 注入该归档。首次 OTA 的当前验收路线固定为 `v0.1.0-beta.1` 手动升级到 `v0.2.1`，再由 `v0.2.1` 签名升级到 `v0.2.2`。
+
+未来严格发行的机器可读 evidence allowlist 可继续使用以下历史记录；它们不属于当前个人 updater workflow 的阻断项：
+
+- `same-source-subdirectory-rename-auto-reconnect-user-state-preserved`：同一授权来源内子目录改名后自动重连，并保持 clip ID、收藏、标签、备注和评审状态。
+- `source-root-relocation-user-state-preserved`：用户预览并提交新根后恢复播放，保持全部索引状态，且完整同步成功前不伪造扫描新鲜度。
+- `kill-death-timeline-icons-tooltips-accessibility-and-seek`：本人击杀/本人死亡数量、红色准星/紫色骷髅、tooltip、无障碍名称和点击跳转秒数一致。
+- `signed-updater-v0.2.1-to-v0.2.2-schema-v16-user-state-preserved`：从手动安装的 v0.2.1 经签名 updater 升级，随后确认 schema v16 与用户状态完整。
+- `index-only-removal-source-media-sha256-unchanged`：单条和批量仅移除索引后复核原视频 SHA-256 不变，并记录部分失败；该项属于 data-safety manifest。
+
+历史材料可以继续保留，当前路线使用 `v0.1.0-beta.1-manual-upgrade-to-v0.2.1` 和通用 `signed-updater-upgrade-to-higher-patch` 场景。
 
 若既有代码尚未达到严格 Clippy 零告警，应记录实际告警并先修复，不能把跳过检查变成公开发布惯例。
 
@@ -121,14 +139,14 @@ CI 将已通过检查的全部 NSIS 载荷保留到 `RUNNER_TEMP` 下的预先�
 1. 记录文件名、大小和 SHA-256。
 2. 在从未安装过本应用的标准用户 Windows 虚拟机执行安装、首次启动、卸载。
 3. 分别覆盖已安装/未安装 WebView2，以及允许/禁止联网的场景。
-4. 从上一公开版本升级，确认数据库、来源配置、标签和用户素材引用保持正确，用户原始视频不被修改。
-   同时按 [数据库恢复指南](./DATABASE_RECOVERY.md) 演练迁移前在线备份、未来 schema 拒绝、损坏库拒绝和从最近备份恢复；恢复输入与结果须进入 RC 证据记录。
+4. 首次 OTA 单独验证手动安装 `v0.2.1` 后通过签名 updater 升级到 `v0.2.2`；升级后确认 schema v16、来源配置、clip ID、收藏、标签、备注、评审、回收/删除 intent 和用户素材引用保持正确，用户原始视频不被修改。
+   同时按 [数据库恢复指南](./DATABASE_RECOVERY.md) 演练 v13/v14/v15→v16 迁移前在线备份、未来 schema 拒绝、损坏库拒绝和从最近备份恢复；恢复输入与结果须进入 RC 证据记录。
 5. 验证降级被拒绝，并使用“更高补丁版本”演练回退方案。
 6. 检查安装目录实际存在 `bin/ffmpeg.exe`，缩略图生成走打包资源而非系统 `PATH`。
 7. 卸载后确认应用安装文件被移除，而用户数据库和素材的保留/删除行为符合已发布的数据策略。
 8. 留存测试矩阵、日志、安装器、校验和、SBOM、第三方声明、签名验证结果和发布说明。
 
-公开发布还必须在干净虚拟机上验证 Authenticode 签名和时间戳，且签名主体与已批准的 publisher 一致。
+若未来启用 Authenticode，应在干净虚拟机验证签名、时间戳和 publisher；当前个人发布允许没有 Authenticode，但必须验证并披露 Windows 的未知发布者提示。
 
 ### 安全烟测根目录
 
@@ -139,10 +157,10 @@ Windows 上 Tauri 通过 Known Folder API 解析应用数据目录；仅在子�
 - 根目录与真实应用 data/cache 目录互不等同、互不为父子目录；
 - 配置窗口使用 `create: false`，只有完成上述验证后才手动创建；烟测 WebView2 profile 明确写入 `<root>/webview2`；
 - 数据库写入 `<root>/data`，缩略图缓存写入 `<root>/cache/thumbnails`；`TEMP`/`TMP`、进程输出日志和禁止真实扫描的哨兵路径位于 root 外、由脚本 marker-gated 的 sibling；
-- 不覆盖 `APPDATA`、`LOCALAPPDATA`、`USERPROFILE`、`HOME`、`HOMEDRIVE` 或 `HOMEPATH`：这些值不是 Windows Known Folder 的可靠隔离边界，伪造后还可能令 `SHGetKnownFolderPath` 返回 `PATH_NOT_FOUND`；启动前拒绝继承非空的 `WEBVIEW2_USER_DATA_FOLDER`，避免它覆盖 Rust builder 的显式 `<root>/webview2`；
+- 不覆盖 `APPDATA`、`LOCALAPPDATA`、`USERPROFILE`、`HOME`、`HOMEDRIVE` 或 `HOMEPATH`：这些值不是 Windows Known Folder 的可靠隔离边界，伪造后还可能令 `SHGetKnownFolderPath` 返回 `PATH_NOT_FOUND`；启动脚本先拒绝继承外部提供的非空 `WEBVIEW2_USER_DATA_FOLDER`，再为首、次实例统一注入受控的 `<root>/webview2`。该环境变量在任何 Tauri setup 之前隔离 WebView2，Rust `WebviewWindowBuilder.data_directory(<root>/webview2)` 继续作为应用侧第二道约束；报告和 workflow 必须验证两者精确一致；
 - 主进程必须先以 suspended 状态创建、加入启用 `KILL_ON_JOB_CLOSE` 的 Windows Job，再恢复执行；只向子进程继承受限的 stdin/stdout/stderr 句柄，失败报告保留有界输出；
 - CI 启动烟测的可执行文件和资源必须来自 bundle gate 已验证并保留的 NSIS payload，不得回退到构建目录中的 UNK staging 主程序；
-- 新数据库必须是 schema v13、`requiredTableCount = 16`，包含空的 `clip_trash_snapshots` 回收身份目录和 `clip_delete_intents` 删除意图日志，并在 JSON 报告中记录 `database.trashSnapshotCount = 0` 与 `database.deleteIntentCount = 0`；
+- 新数据库必须是 schema v16、`requiredTableCount = 16`，包含来源类型/扫描模式/扫描根、卡片审核、clips 三段文件身份、`clip_events.killed_is_me` 和 `scan_runs.summary_available` 字段，以及空的 `clip_trash_snapshots` 回收身份目录和 `clip_delete_intents` 删除意图日志；JSON 报告记录 `database.trashSnapshotCount = 0` 与 `database.deleteIntentCount = 0`；
 - 同一 smoke root 再启动第二实例时，首窗口先进入最小化状态；`runtime.singleInstance.verified` 必须为 `true`、`secondInstanceExitCode` 和 `secondInstanceJobActiveProcessesAfterExit` 必须为 `0`、`onlyPrimaryNamedRootAfterHandoff`、`primaryWindowMinimizedBeforeHandoff`、`primaryWindowHandlePreserved`、`primaryWindowVisibleAfterHandoff` 必须为 `true`，且 `primaryWindowMinimizedAfterHandoff` 必须为 `false`；报告同时保留首/次 PID、进程/窗口清单及 `focusVerification`，但前台焦点切换只作为 best-effort 证据，不得把操作系统拒绝抢焦点误判为单实例失败；
 - 窗口门禁只接受主进程在隐藏前唯一可见、优先无 owner 且有标题的顶层窗口，并记录 HWND、PID、标题和 class；`WM_CLOSE` 后既要验证该 HWND 消失，也要验证主进程以 0 退出、Job 内 active process 为 0；
 - Python 只读检查器在 `PRAGMA quick_check` 前注册与 Rust `db.rs` 一致的 `VHM_CLIP_NAME` collation，否则带自然名称索引的健康数据库会被误判为不可检查。
@@ -151,24 +169,36 @@ Windows 上 Tauri 通过 Known Folder API 解析应用数据目录；仅在子�
 
 ## 自动更新
 
-自动更新当前不是发布契约的一部分。启用之前必须单独完成：
+现有应用内稳定更新工程保持不变，详细契约和密钥配置见[应用内更新](./APP_UPDATES.md)：
 
-- 引入并验证 Tauri updater 插件及最小权限；
-- 生成更新签名密钥对，离线备份私钥，把公钥写入配置；
-- 确定 HTTPS 更新端点和 `latest.json` 托管、缓存及回滚策略；
-- 在 CI/发布环境中以机密方式注入私钥和密码；
-- 验证篡改包、错误签名、断网、跨版本升级和失败恢复。
+- 后端固定 `https://github.com/2424521842/valoframe/releases/latest/download/latest.json`，前端不能替换 endpoint 或公钥；
+- 设置/关于页提供每日一次且会在焦点恢复时补查的非阻塞自动检查、无限频的手动检查、发布说明、确认下载、进度/验签/取消、失败直重试、显式放弃会话和确认安装，并在主导航显示可用或待安装状态；
+- Tauri updater 原始 plugin commands 不向窗口 capability 暴露；运行时严格绑定规范版本、GitHub 仓库/tag 下载地址与已验签 ZIP 内安装器版本，并限制下载/解压大小；Windows 只有确认安装器启动成功后才退出，启动失败保留已验证包供重试；
+- 扫描、永久删除、视频导出、来源根重新定位与安装由 Rust 关键任务门禁互斥；
+- Community Beta 不嵌入公钥且不生成 updater 资产；稳定构建从仓库 Variable/Secrets 注入公钥、私钥和私钥密码；
+- `stable-release` workflow 由规范稳定 tag 自动触发，拒绝版本错配、倒退、重复 Release 和缺失密钥；先创建并重新下载验证不可见 draft 的全部资产，公开后二次验证失败则把精确 Release 恢复为 draft；
+- `v0.1.0-beta.1` 用户必须手动安装一次 `v0.2.1`；只有嵌入正确公钥并指向稳定端点的该版本，才能应用内升级到 `v0.2.2`。Community Beta、内部 RC、prerelease 或未配置公钥的构建不具备该资格。
 
-不得把 Authenticode 与 Tauri 更新签名视为同一件事：公开安装器需要 Windows 代码签名，更新包还需要 updater 自己的签名链。
+发布前必须配置仓库 Secrets `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 和 Variable `VALOFRAME_UPDATER_PUBLIC_KEY`，并保留一份加密离线私钥备份。缺少任一配置时，稳定 workflow 在构建前失败。
 
-## 公开发布前的外部决策
+不得把 Authenticode 与 Tauri 更新签名视为同一件事：更新包必须具有 Tauri/Minisign 签名；Windows Authenticode 当前可选，只用于减少未知发布者和 SmartScreen 信誉提示。
 
-以下内容必须由项目负责人或法律/发布负责人提供，仓库不能自行猜测：
+## 未来严格公开发行检查
 
-- 真实 publisher/法律主体和稳定 identifier；
-- 第三方声明及其人工审核；项目自有代码已选择 MIT，并记录不另设 EULA；
-- 正式品牌图标和安装器视觉资产；
-- FFmpeg 二进制来源、许可证审核、SBOM 与源代码镜像/提供方式；
-- Authenticode 证书、签名服务和可信时间戳策略；
-- updater 密钥托管、HTTPS 端点和发布权限；
-- 支持的 Windows 版本、架构、在线/离线安装策略和升级兼容窗口。
+以下检查继续由 policy 跟踪，不得伪造为已完成；它们不阻止当前个人开发者稳定 updater 发布，但在品牌商业化、扩大分发或要求 Authenticode 时应逐项关闭：
+
+1. 第三方声明、SBOM、许可证正文/override 及人工审批。
+2. 产品名称和品牌审批。
+3. 真实 publisher/法律主体及证书主体审批。
+4. 稳定 application identifier 审批。
+5. 游戏素材覆盖公开源码、应用展示、安装器、下载和宣传渠道的分发权。
+6. 图标覆盖 Windows 安装器与公开下载的分发权。
+7. Riot Games、腾讯和《无畏契约》的商标归属及非官方/非赞助声明。
+8. FFmpeg 二进制来源、许可/专利审核、SBOM 与精确源码镜像/提供方式。
+9. Authenticode 证书、获批 subject/thumbprint 与签名服务。
+10. 可信 HTTPS 时间戳服务与验证策略。
+11. Windows 10/11 干净 VM 安装、升级、降级拒绝、卸载和真实媒体证据。
+12. updater 启用决定、密钥托管、公钥引用、稳定 HTTPS endpoint 和发布权限。
+13. 来源媒体只读、永久删除、应用数据边界与卸载保留策略的数据安全证据。
+
+`release/public-release-policy.json` 保留这些状态供诊断和未来严格发行使用。当前稳定发布的硬门禁以 updater 签名、版本/地址绑定、自动化测试和远端资产复核为准。

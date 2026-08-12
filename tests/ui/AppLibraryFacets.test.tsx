@@ -42,6 +42,9 @@ const source: SourceDir = {
   name: "页外来源",
   displayName: "页外来源",
   path: "D:\\Highlights\\wonderfulVideos7001",
+  sourceKind: "aclos",
+  scanMode: "aclos-structured",
+  scanRootPath: "D:\\Highlights\\wonderfulVideos7001",
   enabled: true,
   status: "available",
   accessibility: true,
@@ -90,6 +93,14 @@ describe("whole-library facet consumption", () => {
     expect(mocks.listClips).not.toHaveBeenCalled();
   });
 
+  it("does not expose source as a library toolbar column", async () => {
+    render(<App />);
+    await waitFor(() => expect(mocks.getLibraryFacets).toHaveBeenCalledTimes(1));
+
+    expect(screen.queryByRole("combobox", { name: "来源" })).not.toBeInTheDocument();
+    expect(lastListQuery()).not.toHaveProperty("sourceDirId");
+  });
+
   it("uses facet source and tag usage counts instead of the loaded summary", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -99,6 +110,8 @@ describe("whole-library facet consumption", () => {
     const sourceRow = (await screen.findByText("页外来源")).closest("article");
     expect(sourceRow).not.toBeNull();
     expect(within(sourceRow as HTMLElement).getByText("700 个片段")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: /识别结果/ }));
     expect(screen.getByText("800 个片段")).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: /^自定义标签/ }));
@@ -172,7 +185,7 @@ describe("whole-library facet consumption", () => {
     await user.click(screen.getByRole("combobox", { name: "英雄" }));
     expect(await screen.findByRole("option", { name: "页外英雄" })).toBeVisible();
     await user.keyboard("{Escape}");
-    await user.click(screen.getByRole("button", { name: "清空" }));
+    await user.click(screen.getByRole("button", { name: "清空搜索与所有筛选" }));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "英雄" })).toHaveTextContent("全部英雄"));
   });
 

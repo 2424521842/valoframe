@@ -1,6 +1,6 @@
 [package]
 name = "valorant-highlight-manager"
-version = "0.1.0"
+version = "0.2.1"
 description = "VALOFRAME local VALORANT CN highlight asset manager"
 authors = ["VALOFRAME Contributors"]
 license = "MIT"
@@ -22,6 +22,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "=2.10.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["backup", "bundled", "collation"] }
@@ -31,11 +32,18 @@ aes = "0.8"
 cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 sha2 = "0.10"
 hex = "0.4"
+minisign-verify = "0.2"
+semver = "1"
+tokio = { version = "1", features = ["macros", "sync"] }
+time = { version = "0.3", features = ["formatting"] }
+zip = { version = "=4.6.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+tempfile = "3"
 windows-sys = { version = "0.61.2", features = [
   "Win32_Storage_FileSystem",
   "Win32_System_WindowsProgramming",
+  "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
 

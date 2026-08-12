@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockClips, mockSourceDirs, mockTags } from "../../src/data/mockData";
+import type { AppUpdaterController } from "../../src/hooks/useAppUpdaterController";
 import type { BatchMutationResult, Clip, ClipListQuery, ClipPage, ClipSummary } from "../../src/types";
 import { libraryFacets } from "./libraryFacetFixtures";
 
@@ -14,10 +15,35 @@ const mocks = vi.hoisted(() => ({
   listClipPage: vi.fn(),
   listSources: vi.fn(),
   listTags: vi.fn(),
+  removeClipsFromIndex: vi.fn(),
   removeTagFromClips: vi.fn(),
   selectExportDirectory: vi.fn(),
   setClipsFavorite: vi.fn(),
   setClipsTrashed: vi.fn(),
+  appUpdater: {
+    runtimeInfo: {
+      currentVersion: "0.2.1",
+      channel: "stable",
+      endpoint: "https://github.com/2424521842/valoframe/releases/latest/download/latest.json",
+      configured: true,
+    },
+    runtimeStatus: "ready",
+    runtimeError: null,
+    phase: "idle",
+    update: null,
+    progress: { downloadedBytes: 0, totalBytes: null },
+    message: "更新检查尚未运行",
+    error: null,
+    canCheck: true,
+    canDownload: false,
+    canCancelDownload: false,
+    canInstall: false,
+    refreshRuntimeInfo: vi.fn(async () => undefined),
+    checkManually: vi.fn(async () => undefined),
+    download: vi.fn(async () => undefined),
+    cancelDownload: vi.fn(async () => undefined),
+    installAndRestart: vi.fn(async () => undefined),
+  } as AppUpdaterController,
 }));
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => {
@@ -32,6 +58,10 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: mocks.selectExportDirectory,
 }));
 
+vi.mock("../../src/hooks/useAppUpdaterController", () => ({
+  useAppUpdaterController: () => mocks.appUpdater,
+}));
+
 vi.mock("../../src/api/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/api/backend")>();
   return {
@@ -44,6 +74,7 @@ vi.mock("../../src/api/backend", async (importOriginal) => {
     listClipPage: mocks.listClipPage,
     listSources: mocks.listSources,
     listTags: mocks.listTags,
+    removeClipsFromIndex: mocks.removeClipsFromIndex,
     removeTagFromClips: mocks.removeTagFromClips,
     setClipsFavorite: mocks.setClipsFavorite,
     setClipsTrashed: mocks.setClipsTrashed,
@@ -58,6 +89,7 @@ let fixtureClips: Clip[];
 describe("production batch mutation flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetAppUpdater();
     fixtureClips = mockClips.slice(0, 2).map(cloneClip);
     mocks.listClipPage.mockImplementation(async (query: ClipListQuery) => pageForQuery(fixtureClips, query));
     mocks.getLibraryFacets.mockResolvedValue(libraryFacets({
@@ -144,6 +176,30 @@ describe("production batch mutation flow", () => {
         failures: [],
       };
     });
+    mocks.removeClipsFromIndex.mockImplementation(async (clipIds: string[]) => {
+      const uniqueIds = [...new Set(clipIds)];
+      const removedIds = fixtureClips
+        .filter((clip) => uniqueIds.includes(clip.id) && clip.fileStatus === "missing")
+        .map((clip) => clip.id);
+      const missingIds = uniqueIds.filter((clipId) =>
+        !fixtureClips.some((clip) => clip.id === clipId),
+      );
+      const blocked = fixtureClips
+        .filter((clip) => uniqueIds.includes(clip.id) && !removedIds.includes(clip.id))
+        .map((clip) => ({
+          clipId: clip.id,
+          code: "index-removal-not-eligible",
+          message: "素材仍可用",
+        }));
+      fixtureClips = fixtureClips.filter((clip) => !removedIds.includes(clip.id));
+      return {
+        requested: uniqueIds.length,
+        removedIds,
+        missingIds,
+        blocked,
+        failures: [],
+      };
+    });
   });
 
   it("favorites a multi-selection once and merges the returned clips without refreshing", async () => {
@@ -190,6 +246,108 @@ describe("production batch mutation flow", () => {
     await waitFor(() => expect(batchToolbar()).toHaveTextContent("已选择 52 条素材"));
     expect(mocks.listClipPage.mock.calls.map(([query]) => query.offset)).toEqual([0, 50]);
     expect(screen.getByRole("checkbox", { name: "取消选择全部结果" })).toBeChecked();
+  });
+
+  it("keeps cross-page cleanup eligibility and confirms every index state that will be lost", async () => {
+    const user = userEvent.setup();
+    fixtureClips = Array.from({ length: 52 }, (_, index) => ({
+      ...cloneClip(mockClips[0]),
+      id: String(index + 1),
+      fileName: `clip-${index + 1}.mp4`,
+      filePath: `D:\\Highlights\\clip-${index + 1}.mp4`,
+      fileStatus: index === 51 ? "missing" : "available",
+    }));
+    mocks.getLibraryFacets.mockResolvedValue(libraryFacets({
+      totalCount: fixtureClips.length,
+      activeCount: fixtureClips.length,
+    }));
+    render(<App />);
+
+    await user.click(await screen.findByRole(
+      "checkbox",
+      { name: "选择全部 52 条结果" },
+      { timeout: 5_000 },
+    ));
+    await waitFor(() => expect(batchToolbar()).toHaveTextContent("已选择 52 条素材"));
+    const cleanup = within(batchToolbar()).getByRole("button", {
+      name: "仅移除失联索引 (1)",
+    });
+    await user.click(cleanup);
+
+    const confirmation = await screen.findByRole("alertdialog");
+    for (const state of ["收藏", "标签", "备注", "评审决定", "缩略图状态", "结构化元数据"]) {
+      expect(confirmation).toHaveTextContent(state);
+    }
+    expect(confirmation).toHaveTextContent("绝不会删除、移动或修改磁盘上的视频文件");
+    await user.click(within(confirmation).getByRole("button", { name: "仅移除索引" }));
+
+    await waitFor(() => expect(mocks.removeClipsFromIndex).toHaveBeenCalledTimes(1));
+    expect(mocks.removeClipsFromIndex).toHaveBeenCalledWith(["52"]);
+    expect(await screen.findByText(/已从索引移除 1 条素材/)).toBeVisible();
+    await waitFor(() => expect(batchToolbar()).toHaveTextContent("已选择 51 条素材"));
+  });
+
+  it("removes successful index rows locally and keeps blocked rows in the dialog for retry", async () => {
+    const user = userEvent.setup();
+    fixtureClips = fixtureClips.map((clip) => ({ ...cloneClip(clip), fileStatus: "missing" }));
+    const [removedClip, blockedClip] = fixtureClips;
+    mocks.removeClipsFromIndex.mockResolvedValueOnce({
+      requested: 2,
+      removedIds: [removedClip.id],
+      missingIds: [],
+      blocked: [{
+        clipId: blockedClip.id,
+        code: "delete-pending",
+        message: "素材已进入永久删除队列",
+      }],
+      failures: [],
+    });
+    render(<App />);
+    await selectAllVisible(user);
+
+    await user.click(within(batchToolbar()).getByRole("button", {
+      name: "仅移除失联索引 (2)",
+    }));
+    let confirmation = await screen.findByRole("alertdialog");
+    await user.click(within(confirmation).getByRole("button", { name: "仅移除索引" }));
+
+    await waitFor(() => expect(mocks.removeClipsFromIndex).toHaveBeenCalledTimes(1));
+    confirmation = await screen.findByRole("alertdialog");
+    expect(confirmation).toHaveTextContent("永久移除 1 条索引记录");
+    expect(within(confirmation).getByRole("alert")).toHaveTextContent(
+      "本次成功移除 1 条；索引已不存在 0 条；阻断 1 条；失败 0 条",
+    );
+    expect(within(confirmation).getByRole("alert")).toHaveTextContent(
+      "素材已进入永久删除队列",
+    );
+    expect(batchToolbar()).toHaveTextContent("已选择 1 条素材");
+
+    await user.click(within(confirmation).getByRole("button", { name: "仅移除索引" }));
+    await waitFor(() => expect(mocks.removeClipsFromIndex).toHaveBeenCalledTimes(2));
+    expect(mocks.removeClipsFromIndex).toHaveBeenNthCalledWith(2, [blockedClip.id]);
+  });
+
+  it("keeps an index-only removal failure inside the modal as a live retryable error", async () => {
+    const user = userEvent.setup();
+    fixtureClips = fixtureClips.map((clip) => ({ ...cloneClip(clip), fileStatus: "missing" }));
+    mocks.removeClipsFromIndex.mockRejectedValueOnce(new Error("database locked"));
+    render(<App />);
+    await selectAllVisible(user);
+
+    await user.click(within(batchToolbar()).getByRole("button", {
+      name: "仅移除失联索引 (2)",
+    }));
+    const confirmation = await screen.findByRole("alertdialog");
+    await user.click(within(confirmation).getByRole("button", { name: "仅移除索引" }));
+
+    expect(await within(confirmation).findByRole("alert")).toHaveTextContent(
+      "仅移除索引失败：本次未移除任何记录，请重试",
+    );
+    expect(within(confirmation).getByRole("button", { name: "仅移除索引" })).toBeEnabled();
+    expect(batchToolbar()).toHaveTextContent("已选择 2 条素材");
+
+    await user.click(within(confirmation).getByRole("button", { name: "仅移除索引" }));
+    await waitFor(() => expect(mocks.removeClipsFromIndex).toHaveBeenCalledTimes(2));
   });
 
   it("applies a batch tag once and reflects the new aggregate selection state", async () => {
@@ -240,7 +398,7 @@ describe("production batch mutation flow", () => {
 
     await user.click(within(batchToolbar()).getByRole("button", { name: "导出所选" }));
 
-    expect(await screen.findByText("已取消导出")).toBeVisible();
+    expect(await screen.findByText(/已取消导出/)).toBeVisible();
     expect(mocks.exportClips).not.toHaveBeenCalled();
     expect(within(batchToolbar()).getByRole("button", { name: "导出所选" })).toBeEnabled();
   });
@@ -285,10 +443,53 @@ describe("production batch mutation flow", () => {
 
     await user.click(within(batchToolbar()).getByRole("button", { name: "导出所选" }));
 
-    expect(await screen.findByText("导出失败：磁盘空间不足")).toBeVisible();
+    expect(await screen.findByText(/导出失败：磁盘空间不足/)).toBeVisible();
     expect(batchToolbar()).toHaveTextContent("已选择 2 条素材");
     expect(within(batchToolbar()).getByRole("button", { name: "导出所选" })).toBeEnabled();
   });
+
+  it.each(["resolve", "reject"] as const)(
+    "blocks update installation while an export is pending and clears the blocker after %s",
+    async (settlement) => {
+      const user = userEvent.setup();
+      const exportTask = deferred<Awaited<ReturnType<typeof mocks.exportClips>>>();
+      prepareDownloadedUpdater();
+      mocks.exportClips.mockReturnValueOnce(exportTask.promise);
+      render(<App />);
+      await selectAllVisible(user);
+
+      await user.click(within(batchToolbar()).getByRole("button", { name: "导出所选" }));
+      await waitFor(() => expect(mocks.exportClips).toHaveBeenCalledTimes(1));
+      await user.click(screen.getByRole("button", { name: /^设置/ }));
+
+      expect(await screen.findByText("视频导出任务正在运行，请等待导出结束后再安装")).toBeVisible();
+      expect(screen.getByRole("button", { name: "安装并重启" })).toBeDisabled();
+
+      await act(async () => {
+        if (settlement === "resolve") {
+          exportTask.resolve({
+            requested: fixtureClips.length,
+            exported: fixtureClips.length,
+            failed: 0,
+            destinationDir: "D:\\Exports",
+            exportedIds: fixtureClips.map((clip) => clip.id),
+            missingIds: [],
+            missingFileIds: [],
+            exports: [],
+            failures: [],
+          });
+        } else {
+          exportTask.reject(new Error("导出设备已断开"));
+        }
+        await exportTask.promise.catch(() => undefined);
+      });
+
+      await waitFor(() => {
+        expect(screen.queryByText(/视频导出任务正在运行/)).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "安装并重启" })).toBeEnabled();
+      });
+    },
+  );
 
   it("recycles and restores a multi-selection with one backend call per action", async () => {
     const user = userEvent.setup();
@@ -417,9 +618,9 @@ describe("production batch mutation flow", () => {
 
     await user.click(within(batchToolbar()).getByRole("button", { name: "取消收藏" }));
 
-    expect(await screen.findByText(
+    expect(await screen.findByText(new RegExp(
       `收藏部分完成：匹配 1/2 条；未找到 ID：${fixtureClips[1].id}`,
-    )).toBeVisible();
+    ))).toBeVisible();
     expect(favoriteButton(fixtureClips[0].id)).toHaveAttribute("aria-pressed", "false");
     expect(favoriteButton(fixtureClips[1].id)).toHaveAttribute("aria-pressed", "true");
     expect(batchToolbar()).toHaveTextContent("已选择 2 条素材");
@@ -454,7 +655,11 @@ describe("production batch mutation flow", () => {
 });
 
 async function selectAllVisible(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole("checkbox", { name: /选择全部 \d+ 条结果/ }));
+  await user.click(await screen.findByRole(
+    "checkbox",
+    { name: /选择全部 \d+ 条结果/ },
+    { timeout: 5_000 },
+  ));
   await screen.findByLabelText("批量操作");
 }
 
@@ -525,6 +730,46 @@ function mutationResult(
     missingIds,
     clips,
   };
+}
+
+function resetAppUpdater() {
+  Object.assign(mocks.appUpdater, {
+    runtimeInfo: {
+      currentVersion: "0.2.1",
+      channel: "stable",
+      endpoint: "https://github.com/2424521842/valoframe/releases/latest/download/latest.json",
+      configured: true,
+    },
+    runtimeStatus: "ready",
+    runtimeError: null,
+    phase: "idle",
+    update: null,
+    progress: { downloadedBytes: 0, totalBytes: null },
+    message: "更新检查尚未运行",
+    error: null,
+    canCheck: true,
+    canDownload: false,
+    canCancelDownload: false,
+    canInstall: false,
+  });
+}
+
+function prepareDownloadedUpdater() {
+  Object.assign(mocks.appUpdater, {
+    phase: "downloaded",
+    update: {
+      currentVersion: "0.2.1",
+      version: "0.2.2",
+      notes: "自动更新集成测试",
+      publishedAt: "2026-08-10T00:00:00Z",
+    },
+    message: "更新包已下载并通过签名验证，可以安装",
+    error: null,
+    canCheck: false,
+    canDownload: false,
+    canCancelDownload: false,
+    canInstall: true,
+  });
 }
 
 function deferred<T>() {

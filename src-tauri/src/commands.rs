@@ -1,6 +1,7 @@
 mod export;
 mod library;
 mod media_protocol;
+mod sources;
 
 use std::{
     cell::Cell,
@@ -22,6 +23,7 @@ use tauri::{AppHandle, Emitter, State};
 pub use export::*;
 pub use library::*;
 pub use media_protocol::clip_media_protocol_response;
+pub use sources::*;
 
 #[cfg(test)]
 use media_protocol::{
@@ -30,6 +32,7 @@ use media_protocol::{
 };
 
 use crate::{
+    critical_tasks::{CriticalTaskGate, CriticalTaskKind},
     db,
     drive_discovery::{self, DiscoveryProgress},
     scan_coordinator::{ScanCoordinator, ScanJobStatus, ScanProgressEvent, ScanStatus},
@@ -316,6 +319,7 @@ pub async fn scan_default_aclos_dir(
         app,
         state.database_path.clone(),
         state.scan_coordinator.clone(),
+        state.critical_tasks.clone(),
         state.thumbnail_queue.clone(),
         root_hint,
         |connection, job_id, cancellation, events| {
@@ -342,6 +346,7 @@ pub async fn scan_custom_dir(
         app,
         state.database_path.clone(),
         state.scan_coordinator.clone(),
+        state.critical_tasks.clone(),
         state.thumbnail_queue.clone(),
         root_hint,
         move |connection, job_id, cancellation, events| {
@@ -374,6 +379,7 @@ pub async fn scan_roots(
         app,
         state.database_path.clone(),
         state.scan_coordinator.clone(),
+        state.critical_tasks.clone(),
         state.thumbnail_queue.clone(),
         root_hint,
         move |connection, job_id, cancellation, events| {
@@ -394,6 +400,7 @@ async fn run_scan_job<T, F>(
     app: AppHandle,
     database_path: String,
     coordinator: Arc<ScanCoordinator>,
+    critical_tasks: Arc<CriticalTaskGate>,
     thumbnail_queue: Arc<ThumbnailQueue>,
     root_hint: String,
     work: F,
@@ -409,6 +416,14 @@ where
         + Send
         + 'static,
 {
+    let _critical_task = critical_tasks
+        .enter(CriticalTaskKind::Scan)
+        .map_err(|message| ScanCommandError {
+            code: "update-installing",
+            message: message.to_string(),
+            job_id: None,
+            active_job_id: None,
+        })?;
     let lease = coordinator.begin().map_err(|conflict| ScanCommandError {
         code: "already-running",
         message: format!("已有扫描任务正在运行：{}", conflict.job_id),
@@ -682,6 +697,7 @@ pub async fn discover_and_scan_fixed_drives(
         app,
         state.database_path.clone(),
         state.scan_coordinator.clone(),
+        state.critical_tasks.clone(),
         state.thumbnail_queue.clone(),
         "本机固定磁盘".to_string(),
         |connection, job_id, cancellation, events| {
@@ -757,9 +773,13 @@ pub fn cancel_scan(app: AppHandle, state: State<'_, AppState>, job_id: String) -
 #[tauri::command]
 pub fn get_scan_summary(
     state: State<'_, AppState>,
+    job_id: Option<String>,
 ) -> Result<Option<scanner::ScanSummary>, String> {
     let connection = db::open_database_read_only(&state.database_path)?;
-    scanner::latest_scan_summary(&connection)
+    match job_id {
+        Some(job_id) => scanner::scan_summary_for_job(&connection, &job_id),
+        None => scanner::latest_scan_summary(&connection),
+    }
 }
 
 #[tauri::command]
@@ -787,10 +807,13 @@ pub fn get_thumbnail_status(state: State<'_, AppState>) -> Result<ThumbnailServi
 mod tests {
     use std::{
         cell::Cell,
+        collections::BTreeSet,
         fs,
         path::PathBuf,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
+
+    use sha2::{Digest, Sha256};
 
     use super::{
         add_tag_to_clip_for_database, add_tag_to_clips_for_database, clip_id_from_media_request,
@@ -798,12 +821,15 @@ mod tests {
         delete_clips_permanently_for_database, delete_tag_for_database, discover_and_scan_roots,
         emit_scan_progress_ignoring_failure, ensure_scan_work_terminal,
         get_clip_detail_for_database, get_clip_media_for_database, list_tags_for_database,
-        open_clip_location_for_database, parse_media_range, remove_clip_from_index_for_database,
+        open_clip_externally_for_database, open_clip_location_for_database, parse_media_range,
+        remove_clip_from_index_for_database, remove_clips_from_index_for_database,
         remove_tag_from_clip_for_database, remove_tag_from_clips_for_database,
-        set_clip_favorite_for_database, set_clip_trashed_for_database,
-        set_clips_favorite_for_database, set_clips_trashed_for_database,
-        update_clip_note_for_database, update_tag_for_database, ByteRange, PingResponse,
-        ScanCommandError, ScanEventCursor, ScanWorkResult, MAX_MEDIA_CHUNK_BYTES,
+        reset_clip_review_decision_for_database, restore_clip_review_state_for_database,
+        set_clip_favorite_for_database, set_clip_review_decision_for_database,
+        set_clip_trashed_for_database, set_clips_favorite_for_database,
+        set_clips_trashed_for_database, update_clip_note_for_database, update_tag_for_database,
+        ByteRange, PingResponse, ScanCommandError, ScanEventCursor, ScanWorkResult,
+        MAX_MEDIA_CHUNK_BYTES,
     };
     use crate::db::{self, ClipInput, SourceDirInput};
     use crate::scan_coordinator::{ScanJobStatus, ScanProgressEvent};
@@ -1187,6 +1213,36 @@ mod tests {
     }
 
     #[test]
+    fn external_player_revalidates_index_status_extension_and_source_boundary() {
+        let fixture = ClipCommandFixture::with_file("external-open.mp4");
+        let mut opened_path = None;
+
+        open_clip_externally_for_database(&fixture.database_path, fixture.clip_id, |path| {
+            opened_path = Some(path.to_path_buf());
+            Ok(())
+        })
+        .expect("an available in-root MP4 should be opened");
+
+        assert_eq!(
+            opened_path,
+            Some(
+                fixture
+                    .clip_path
+                    .canonicalize()
+                    .expect("fixture path should canonicalize")
+            )
+        );
+        let connection = db::open_database(&fixture.database_path).unwrap();
+        db::update_clip_trashed(&connection, fixture.clip_id, true).unwrap();
+        let error =
+            open_clip_externally_for_database(&fixture.database_path, fixture.clip_id, |_| {
+                panic!("trashed clips must not launch the player")
+            })
+            .expect_err("trashed clips should be rejected");
+        assert!(error.contains("可用素材"));
+    }
+
+    #[test]
     fn copy_clip_path_returns_the_database_clip_path_by_id() {
         let fixture = ClipCommandFixture::with_file("copy-me.mp4");
 
@@ -1212,8 +1268,51 @@ mod tests {
     }
 
     #[test]
+    fn review_command_core_supports_decision_reset_and_compare_and_swap_restore() {
+        let fixture = ClipCommandFixture::with_file("review-command.mp4");
+        let liked = set_clip_review_decision_for_database(
+            &fixture.database_path,
+            fixture.clip_id,
+            db::ReviewDecision::Liked,
+        )
+        .expect("liked command should persist");
+        assert!(liked.after.favorite);
+        assert_eq!(liked.after.review_decision, db::ReviewDecision::Liked);
+
+        let reset =
+            reset_clip_review_decision_for_database(&fixture.database_path, fixture.clip_id)
+                .expect("reset command should persist");
+        assert!(reset.after.favorite);
+        assert_eq!(reset.after.review_decision, db::ReviewDecision::Unreviewed);
+
+        let restored = restore_clip_review_state_for_database(
+            &fixture.database_path,
+            fixture.clip_id,
+            reset.after.clone(),
+            reset.before.clone(),
+        )
+        .expect("restore command should compare and restore exact state");
+        assert_eq!(restored.after, reset.before);
+
+        let stale = restore_clip_review_state_for_database(
+            &fixture.database_path,
+            fixture.clip_id,
+            reset.after,
+            liked.before,
+        )
+        .expect_err("stale command restore should fail closed");
+        assert!(stale.contains("stale undo"));
+    }
+
+    #[test]
     fn recycle_bin_commands_preserve_the_video_and_can_remove_only_the_index_row() {
         let fixture = ClipCommandFixture::with_file("recycle-me.mp4");
+        let before_bytes = fs::read(&fixture.clip_path).unwrap();
+        let before_hash = Sha256::digest(&before_bytes).to_vec();
+        let before_metadata = fs::metadata(&fixture.clip_path).unwrap();
+        let before_size = before_metadata.len();
+        let before_modified = before_metadata.modified().unwrap();
+        let before_listing = directory_file_names(&fixture._root);
 
         let trashed = set_clip_trashed_for_database(&fixture.database_path, fixture.clip_id, true)
             .expect("clip should enter recycle bin");
@@ -1225,11 +1324,271 @@ mod tests {
                 .expect("clip should restore");
         assert_eq!(restored.status, "available");
 
+        let available_error =
+            remove_clip_from_index_for_database(&fixture.database_path, fixture.clip_id)
+                .expect_err("available clip must not be removable from the index");
+        assert!(available_error.contains("index-removal-not-eligible"));
+
+        set_clip_trashed_for_database(&fixture.database_path, fixture.clip_id, true)
+            .expect("clip should re-enter recycle bin");
+
         remove_clip_from_index_for_database(&fixture.database_path, fixture.clip_id)
             .expect("clip index row should be removed");
         let connection = db::open_database(&fixture.database_path).expect("database should open");
         assert!(db::find_clip_by_id(&connection, fixture.clip_id).is_err());
+        let intent_count = connection
+            .query_row("SELECT COUNT(*) FROM clip_delete_intents", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(intent_count, 0);
+        drop(connection);
+
         assert!(fixture.clip_path.is_file());
+        assert_eq!(fs::metadata(&fixture.clip_path).unwrap().len(), before_size);
+        assert_eq!(
+            fs::metadata(&fixture.clip_path)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before_modified
+        );
+        assert_eq!(
+            Sha256::digest(fs::read(&fixture.clip_path).unwrap()).to_vec(),
+            before_hash
+        );
+        assert_eq!(directory_file_names(&fixture._root), before_listing);
+    }
+
+    #[test]
+    fn index_only_batch_is_partial_deduplicated_bounded_and_never_mutates_video_files() {
+        let fixture = ClipCommandFixture::with_file("available.mp4");
+        let videos_dir = fixture._root.join("offline-videos");
+        fs::create_dir_all(&videos_dir).unwrap();
+        let offline_path = videos_dir.join("offline.mp4");
+        fs::write(
+            &offline_path,
+            b"offline video bytes that must remain unchanged",
+        )
+        .unwrap();
+
+        let connection = db::open_database(&fixture.database_path).unwrap();
+        let source_dir_id = connection
+            .query_row(
+                "SELECT source_dir_id FROM clips WHERE id = ?1",
+                [fixture.clip_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        let offline_clip = db::upsert_clip(
+            &connection,
+            ClipInput {
+                source_dir_id,
+                clip_group_id: None,
+                video_path: offline_path.to_string_lossy().as_ref(),
+                file_name: "offline.mp4",
+                file_size: i64::try_from(fs::metadata(&offline_path).unwrap().len()).unwrap(),
+                modified_at: Some("1782634273"),
+                duration_ms: Some(10_000),
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+        )
+        .unwrap();
+        connection
+            .execute(
+                "
+                UPDATE clips
+                SET file_status = 'missing',
+                    is_favorite = 1,
+                    review_decision = 'disliked',
+                    reviewed_at = CURRENT_TIMESTAMP,
+                    note = 'must be cascaded'
+                WHERE id = ?1
+                ",
+                [offline_clip.id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE clip_metadata SET metadata_status = 'enriched', extra_json = '{}' WHERE clip_id = ?1",
+                [offline_clip.id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clip_events (clip_id, event_key, event_type) VALUES (?1, 'event-a', 'kill')",
+                [offline_clip.id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clip_thumbnails (clip_id, fingerprint, status) VALUES (?1, 'fixture-fingerprint', 'pending')",
+                [offline_clip.id],
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO tags (name) VALUES ('offline-tag')", [])
+            .unwrap();
+        let tag_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO clip_tags (clip_id, tag_id) VALUES (?1, ?2)",
+                [offline_clip.id, tag_id],
+            )
+            .unwrap();
+        drop(connection);
+
+        let before_bytes = fs::read(&offline_path).unwrap();
+        let before_hash = Sha256::digest(&before_bytes).to_vec();
+        let before_metadata = fs::metadata(&offline_path).unwrap();
+        let before_size = before_metadata.len();
+        let before_modified = before_metadata.modified().unwrap();
+        let before_listing = directory_file_names(&videos_dir);
+        let missing_id = offline_clip.id + 100_000;
+
+        let result = remove_clips_from_index_for_database(
+            &fixture.database_path,
+            &[
+                offline_clip.id,
+                fixture.clip_id,
+                offline_clip.id,
+                missing_id,
+            ],
+        )
+        .expect("mixed index cleanup should return a partial result");
+
+        assert_eq!(result.requested, 3);
+        assert_eq!(result.removed_ids, vec![offline_clip.id]);
+        assert_eq!(result.missing_ids, vec![missing_id]);
+        assert_eq!(result.blocked.len(), 1);
+        assert_eq!(result.blocked[0].clip_id, fixture.clip_id);
+        assert_eq!(result.blocked[0].code, "index-removal-not-eligible");
+        assert!(result.failures.is_empty());
+        assert_eq!(fs::metadata(&offline_path).unwrap().len(), before_size);
+        assert_eq!(
+            fs::metadata(&offline_path).unwrap().modified().unwrap(),
+            before_modified
+        );
+        assert_eq!(
+            Sha256::digest(fs::read(&offline_path).unwrap()).to_vec(),
+            before_hash
+        );
+        assert_eq!(directory_file_names(&videos_dir), before_listing);
+
+        let connection = db::open_database(&fixture.database_path).unwrap();
+        for table in [
+            "clips",
+            "clip_metadata",
+            "clip_events",
+            "clip_thumbnails",
+            "clip_tags",
+        ] {
+            let count = connection
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table} WHERE {} = ?1",
+                        if table == "clips" { "id" } else { "clip_id" }
+                    ),
+                    [offline_clip.id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "{table} rows should cascade");
+        }
+        let intent_count = connection
+            .query_row("SELECT COUNT(*) FROM clip_delete_intents", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(
+            intent_count, 0,
+            "index cleanup must not authorize permanent deletion"
+        );
+        drop(connection);
+
+        let empty = remove_clips_from_index_for_database(&fixture.database_path, &[]).unwrap();
+        assert_eq!(empty.requested, 0);
+        assert!(empty.removed_ids.is_empty());
+        assert!(empty.blocked.is_empty());
+
+        let too_many = (1_i64..=201).collect::<Vec<_>>();
+        let limit_error = remove_clips_from_index_for_database(&fixture.database_path, &too_many)
+            .expect_err("oversized cleanup batch should be rejected before item processing");
+        assert!(limit_error.contains("200"));
+    }
+
+    #[test]
+    fn index_only_batch_removes_trashed_rows_without_mutating_their_videos() {
+        let fixture = ClipCommandFixture::with_file("trashed-one.mp4");
+        let second_path = fixture._root.join("trashed-two.mp4");
+        fs::write(&second_path, b"second trashed video must survive").unwrap();
+        let connection = db::open_database(&fixture.database_path).unwrap();
+        let source_dir_id = connection
+            .query_row(
+                "SELECT source_dir_id FROM clips WHERE id = ?1",
+                [fixture.clip_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        let second = db::upsert_clip(
+            &connection,
+            ClipInput {
+                source_dir_id,
+                clip_group_id: None,
+                video_path: second_path.to_string_lossy().as_ref(),
+                file_name: "trashed-two.mp4",
+                file_size: i64::try_from(fs::metadata(&second_path).unwrap().len()).unwrap(),
+                modified_at: Some("1782634274"),
+                duration_ms: Some(10_000),
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+        )
+        .unwrap();
+        drop(connection);
+        let first_before = fs::read(&fixture.clip_path).unwrap();
+        let second_before = fs::read(&second_path).unwrap();
+
+        let trashed = set_clips_trashed_for_database(
+            &fixture.database_path,
+            &[fixture.clip_id, second.id],
+            true,
+        )
+        .expect("both clips should enter the recycle bin");
+        assert_eq!(trashed.updated, 2);
+
+        let removed = remove_clips_from_index_for_database(
+            &fixture.database_path,
+            &[fixture.clip_id, second.id],
+        )
+        .expect("trashed rows should be eligible for batch index removal");
+        assert_eq!(removed.removed_ids, vec![fixture.clip_id, second.id]);
+        assert!(removed.blocked.is_empty());
+        assert!(removed.failures.is_empty());
+
+        let connection = db::open_database(&fixture.database_path).unwrap();
+        let remaining: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM clips WHERE id IN (?1, ?2)",
+                [fixture.clip_id, second.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let snapshots: i64 = connection
+            .query_row("SELECT COUNT(*) FROM clip_trash_snapshots", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining, 0);
+        assert_eq!(
+            snapshots, 0,
+            "clip cascade should remove stale trash snapshots"
+        );
+        assert_eq!(fs::read(&fixture.clip_path).unwrap(), first_before);
+        assert_eq!(fs::read(&second_path).unwrap(), second_before);
     }
 
     #[test]
@@ -1787,6 +2146,13 @@ mod tests {
             .expect("response header should be present")
             .to_str()
             .expect("response header should be text")
+    }
+
+    fn directory_file_names(path: &std::path::Path) -> BTreeSet<String> {
+        fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
     }
 
     fn unique_temp_dir() -> PathBuf {

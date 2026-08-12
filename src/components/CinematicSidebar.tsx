@@ -1,6 +1,8 @@
 import {
   ClockCounterClockwise,
+  CheckSquare,
   FolderOpen,
+  GearSix,
   Heart,
   SquaresFour,
   Tag,
@@ -17,12 +19,16 @@ type CinematicSidebarProps = {
   favoriteCount: number;
   trashCount: number;
   tagCount: number;
+  updateBadge?: "更新" | "待安装";
+  updateVersion?: string;
   isOpen: boolean;
   isOverlay: boolean;
   onClose: () => void;
   onModeChange: (mode: LibraryMode) => void;
   onOpenTagManager: () => void;
   onOpenScan: () => void;
+  onOpenSettings: () => void;
+  onOpenReview?: () => void;
 };
 
 export function CinematicSidebar({
@@ -33,12 +39,16 @@ export function CinematicSidebar({
   favoriteCount,
   trashCount,
   tagCount,
+  updateBadge,
+  updateVersion,
   isOpen,
   isOverlay,
   onClose,
   onModeChange,
   onOpenTagManager,
   onOpenScan,
+  onOpenSettings,
+  onOpenReview = () => undefined,
 }: CinematicSidebarProps) {
   const hidden = isOverlay && !isOpen;
 
@@ -89,6 +99,12 @@ export function CinematicSidebar({
           onClick={onOpenTagManager}
         />
         <SidebarAction
+          active={activeScreen === "review"}
+          icon={<CheckSquare weight="duotone" />}
+          label="快速挑片"
+          onClick={onOpenReview}
+        />
+        <SidebarAction
           active={activeScreen === "library" && activeMode === "trash"}
           count={trashCount}
           icon={<Trash weight="duotone" />}
@@ -101,6 +117,16 @@ export function CinematicSidebar({
           label="扫描目录"
           onClick={onOpenScan}
         />
+        <SidebarAction
+          active={activeScreen === "settings"}
+          ariaLabel={updateBadge
+            ? `设置，${updateBadge === "待安装" ? "更新已下载" : "有可用更新"}${updateVersion ? ` v${updateVersion}` : ""}`
+            : undefined}
+          badge={updateBadge}
+          icon={<GearSix weight="duotone" />}
+          label="设置"
+          onClick={onOpenSettings}
+        />
       </nav>
 
     </aside>
@@ -109,6 +135,7 @@ export function CinematicSidebar({
 
 type SidebarActionProps = {
   active?: boolean;
+  ariaLabel?: string;
   badge?: string;
   count?: number;
   icon: ReactNode;
@@ -118,6 +145,7 @@ type SidebarActionProps = {
 
 function SidebarAction({
   active = false,
+  ariaLabel,
   badge,
   count,
   icon,
@@ -127,6 +155,7 @@ function SidebarAction({
   return (
     <button
       aria-current={active ? "page" : undefined}
+      aria-label={ariaLabel}
       className={active ? "cinematic-sidebar-item cinematic-sidebar-item--active" : "cinematic-sidebar-item"}
       type="button"
       onClick={onClick}

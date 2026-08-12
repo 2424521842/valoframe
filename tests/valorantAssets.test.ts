@@ -60,7 +60,7 @@ test("every pinned artwork byte and PNG structure matches the manifest", () => {
   }
 });
 
-test("owner attestation remains pending review and narrower than public release", () => {
+test("game-content authorization is either legitimate pending review or complete approval", () => {
   const authorization = JSON.parse(
     readFileSync(
       new URL(
@@ -76,17 +76,15 @@ test("owner attestation remains pending review and narrower than public release"
     legalReviewApproved: boolean;
     manualReviewRequired: boolean;
     repositoryOperationalAssumptionScopes: string[];
-    notAttestedOrApprovedForRepositoryUse: string[];
+    notAttestedOrApprovedForRepositoryUse?: string[];
+    approved?: boolean;
+    approvedScopes?: string[];
+    evidenceDocumentSha256?: string;
+    rightsHolderIdentity?: string;
+    licensee?: string;
   };
 
-  assert.equal(
-    authorization.status,
-    "owner-attested-pending-source-evidence-review",
-  );
   assert.equal(authorization.ownerAttestationReceived, true);
-  assert.equal(authorization.sourceDocumentReviewed, false);
-  assert.equal(authorization.legalReviewApproved, false);
-  assert.equal(authorization.manualReviewRequired, true);
   for (const scope of [
     "public-source-repository",
     "in-app-display",
@@ -100,20 +98,44 @@ test("owner attestation remains pending review and narrower than public release"
       scope,
     );
   }
-  for (const scope of [
-    "public-release-artifact-download",
-    "public-windows-installer",
-  ]) {
-    assert.equal(
-      authorization.notAttestedOrApprovedForRepositoryUse.includes(scope),
-      true,
-      scope,
-    );
-    assert.equal(
-      authorization.repositoryOperationalAssumptionScopes.includes(scope),
-      false,
-      scope,
-    );
+  if (authorization.status === "owner-attested-pending-source-evidence-review") {
+    assert.equal(authorization.approved, undefined);
+    assert.equal(authorization.sourceDocumentReviewed, false);
+    assert.equal(authorization.legalReviewApproved, false);
+    assert.equal(authorization.manualReviewRequired, true);
+    for (const scope of [
+      "public-release-artifact-download",
+      "public-windows-installer",
+    ]) {
+      assert.equal(
+        authorization.notAttestedOrApprovedForRepositoryUse?.includes(scope),
+        true,
+        scope,
+      );
+      assert.equal(
+        authorization.repositoryOperationalAssumptionScopes.includes(scope),
+        false,
+        scope,
+      );
+    }
+  } else {
+    assert.equal(authorization.status, "approved-for-public-release");
+    assert.equal(authorization.approved, true);
+    assert.equal(authorization.sourceDocumentReviewed, true);
+    assert.equal(authorization.legalReviewApproved, true);
+    assert.equal(authorization.manualReviewRequired, false);
+    for (const scope of [
+      "public-source-repository",
+      "in-app-display",
+      "public-windows-installer",
+      "public-release-artifact-download",
+      "github-project-marketing",
+    ]) {
+      assert.equal(authorization.approvedScopes?.includes(scope), true, scope);
+    }
+    assert.match(authorization.evidenceDocumentSha256 ?? "", /^[a-f0-9]{64}$/);
+    assert.notEqual(authorization.rightsHolderIdentity, "not-provided");
+    assert.notEqual(authorization.licensee, "not-provided");
   }
 });
 

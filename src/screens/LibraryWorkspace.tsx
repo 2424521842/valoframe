@@ -36,6 +36,8 @@ import type {
   LibraryDatePreset,
   LibraryMode,
   LibraryViewMode,
+  RemoveClipsFromIndexResult,
+  SourceDir,
   Tag,
   TagColor,
 } from "../types";
@@ -43,6 +45,7 @@ import type { VideoTypeFilter } from "../lib/videoTypes";
 
 type LibraryWorkspaceProps = {
   accounts: AccountSummary[];
+  sourceDirs: SourceDir[];
   matchGroups: ClipMatchGroup[];
   tags: Tag[];
   totalClipCount: number;
@@ -76,6 +79,9 @@ type LibraryWorkspaceProps = {
   libraryMode: LibraryMode;
   selectedClipId: string;
   activeFilterLabels: string[];
+  initialSelectedClipIds?: readonly string[];
+  selectionRequestId?: string | null;
+  openTagDialogForInitialSelection?: boolean;
   onQueryChange: (value: string) => void;
   onAccountChange: (value: string) => void;
   onAgentChange: (value: string) => void;
@@ -103,7 +109,7 @@ type LibraryWorkspaceProps = {
   onSetTagForClips: (clipIds: string[], tagId: string, shouldAttach: boolean) => Promise<boolean>;
   onSetTrashedForClips: (clipIds: string[], isTrashed: boolean) => Promise<boolean>;
   onDeleteClipsPermanently: (clipIds: string[]) => Promise<boolean>;
-  onRemoveClipsFromIndex: (clipIds: string[]) => Promise<boolean>;
+  onRemoveClipsFromIndex: (clipIds: string[]) => Promise<RemoveClipsFromIndexResult | null>;
 };
 
 type PendingDestructiveAction = {
@@ -119,6 +125,7 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
   const [pendingAction, setPendingAction] = useState<PendingDestructiveAction | null>(null);
   const [isBatchBusy, setIsBatchBusy] = useState(false);
   const [isSelectingAll, setIsSelectingAll] = useState(false);
+  const [indexRemovalFeedback, setIndexRemovalFeedback] = useState("");
   const scrollElementRef = useRef<HTMLDivElement>(null);
   const visibleClipIds = useMemo(
     () => props.matchGroups.flatMap((group) => group.clips.map((clip) => clip.id)),
@@ -132,9 +139,38 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
     () => new Map(visibleClips.map((clip) => [clip.id, clip])),
     [visibleClips],
   );
+  const selectedClipSnapshotsRef = useRef<Map<string, ClipSummary>>(new Map());
+  for (const clipId of selectedClipIds) {
+    const visibleClip = clipById.get(clipId);
+    if (visibleClip) selectedClipSnapshotsRef.current.set(clipId, visibleClip);
+  }
   const selectedClips = useMemo(
-    () => [...selectedClipIds].map((id) => clipById.get(id)).filter((clip): clip is ClipSummary => Boolean(clip)),
+    () => [...selectedClipIds]
+      .map((id) => clipById.get(id) ?? selectedClipSnapshotsRef.current.get(id))
+      .filter((clip): clip is ClipSummary => Boolean(clip)),
     [clipById, selectedClipIds],
+  );
+  const unavailableSourceIds = useMemo(
+    () => new Set(
+      props.sourceDirs
+        .filter((source) => source.status === "unavailable")
+        .map((source) => source.id),
+    ),
+    [props.sourceDirs],
+  );
+  const canRemoveClipFromIndex = useCallback(
+    (clip: ClipSummary) => clip.fileStatus === "trashed"
+      || clip.fileStatus === "missing"
+      || unavailableSourceIds.has(clip.sourceDirId),
+    [unavailableSourceIds],
+  );
+  const removableSelectedClipIds = useMemo(
+    () => selectedClips.filter(canRemoveClipFromIndex).map((clip) => clip.id),
+    [canRemoveClipFromIndex, selectedClips],
+  );
+  const removableVisibleClipIds = useMemo(
+    () => new Set(visibleClips.filter(canRemoveClipFromIndex).map((clip) => clip.id)),
+    [canRemoveClipFromIndex, visibleClips],
   );
   const selectionAnchorRef = useRef("");
   const selectedClipIdsRef = useRef(selectedClipIds);
@@ -144,6 +180,7 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
   const isSelectingAllRef = useRef(isSelectingAll);
   const selectAllRequestRef = useRef(0);
   const pendingSelectAllCountRef = useRef(0);
+  const appliedSelectionRequestRef = useRef<string | null>(null);
   selectedClipIdsRef.current = selectedClipIds;
   visibleClipIdsRef.current = visibleClipIds;
   isBatchBusyRef.current = isBatchBusy;
@@ -176,6 +213,7 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
   const clearSelection = useCallback(() => {
     const emptySelection = new Set<string>();
     selectionAnchorRef.current = "";
+    selectedClipSnapshotsRef.current.clear();
     selectedClipIdsRef.current = emptySelection;
     selectionVersionRef.current += 1;
     setSelectedClipIds(emptySelection);
@@ -207,6 +245,7 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
         allClips.map((clip) => clip.id),
       );
       pendingSelectAllCountRef.current = allClips.length;
+      selectedClipSnapshotsRef.current = new Map(allClips.map((clip) => [clip.id, clip]));
       selectionAnchorRef.current = allClips[0]?.id ?? "";
       selectedClipIdsRef.current = next;
       selectionVersionRef.current += 1;
@@ -281,6 +320,27 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
   }, [visibleClipIds]);
 
   useEffect(() => {
+    const requestId = props.selectionRequestId ?? null;
+    if (!requestId || appliedSelectionRequestRef.current === requestId) return;
+    appliedSelectionRequestRef.current = requestId;
+    const visibleIds = new Set(visibleClipIds);
+    const initialIds = props.initialSelectedClipIds?.filter((clipId) => visibleIds.has(clipId)) ?? [];
+    const nextSelection = new Set(initialIds);
+    selectedClipSnapshotsRef.current = new Map(
+      visibleClips
+        .filter((clip) => nextSelection.has(clip.id))
+        .map((clip) => [clip.id, clip]),
+    );
+    selectedClipIdsRef.current = nextSelection;
+    selectionAnchorRef.current = initialIds[0] ?? "";
+    selectionVersionRef.current += 1;
+    setSelectedClipIds(nextSelection);
+    if (props.openTagDialogForInitialSelection && initialIds.length > 0) {
+      setTagDialogOpen(true);
+    }
+  }, [props.initialSelectedClipIds, props.openTagDialogForInitialSelection, props.selectionRequestId, visibleClipIds, visibleClips]);
+
+  useEffect(() => {
     selectAllRequestRef.current += 1;
     pendingSelectAllCountRef.current = 0;
     isSelectingAllRef.current = false;
@@ -312,7 +372,10 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
 
   const requestDestructiveAction = useCallback((kind: PendingDestructiveAction["kind"], clipId?: string) => {
     const clipIds = clipId ? targetIdsForCard(clipId) : [...selectedClipIdsRef.current];
-    if (clipIds.length > 0) setPendingAction({ kind, clipIds });
+    if (clipIds.length > 0) {
+      if (kind === "remove-index") setIndexRemovalFeedback("");
+      setPendingAction({ kind, clipIds });
+    }
   }, [targetIdsForCard]);
 
   const requestTrashForCard = useCallback(
@@ -325,6 +388,13 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
     [requestDestructiveAction],
   );
 
+  const requestSelectedIndexRemoval = useCallback(() => {
+    if (removableSelectedClipIds.length > 0) {
+      setIndexRemovalFeedback("");
+      setPendingAction({ kind: "remove-index", clipIds: removableSelectedClipIds });
+    }
+  }, [removableSelectedClipIds]);
+
   const requestPermanentDeleteForCard = useCallback(
     (clipId: string) => requestDestructiveAction("delete-file", clipId),
     [requestDestructiveAction],
@@ -333,12 +403,43 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
   const confirmDestructiveAction = async () => {
     if (!pendingAction) return;
     const action = pendingAction;
+    if (action.kind === "remove-index") {
+      if (isBatchBusyRef.current) return;
+      isBatchBusyRef.current = true;
+      setIsBatchBusy(true);
+      setIndexRemovalFeedback("");
+      try {
+        const result = await props.onRemoveClipsFromIndex(action.clipIds);
+        if (!result) {
+          setIndexRemovalFeedback("仅移除索引失败：本次未移除任何记录，请重试。");
+          return;
+        }
+        const completedIds = new Set([...result.removedIds, ...result.missingIds]);
+        setSelectedClipIds((current) => {
+          const next = new Set([...current].filter((clipId) => !completedIds.has(clipId)));
+          for (const clipId of completedIds) selectedClipSnapshotsRef.current.delete(clipId);
+          pendingSelectAllCountRef.current = next.size;
+          selectedClipIdsRef.current = next;
+          selectionVersionRef.current += 1;
+          return next;
+        });
+        const retryIds = [...result.blocked, ...result.failures].map((problem) => problem.clipId);
+        setIndexRemovalFeedback(indexRemovalResultMessage(result));
+        setPendingAction(retryIds.length > 0
+          ? { kind: "remove-index", clipIds: retryIds }
+          : null);
+      } catch (error) {
+        setIndexRemovalFeedback(`仅移除索引失败：${errorMessage(error)}；本次未移除任何记录。`);
+      } finally {
+        isBatchBusyRef.current = false;
+        setIsBatchBusy(false);
+      }
+      return;
+    }
     const succeeded = await runBatchAction(
       () => action.kind === "trash"
         ? props.onSetTrashedForClips(action.clipIds, true)
-        : action.kind === "remove-index"
-          ? props.onRemoveClipsFromIndex(action.clipIds)
-          : props.onDeleteClipsPermanently(action.clipIds),
+        : props.onDeleteClipsPermanently(action.clipIds),
       true,
     );
     if (succeeded) setPendingAction(null);
@@ -408,6 +509,7 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
           isLoading={props.isLoading}
           isLoadingMore={props.isLoadingMore}
           isTrashMode={isTrashMode}
+          removableFromIndexIds={removableVisibleClipIds}
           hasMore={props.hasMore}
           listGeneration={props.listGeneration}
           loadMoreError={props.loadMoreError}
@@ -469,10 +571,18 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
               </button>
             </>
           ) : (
-            <button className="library-batch-danger" disabled={isBatchBusy} type="button" onClick={() => requestDestructiveAction("trash")}>
-              <Trash weight="bold" />
-              移入回收站
-            </button>
+            <>
+              {removableSelectedClipIds.length > 0 ? (
+                <button className="library-batch-danger" disabled={isBatchBusy} type="button" onClick={requestSelectedIndexRemoval}>
+                  <Database weight="bold" />
+                  仅移除失联索引 ({removableSelectedClipIds.length})
+                </button>
+              ) : null}
+              <button className="library-batch-danger" disabled={isBatchBusy} type="button" onClick={() => requestDestructiveAction("trash")}>
+                <Trash weight="bold" />
+                移入回收站
+              </button>
+            </>
           )}
           <button aria-label="取消全部选择" className="library-batch-close" disabled={isBatchBusy} type="button" onClick={clearSelection}>
             <X weight="bold" />
@@ -536,9 +646,18 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
             {pendingAction?.kind === "trash"
               ? `将隐藏 ${pendingAction.clipIds.length} 条素材，但不会删除本地视频文件，可以随时从回收站恢复。`
               : pendingAction?.kind === "remove-index"
-                ? `将从管理器数据库移除 ${pendingAction?.clipIds.length ?? 0} 条记录。原视频文件仍会保留，后续重新扫描可能再次导入。`
+                ? `将从瓦刻数据库永久移除 ${pendingAction?.clipIds.length ?? 0} 条索引记录，并删除其中的收藏、标签、备注、评审决定、缩略图状态和结构化元数据。绝不会删除、移动或修改磁盘上的视频文件；后续重新扫描可能再次导入。`
                 : `将永久删除 ${pendingAction?.clipIds.length ?? 0} 个本地视频文件，并同时移除管理器记录。此操作无法撤销，文件不会进入系统回收站。`}
           </UiAlertDialogDescription>
+          {pendingAction?.kind === "remove-index" && indexRemovalFeedback ? (
+            <p
+              aria-live="assertive"
+              className="library-index-removal-feedback"
+              role="alert"
+            >
+              {indexRemovalFeedback}
+            </p>
+          ) : null}
           <div className="ui-alert-dialog-actions">
             <UiAlertDialogCancel disabled={isBatchBusy}>取消</UiAlertDialogCancel>
             <UiAlertDialogAction
@@ -561,4 +680,24 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
       </UiAlertDialog>
     </section>
   );
+}
+
+function indexRemovalResultMessage(result: RemoveClipsFromIndexResult): string {
+  const firstProblem = result.blocked[0] ?? result.failures[0];
+  const message = [
+    `本次成功移除 ${result.removedIds.length} 条`,
+    `索引已不存在 ${result.missingIds.length} 条`,
+    `阻断 ${result.blocked.length} 条`,
+    `失败 ${result.failures.length} 条`,
+  ].join("；");
+  return firstProblem ? `${message}。${firstProblem.message}` : `${message}。`;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error) {
+    return String(error.message);
+  }
+  return "未知错误";
 }

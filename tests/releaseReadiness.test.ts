@@ -12,6 +12,10 @@ const cargoManifest = readFileSync(
   new URL("../src-tauri/Cargo.toml", import.meta.url),
   "utf8",
 );
+const cargoLock = readFileSync(
+  new URL("../src-tauri/Cargo.lock", import.meta.url),
+  "utf8",
+);
 const projectLicenseText = readFileSync(
   new URL("../LICENSE", import.meta.url),
   "utf8",
@@ -73,6 +77,13 @@ const publicReleasePreflight = readFileSync(
   ),
   "utf8",
 );
+const publicReleaseEvidenceStager = readFileSync(
+  new URL(
+    "../scripts/release/stage-public-release-evidence.ps1",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const minimalFfmpegCandidate = readJson(
   "../third_party/ffmpeg/minimal-windows-x64-candidate.json",
 );
@@ -124,7 +135,7 @@ test("Windows bundle policy is explicit and downgrade-safe", () => {
   );
 });
 
-test("package, Tauri, and Cargo versions remain aligned", () => {
+test("application manifests and lockfiles remain version-aligned", () => {
   const cargoToml = readFileSync(
     new URL("../src-tauri/Cargo.toml", import.meta.url),
     "utf8",
@@ -132,9 +143,17 @@ test("package, Tauri, and Cargo versions remain aligned", () => {
   const cargoVersion = cargoToml.match(
     /\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m,
   )?.[1];
+  const cargoLockVersion = cargoLock.match(
+    /\[\[package\]\]\s+name\s*=\s*"valorant-highlight-manager"\s+version\s*=\s*"([^"]+)"/,
+  )?.[1];
+  const lockPackages = objectAt(packageLock, "packages");
+  const lockRootPackage = objectAt(lockPackages, "");
 
+  assert.equal(packageJson.version, packageLock.version);
+  assert.equal(packageJson.version, lockRootPackage.version);
   assert.equal(packageJson.version, tauriConfig.version);
   assert.equal(packageJson.version, cargoVersion);
+  assert.equal(packageJson.version, cargoLockVersion);
 });
 
 test("FFmpeg input is immutable, hashed, and follows the redistribution state machine", () => {
@@ -436,7 +455,11 @@ test("public release preflight covers every non-bundle approval domain", () => {
   assert.match(publicReleasePreflight, /-ExpectBlocked/);
   assert.match(publicReleasePreflight, /Get-EvidenceValidationError/);
   assert.match(publicReleasePreflight, /evidence artifact.*does not match its SHA-256/);
-  assert.match(publicReleasePreflight, /sourceCommit does not match the release commit/);
+  assert.match(publicReleasePreflight, /approval and source-commit binding belong to the protected external evidence manifest/);
+  assert.match(publicReleasePreflight, /protected external evidence root/);
+  assert.match(publicReleaseEvidenceStager, /ExpectedArchiveSha256/);
+  assert.match(publicReleaseEvidenceStager, /ExpectedSourceCommit/);
+  assert.match(publicReleaseEvidenceStager, /ZipArchiveMode\]::Read/);
   assert.match(publicReleasePreflight, /separate-EULA requirement must be an explicit JSON Boolean decision/);
   assert.match(publicReleasePreflight, /gameContent\.verifier/);
   assert.match(publicReleasePreflight, /requiredPublicGameContentScopes/);
@@ -446,16 +469,32 @@ test("public release preflight covers every non-bundle approval domain", () => {
   );
 
   const gameContent = objectAt(publicReleasePolicy, "gameContentRights");
-  assert.equal(gameContent.approved, false);
-  assert.deepEqual(gameContent.confirmedScopes, []);
-  assert.equal(
-    gameContentAuthorization.status,
-    "owner-attested-pending-source-evidence-review",
-  );
   assert.equal(gameContentAuthorization.ownerAttestationReceived, true);
-  assert.equal(gameContentAuthorization.sourceDocumentReviewed, false);
-  assert.equal(gameContentAuthorization.legalReviewApproved, false);
-  assert.equal(gameContentAuthorization.manualReviewRequired, true);
+  if (gameContent.approved === true) {
+    assert.equal(gameContentAuthorization.status, "approved-for-public-release");
+    assert.equal(gameContentAuthorization.approved, true);
+    assert.equal(gameContentAuthorization.sourceDocumentReviewed, true);
+    assert.equal(gameContentAuthorization.legalReviewApproved, true);
+    assert.equal(gameContentAuthorization.manualReviewRequired, false);
+    assert.deepEqual(
+      new Set(gameContent.confirmedScopes as string[]),
+      new Set(gameContent.requiredScopes as string[]),
+    );
+    assert.deepEqual(
+      new Set(gameContentAuthorization.approvedScopes as string[]),
+      new Set(gameContent.requiredScopes as string[]),
+    );
+  } else {
+    assert.equal(gameContent.approved, false);
+    assert.deepEqual(gameContent.confirmedScopes, []);
+    assert.equal(
+      gameContentAuthorization.status,
+      "owner-attested-pending-source-evidence-review",
+    );
+    assert.equal(gameContentAuthorization.sourceDocumentReviewed, false);
+    assert.equal(gameContentAuthorization.legalReviewApproved, false);
+    assert.equal(gameContentAuthorization.manualReviewRequired, true);
+  }
   assert.equal(
     gameContent.verifier,
     "scripts/assets/verify-valorant-assets.mjs",
@@ -496,6 +535,54 @@ test("public release preflight covers every non-bundle approval domain", () => {
     objectAt(publicReleasePolicy, "authenticode").signtoolVerificationRequired,
     true,
   );
+  for (const field of ["cleanVmValidation", "dataSafety"]) {
+    const section = objectAt(publicReleasePolicy, field);
+    assert.equal(section.evidenceSource, "protected-external-archive");
+    assert.equal("sourceCommit" in section, false);
+    assert.equal("approved" in section, false);
+    assert.equal("approvalReference" in section, false);
+  }
+  const cleanVmValidation = objectAt(publicReleasePolicy, "cleanVmValidation");
+  const requiredCleanVmScenarios = [
+    "fresh-install-webview2-present",
+    "fresh-install-webview2-missing-online",
+    "fresh-install-webview2-missing-offline",
+    "windows-10-x64",
+    "windows-11-x64",
+    "dpi-100-percent",
+    "dpi-150-percent",
+    "dpi-200-percent",
+    "minimum-window-760x560",
+    "nvidia-real-output-import-rescan-startup-preview-review",
+    "tracker-real-output-import-rescan-startup-preview-review",
+    "same-source-subdirectory-rename-auto-reconnect-user-state-preserved",
+    "source-root-relocation-user-state-preserved",
+    "kill-death-timeline-icons-tooltips-accessibility-and-seek",
+    "same-version-reinstall",
+    "v0.1.0-beta.1-manual-upgrade-to-v0.2.1",
+    "signed-updater-v0.2.1-to-v0.2.2-schema-v16-user-state-preserved",
+    "signed-updater-upgrade-to-higher-patch",
+    "downgrade-rejected",
+    "uninstall-user-data-preserved",
+    "packaged-ffmpeg-only",
+  ];
+  assert.deepEqual(cleanVmValidation.requiredScenarios, requiredCleanVmScenarios);
+  for (const code of requiredCleanVmScenarios) {
+    assert.match(publicReleasePreflight, new RegExp(code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  const dataSafety = objectAt(publicReleasePolicy, "dataSafety");
+  const requiredDataSafetyChecks = [
+    "source-media-readonly-default",
+    "index-only-removal-source-media-sha256-unchanged",
+    "permanent-delete-explicit-confirmation",
+    "application-data-boundary",
+    "uninstall-user-data-preserved",
+  ];
+  assert.deepEqual(dataSafety.requiredChecks, requiredDataSafetyChecks);
+  for (const code of requiredDataSafetyChecks) {
+    assert.match(publicReleasePreflight, new RegExp(code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
   assert.match(releaseWorkflow, /public-release-preflight\.ps1/);
   assert.match(releaseWorkflow, /public-release-preflight\.json/);
 });
@@ -513,6 +600,10 @@ test("minimal FFmpeg candidate is narrow, self-built, and cannot self-promote", 
     "--enable-demuxer=mov",
     "--enable-parser=h264",
     "--enable-decoder=h264",
+    "--enable-parser=hevc",
+    "--enable-decoder=hevc",
+    "--enable-parser=av1",
+    "--enable-decoder=av1",
     "--enable-filter=scale",
     "--enable-encoder=mjpeg",
     "--enable-muxer=image2",
@@ -527,6 +618,10 @@ test("minimal FFmpeg candidate is narrow, self-built, and cannot self-promote", 
     true,
   );
   const runtimeContract = objectAt(minimalFfmpegCandidate, "runtimeContract");
+  assert.deepEqual(
+    objectAt(runtimeContract, "requiredCapabilities").decoders,
+    ["h264", "hevc", "av1"],
+  );
   assert.equal(
     (runtimeContract.allowedSystemDllImports as string[]).includes("KERNEL32.dll"),
     true,
@@ -540,6 +635,26 @@ test("minimal FFmpeg candidate is narrow, self-built, and cannot self-promote", 
   );
   assert.equal(smokeBytes.includes(Buffer.from("avc1", "ascii")), true);
   assert.equal(smokeBytes.includes(Buffer.from("mp4v", "ascii")), false);
+  const additionalSmokeFixtures = runtimeContract.additionalSmokeFixtures as Array<Record<string, unknown>>;
+  assert.deepEqual(additionalSmokeFixtures.map((fixture) => fixture.codec), ["hevc", "av1"]);
+  for (const fixture of additionalSmokeFixtures) {
+    const fixtureBytes = Buffer.from(String(fixture.base64), "base64");
+    assert.equal(fixtureBytes.length, fixture.sizeBytes);
+    assert.equal(
+      createHash("sha256").update(fixtureBytes).digest("hex"),
+      fixture.sha256,
+    );
+  }
+  assert.equal(
+    Buffer.from(String(additionalSmokeFixtures[0].base64), "base64")
+      .includes(Buffer.from("hev1", "ascii")),
+    true,
+  );
+  assert.equal(
+    Buffer.from(String(additionalSmokeFixtures[1].base64), "base64")
+      .includes(Buffer.from("av01", "ascii")),
+    true,
+  );
   assert.match(minimalFfmpegBuildScript, /source checkout must be clean/);
   assert.match(minimalFfmpegBuildScript, /SOURCE_DATE_EPOCH/);
   assert.match(minimalFfmpegBuildScript, /Output directory must not already exist/);
@@ -548,6 +663,7 @@ test("minimal FFmpeg candidate is narrow, self-built, and cannot self-promote", 
   assert.match(minimalFfmpegVerifyScript, /Get-PeImportedDlls/);
   assert.match(minimalFfmpegVerifyScript, /SHA256SUMS\.txt/);
   assert.match(minimalFfmpegVerifyScript, /objdump imports do not match the Windows PE parser/);
+  assert.match(minimalFfmpegVerifyScript, /additionalSmokeFixtures/);
   assert.doesNotMatch(
     minimalFfmpegVerifyScript,
     /^\s*\$outputPath\s*=/im,
@@ -649,16 +765,35 @@ test("bundle gate proves NSIS format and all shipped compliance payload files", 
   assert.match(releaseWorkflow, /-FfmpegMode ResourceOverride/);
 });
 
-test("Windows startup smoke proves schema v13 and single-instance handoff", () => {
+test("Windows startup smoke proves schema v16 and single-instance handoff", () => {
   assert.match(
     releaseSmokeScript,
     /IsNullOrEmpty\(\$env:WEBVIEW2_USER_DATA_FOLDER\)[\s\S]*Refusing to inherit WEBVIEW2_USER_DATA_FOLDER[\s\S]*\$realDataBefore\s*=\s*Get-TreeFingerprint/,
   );
   assert.match(
     releaseSmokeScript,
+    /\$webView2Path\s*=\s*Join-Path \$smokeRoot 'webview2'[\s\S]*'WEBVIEW2_USER_DATA_FOLDER'\s*=\s*\$webView2Path[\s\S]*JobProcess\]::Start/,
+  );
+  assert.match(
+    releaseSmokeScript,
+    /sharedLaunchConfiguration[\s\S]*environmentOverrides[\s\S]*WEBVIEW2_USER_DATA_FOLDER\s*=\s*\[string\] \$childEnvironment\['WEBVIEW2_USER_DATA_FOLDER'\]/,
+  );
+  assert.match(
+    releaseSmokeScript,
     /IsNullOrWhiteSpace\(\$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS\)[\s\S]*Refusing to inherit WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS/,
   );
-  assert.match(releaseSmokeScript, /\$ExpectedSchemaVersion\s*=\s*13/);
+  assert.match(releaseSmokeScript, /\$ExpectedSchemaVersion\s*=\s*16/);
+  assert.match(
+    releaseWorkflow,
+    /smokeReport\.database\.schemaVersion\s+-ne\s+16/,
+  );
+  assert.doesNotMatch(releaseWorkflow, /fresh schema-v13 database/);
+  assert.match(releaseSmokeScript, /file_volume_serial/);
+  assert.match(releaseSmokeScript, /file_index_high/);
+  assert.match(releaseSmokeScript, /file_index_low/);
+  assert.match(releaseSmokeScript, /killed_is_me/);
+  assert.match(releaseSmokeScript, /summary_available/);
+  assert.match(releaseSmokeScript, /missing required columns/);
   assert.match(releaseSmokeScript, /clip_trash_snapshots/);
   assert.match(releaseSmokeScript, /trashSnapshotCount/);
   assert.match(releaseSmokeScript, /'clip_delete_intents'/);
@@ -678,6 +813,10 @@ test("Windows startup smoke proves schema v13 and single-instance handoff", () =
   assert.match(
     releaseWorkflow,
     /singleInstance\.sharedLaunchConfiguration\.environmentOverrides\.VHM_RELEASE_SMOKE_ROOT/,
+  );
+  assert.match(
+    releaseWorkflow,
+    /singleInstance\.sharedLaunchConfiguration\.environmentOverrides\.WEBVIEW2_USER_DATA_FOLDER[\s\S]*smokeReport\.runtime\.webView2UserDataPath/,
   );
   assert.doesNotMatch(releaseWorkflow, /singleInstance\.sharedSmokeRoot/);
 });

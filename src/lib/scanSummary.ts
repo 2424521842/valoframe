@@ -1,4 +1,4 @@
-import type { FullDriveScanResult, ScanSummary } from "../types";
+import type { FullDriveScanResult, ScanJobStatus, ScanSummary } from "../types";
 import { formatDateTime } from "./formatters";
 
 export const DEFAULT_ACLOS_MISSING_MESSAGE =
@@ -9,19 +9,40 @@ export function isDefaultAclosDirMissing(summary: ScanSummary): boolean {
 }
 
 export function scanActivityMessage(summary: ScanSummary): string {
-  if (isDefaultAclosDirMissing(summary)) {
-    return DEFAULT_ACLOS_MISSING_MESSAGE;
-  }
+  if (isDefaultAclosDirMissing(summary)) return DEFAULT_ACLOS_MISSING_MESSAGE;
 
   const baseMessage = `扫描完成：${formatDateTime(new Date().toISOString())}`;
-
-  if (!hasMetadataCounts(summary)) {
-    return baseMessage;
-  }
-
+  if (!hasMetadataCounts(summary)) return baseMessage;
   return `${baseMessage} · 元数据 ${summary.metadataMatchCount ?? 0} 场 / ${
     summary.metadataEnrichedClipCount ?? 0
   } 个片段`;
+}
+
+export function scanTerminalActivityMessage(
+  status: ScanJobStatus,
+  summary: ScanSummary | null | undefined,
+): string {
+  const count = summary ? summary.newClipCount.toLocaleString("zh-CN") : null;
+  switch (status) {
+    case "completed":
+      return count === null
+        ? "扫描完成：新增数量不可用"
+        : `扫描完成：新增 ${count} 个视频`;
+    case "partial":
+      return count === null
+        ? "扫描部分完成：新增数量不可用"
+        : `扫描部分完成：已安全新增 ${count} 个视频`;
+    case "cancelled":
+      return count === null
+        ? "扫描已取消：新增数量不可用"
+        : `扫描已取消：已安全新增 ${count} 个视频`;
+    case "failed":
+      return count === null
+        ? "扫描失败：新增数量不可用"
+        : `扫描失败：已安全新增 ${count} 个视频`;
+    default:
+      return "扫描新增数量不可用";
+  }
 }
 
 export function fullDriveDiscoveryActivityMessage(

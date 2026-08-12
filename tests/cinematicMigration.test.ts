@@ -21,9 +21,14 @@ const css = source("../src/cinematic.css");
 const mockData = source("../src/data/mockData.ts");
 
 test("the production app exposes the scan, library, and preview workspaces", () => {
-  assert.match(app, /useState<AppScreen>\("library"\)/);
+  assert.match(app, /const preferencesController = useAppPreferences\(\)/);
+  assert.match(
+    app,
+    /useState<AppScreen>\(\s*\(\) => startupNavigation\(preferences\.startupDestination\)\.screen/s,
+  );
   assert.match(app, /lazy\(\(\) =>\s*import\("\.\/screens\/LibraryWorkspace"\)/s);
   assert.match(app, /lazy\(\(\) =>\s*import\("\.\/screens\/PreviewWorkspace"\)/s);
+  assert.match(app, /lazy\(\(\) =>\s*import\("\.\/screens\/SettingsWorkspace"\)/s);
   assert.match(app, /<Suspense fallback=\{<WorkspaceLoading \/>\}>/);
   assert.match(app, /activeScreen === "library"/);
   assert.match(app, /activeScreen === "scan"/);
@@ -139,7 +144,10 @@ test("library animation keeps its visual effects while isolating offscreen and r
 });
 
 test("scan workspace is connected to the existing backend operations", () => {
-  assert.match(scan, /onClick=\{onAddDirectory\}/);
+  assert.match(scan, /setIsSourceWizardOpen\(true\)/);
+  assert.match(scan, /<SourceWizardDialog/);
+  assert.match(scan, /onClick=\{onSyncEnabledSources\}/);
+  assert.match(scan, /onSyncSource\(directory\.source/);
   assert.match(scan, /onClick=\{onDiscoverAll\}/);
   assert.match(scan, /onClick=\{onStartScan\}/);
   assert.match(scan, /aria-label="全部扫描目录"/);
@@ -156,7 +164,12 @@ test("scan workspace is connected to the existing backend operations", () => {
 test("preview keeps interactive timeline flags without restoring the event list", () => {
   assert.match(preview, /clip\?\.clipEvents/);
   assert.match(preview, /preview-timeline-flag/);
-  assert.match(preview, /onClick=\{\(\) => seekTo\(event\.videoTimeMs \/ 1000\)\}/);
+  assert.match(preview, /onClick=\{\(\) => seekTo\(eventSeconds\)\}/);
+  assert.match(preview, /previewTimelineMarkerMode\(clip\)/);
+  assert.match(preview, /eventType === "kill" && event\.killerIsMe/);
+  assert.match(preview, /eventType === "death" && event\.killedIsMe/);
+  assert.match(preview, /<Crosshair[^>]*preview-timeline-icon--kill/);
+  assert.match(preview, /<Skull[^>]*preview-timeline-icon--death/);
   assert.doesNotMatch(preview, /preview-event-list|事件标记|event-row/);
   assert.match(mockData, /id: "clip-1-kill-1"/);
   assert.match(mockData, /videoTimeMs: 17_800/);

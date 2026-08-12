@@ -3,7 +3,7 @@ use std::{collections::HashSet, path::Path, process::Command};
 use tauri::State;
 
 use super::media_protocol::{get_clip_media_for_database, FILE_NOT_FOUND_MESSAGE};
-use crate::{db, AppState};
+use crate::{critical_tasks::CriticalTaskKind, db, AppState};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +42,26 @@ pub struct PermanentDeleteResult {
     pub failures: Vec<PermanentDeleteFailure>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexRemovalProblem {
+    pub clip_id: i64,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveClipsFromIndexResult {
+    pub requested: usize,
+    pub removed_ids: Vec<i64>,
+    pub missing_ids: Vec<i64>,
+    pub blocked: Vec<IndexRemovalProblem>,
+    pub failures: Vec<IndexRemovalProblem>,
+}
+
+const MAX_INDEX_REMOVAL_CLIP_IDS: usize = 200;
+
 #[tauri::command]
 /// Legacy compatibility command. The paginated production replacement is `list_clip_page`.
 pub fn list_clips(state: State<'_, AppState>) -> Result<Vec<db::Clip>, String> {
@@ -56,6 +76,42 @@ pub fn list_clip_page(
 ) -> Result<db::ClipPage, String> {
     let connection = db::open_database_read_only(&state.database_path)?;
     db::list_clip_page(&connection, &query)
+}
+
+#[tauri::command]
+pub fn list_review_clip_page(
+    state: State<'_, AppState>,
+    query: db::ReviewQueueQuery,
+) -> Result<db::ReviewClipPage, String> {
+    let connection = db::open_database_read_only(&state.database_path)?;
+    db::list_review_clip_page(&connection, &query)
+}
+
+#[tauri::command]
+pub fn set_clip_review_decision(
+    state: State<'_, AppState>,
+    clip_id: i64,
+    decision: db::ReviewDecision,
+) -> Result<db::ClipReviewMutationResult, String> {
+    set_clip_review_decision_for_database(&state.database_path, clip_id, decision)
+}
+
+#[tauri::command]
+pub fn reset_clip_review_decision(
+    state: State<'_, AppState>,
+    clip_id: i64,
+) -> Result<db::ClipReviewMutationResult, String> {
+    reset_clip_review_decision_for_database(&state.database_path, clip_id)
+}
+
+#[tauri::command]
+pub fn restore_clip_review_state(
+    state: State<'_, AppState>,
+    clip_id: i64,
+    expected_current: db::ClipReviewState,
+    restore: db::ClipReviewState,
+) -> Result<db::ClipReviewMutationResult, String> {
+    restore_clip_review_state_for_database(&state.database_path, clip_id, expected_current, restore)
 }
 
 #[tauri::command]
@@ -168,7 +224,23 @@ pub fn set_clips_trashed(
 
 #[tauri::command]
 pub fn remove_clip_from_index(state: State<'_, AppState>, clip_id: i64) -> Result<(), String> {
-    remove_clip_from_index_for_database(&state.database_path, clip_id)
+    remove_clip_from_index_for_database(&state.database_path, clip_id)?;
+    // The clip row cascades its thumbnail index row. Wake the existing reconciler so its bounded
+    // cache maintainer can discard the now-unreferenced generated JPEG; it never touches videos.
+    state.thumbnail_queue.reconcile_and_wake();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_clips_from_index(
+    state: State<'_, AppState>,
+    clip_ids: Vec<i64>,
+) -> Result<RemoveClipsFromIndexResult, String> {
+    let result = remove_clips_from_index_for_database(&state.database_path, &clip_ids)?;
+    if !result.removed_ids.is_empty() {
+        state.thumbnail_queue.reconcile_and_wake();
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -176,6 +248,10 @@ pub fn delete_clips_permanently(
     state: State<'_, AppState>,
     clip_ids: Vec<i64>,
 ) -> Result<PermanentDeleteResult, String> {
+    let _critical_task = state
+        .critical_tasks
+        .enter(CriticalTaskKind::PermanentDelete)
+        .map_err(str::to_string)?;
     let result = delete_clips_permanently_for_database(&state.database_path, &clip_ids)?;
     if !result.deleted_ids.is_empty() {
         state.thumbnail_queue.reconcile_and_wake();
@@ -242,6 +318,11 @@ pub fn open_clip_location(state: State<'_, AppState>, clip_id: i64) -> Result<()
 }
 
 #[tauri::command]
+pub fn open_clip_externally(state: State<'_, AppState>, clip_id: i64) -> Result<(), String> {
+    open_clip_externally_for_database(&state.database_path, clip_id, open_with_default_player)
+}
+
+#[tauri::command]
 pub fn copy_clip_path(state: State<'_, AppState>, clip_id: i64) -> Result<String, String> {
     copy_clip_path_for_database(&state.database_path, clip_id)
 }
@@ -273,6 +354,54 @@ pub(crate) fn copy_clip_path_for_database(
     let clip = db::find_clip_media_paths_by_id(&connection, clip_id)?;
 
     Ok(clip.video_path)
+}
+
+pub(crate) fn open_clip_externally_for_database<F>(
+    database_path: impl AsRef<Path>,
+    clip_id: i64,
+    open: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    let connection = db::open_database_read_only(database_path)?;
+    let target = db::find_clip_file_target_by_id(&connection, clip_id)?
+        .ok_or_else(|| format!("素材不存在：{clip_id}"))?;
+    if target.file_status != "available" {
+        return Err("只有可用素材才能交给系统播放器".to_string());
+    }
+    if !target.extension.eq_ignore_ascii_case("mp4")
+        || !Path::new(&target.video_path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+    {
+        return Err("系统播放器回退仅允许已索引的 MP4 文件".to_string());
+    }
+
+    let source_root = Path::new(&target.source_dir_path);
+    let source_metadata = std::fs::symlink_metadata(source_root)
+        .map_err(|error| format!("来源目录不可用：{error}"))?;
+    if !source_metadata.is_dir() || metadata_is_reparse_point(&source_metadata) {
+        return Err("来源目录不可用或已变为 reparse point".to_string());
+    }
+    let clip_path = Path::new(&target.video_path);
+    let clip_metadata =
+        std::fs::symlink_metadata(clip_path).map_err(|_| FILE_NOT_FOUND_MESSAGE.to_string())?;
+    if !clip_metadata.is_file() || metadata_is_reparse_point(&clip_metadata) {
+        return Err("视频路径不是普通文件".to_string());
+    }
+    let canonical_root = source_root
+        .canonicalize()
+        .map_err(|error| format!("无法验证来源目录：{error}"))?;
+    let canonical_clip = clip_path
+        .canonicalize()
+        .map_err(|_| FILE_NOT_FOUND_MESSAGE.to_string())?;
+    if canonical_clip == canonical_root || !canonical_clip.starts_with(&canonical_root) {
+        return Err("视频路径已越出已授权来源目录".to_string());
+    }
+    ensure_non_reparse_path_chain(&canonical_clip, &canonical_root)?;
+    open(&canonical_clip)
 }
 
 pub(crate) fn list_tags_for_database(
@@ -318,6 +447,36 @@ pub(crate) fn set_clip_favorite_for_database(
     single_clip_from_batch(result, "updating favorite", clip_id)
 }
 
+pub(crate) fn set_clip_review_decision_for_database(
+    database_path: impl AsRef<Path>,
+    clip_id: i64,
+    decision: db::ReviewDecision,
+) -> Result<db::ClipReviewMutationResult, String> {
+    let connection = db::open_database(database_path)?;
+    db::set_clip_review_decision(&connection, clip_id, decision)
+}
+
+pub(crate) fn reset_clip_review_decision_for_database(
+    database_path: impl AsRef<Path>,
+    clip_id: i64,
+) -> Result<db::ClipReviewMutationResult, String> {
+    let connection = db::open_database(database_path)?;
+    db::reset_clip_review_decision(&connection, clip_id)
+}
+
+pub(crate) fn restore_clip_review_state_for_database(
+    database_path: impl AsRef<Path>,
+    clip_id: i64,
+    expected_current: db::ClipReviewState,
+    restore: db::ClipReviewState,
+) -> Result<db::ClipReviewMutationResult, String> {
+    if expected_current.clip_id != clip_id || restore.clip_id != clip_id {
+        return Err("clip review restore state belongs to a different clip".to_string());
+    }
+    let connection = db::open_database(database_path)?;
+    db::restore_clip_review_state(&connection, &expected_current, &restore)
+}
+
 pub(crate) fn set_clips_favorite_for_database(
     database_path: impl AsRef<Path>,
     clip_ids: &[i64],
@@ -350,7 +509,57 @@ pub(crate) fn remove_clip_from_index_for_database(
     clip_id: i64,
 ) -> Result<(), String> {
     let connection = db::open_database(database_path)?;
-    db::delete_clip_from_index_guarded(&connection, clip_id)
+    match db::delete_clip_from_index_guarded(&connection, clip_id)? {
+        db::ClipIndexRemovalOutcome::Removed => Ok(()),
+        db::ClipIndexRemovalOutcome::Missing => {
+            Err(format!("clip-not-found: 素材 {clip_id} 不存在"))
+        }
+        db::ClipIndexRemovalOutcome::Blocked(problem) => {
+            Err(format!("{}: {}", problem.code, problem.message))
+        }
+    }
+}
+
+pub(crate) fn remove_clips_from_index_for_database(
+    database_path: impl AsRef<Path>,
+    clip_ids: &[i64],
+) -> Result<RemoveClipsFromIndexResult, String> {
+    let connection = db::open_database(database_path)?;
+    let mut seen = HashSet::with_capacity(clip_ids.len());
+    let unique_clip_ids = clip_ids
+        .iter()
+        .copied()
+        .filter(|clip_id| seen.insert(*clip_id))
+        .collect::<Vec<_>>();
+    if unique_clip_ids.len() > MAX_INDEX_REMOVAL_CLIP_IDS {
+        return Err(format!(
+            "仅移除索引命令最多接受 {MAX_INDEX_REMOVAL_CLIP_IDS} 个不同的素材 ID"
+        ));
+    }
+
+    let mut result = RemoveClipsFromIndexResult {
+        requested: unique_clip_ids.len(),
+        ..RemoveClipsFromIndexResult::default()
+    };
+    for clip_id in unique_clip_ids {
+        match db::delete_clip_from_index_guarded(&connection, clip_id) {
+            Ok(db::ClipIndexRemovalOutcome::Removed) => result.removed_ids.push(clip_id),
+            Ok(db::ClipIndexRemovalOutcome::Missing) => result.missing_ids.push(clip_id),
+            Ok(db::ClipIndexRemovalOutcome::Blocked(problem)) => {
+                result.blocked.push(IndexRemovalProblem {
+                    clip_id,
+                    code: problem.code,
+                    message: problem.message,
+                });
+            }
+            Err(message) => result.failures.push(IndexRemovalProblem {
+                clip_id,
+                code: "database-error".to_string(),
+                message,
+            }),
+        }
+    }
+    Ok(result)
 }
 
 pub(crate) fn delete_clips_permanently_for_database(
@@ -478,5 +687,78 @@ fn reveal_clip_in_explorer(clip_path: &Path) -> Result<(), String> {
     {
         let _ = clip_path;
         Err("打开文件位置仅支持 Windows 文件资源管理器".to_string())
+    }
+}
+
+fn ensure_non_reparse_path_chain(path: &Path, root: &Path) -> Result<(), String> {
+    let mut cursor = Some(path);
+    while let Some(current) = cursor {
+        let metadata = std::fs::symlink_metadata(current)
+            .map_err(|error| format!("无法验证视频路径：{error}"))?;
+        if metadata_is_reparse_point(&metadata) {
+            return Err("视频路径链包含符号链接或 reparse point".to_string());
+        }
+        if current == root {
+            return Ok(());
+        }
+        cursor = current.parent();
+    }
+    Err("视频路径不属于已授权来源目录".to_string())
+}
+
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+    }
+
+    #[cfg(not(windows))]
+    false
+}
+
+fn open_with_default_player(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::{ffi::OsStr, os::windows::ffi::OsStrExt, ptr};
+        use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+
+        let operation = OsStr::new("open")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let file = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let result = unsafe {
+            ShellExecuteW(
+                ptr::null_mut(),
+                operation.as_ptr(),
+                file.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if result as isize <= 32 {
+            return Err(format!(
+                "系统默认播放器启动失败（ShellExecuteW={result:?}）"
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err("系统默认播放器回退当前仅支持 Windows".to_string())
     }
 }

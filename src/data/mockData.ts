@@ -6,6 +6,9 @@ export const mockSourceDirs: SourceDir[] = [
     name: "排位高光",
     displayName: "排位高光",
     path: "C:\\Users\\Player\\Videos\\Valorant\\Ranked",
+    sourceKind: "generic",
+    scanMode: "recursive-mp4",
+    scanRootPath: "C:\\Users\\Player\\Videos\\Valorant\\Ranked",
     enabled: true,
     status: "available",
     accessibility: true,
@@ -18,6 +21,9 @@ export const mockSourceDirs: SourceDir[] = [
     name: "手动导入",
     displayName: "手动导入",
     path: "D:\\Clips\\Valorant",
+    sourceKind: "generic",
+    scanMode: "recursive-mp4",
+    scanRootPath: "D:\\Clips\\Valorant",
     enabled: true,
     status: "available",
     accessibility: true,
@@ -30,6 +36,9 @@ export const mockSourceDirs: SourceDir[] = [
     name: "备份素材",
     displayName: "备份素材",
     path: "E:\\Archive\\Valorant Highlights",
+    sourceKind: "generic",
+    scanMode: "recursive-mp4",
+    scanRootPath: "E:\\Archive\\Valorant Highlights",
     enabled: true,
     status: "available",
     accessibility: true,
@@ -49,7 +58,17 @@ export const mockTags: Tag[] = [
   { id: "teamplay", label: "配合", color: "green" },
 ];
 
-export const mockClips: Clip[] = [
+type MockClipFixture = Omit<
+  Clip,
+  | "sourceKind"
+  | "scanMode"
+  | "scanRootPath"
+  | "sourceRelativeDir"
+  | "reviewDecision"
+  | "reviewedAt"
+>;
+
+const mockClipFixtures: MockClipFixture[] = [
   {
     id: "clip-1",
     fileName: "clip_20260702_223408.mp4",
@@ -100,6 +119,7 @@ export const mockClips: Clip[] = [
         killerName: "FixtureAlpha#0001",
         killedName: "EnemyJett",
         killerIsMe: true,
+        killedIsMe: false,
       },
       {
         id: "clip-1-kill-2",
@@ -112,6 +132,7 @@ export const mockClips: Clip[] = [
         killerName: "FixtureAlpha#0001",
         killedName: "EnemyOmen",
         killerIsMe: true,
+        killedIsMe: false,
       },
       {
         id: "clip-1-assist-1",
@@ -124,6 +145,7 @@ export const mockClips: Clip[] = [
         killerName: "TeamSova",
         killedName: "EnemySage",
         killerIsMe: false,
+        killedIsMe: false,
       },
     ],
     thumbnailTone: "red",
@@ -435,3 +457,18 @@ export const mockClips: Clip[] = [
     thumbnailUrl: null,
   },
 ];
+
+export const mockClips: Clip[] = mockClipFixtures.map((clip) => {
+  const source = mockSourceDirs.find(
+    (candidate) => candidate.id === clip.sourceDirId,
+  );
+  return {
+    ...clip,
+    sourceKind: source?.sourceKind ?? "generic",
+    scanMode: source?.scanMode ?? "recursive-mp4",
+    scanRootPath: source?.scanRootPath ?? clip.sourceDirPath,
+    sourceRelativeDir: "",
+    reviewDecision: clip.isFavorite ? "liked" : "unreviewed",
+    reviewedAt: clip.isFavorite ? clip.modifiedAt : null,
+  };
+});

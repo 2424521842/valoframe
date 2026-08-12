@@ -159,6 +159,20 @@ pub fn list_active_clip_paths_for_source(
     Ok(paths)
 }
 
+pub fn find_clip_source_id_by_normalized_path(
+    connection: &Connection,
+    normalized_path: &str,
+) -> DbResult<Option<i64>> {
+    connection
+        .query_row(
+            "SELECT source_dir_id FROM clips WHERE normalized_path = ?1",
+            params![normalized_path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| readable_error("reading clip source ownership", error))
+}
+
 pub fn mark_clip_missing_by_normalized_path(
     connection: &Connection,
     normalized_path: &str,

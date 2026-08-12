@@ -1485,6 +1485,266 @@ fn multiple_segment_key_collisions_receive_unique_keys() {
 }
 
 #[test]
+fn ingests_relative_and_absolute_times_and_rebuilds_killed_state_on_rescan() {
+    let connection = Connection::open_in_memory().expect("database should open");
+    db::initialize_schema(&connection).expect("schema should initialize");
+    let ordinary_path = r"D:\synthetic\wonderfulVideos1001\timeline-rescan\ordinary.mp4";
+    let death_path = r"D:\synthetic\wonderfulVideos1001\timeline-rescan\death.mp4";
+    let ordinary_clip_id = insert_indexed_clip(
+        &connection,
+        "1001",
+        "timeline-rescan",
+        ordinary_path,
+        "ordinary.mp4",
+    );
+    let death_clip_id = insert_indexed_clip(
+        &connection,
+        "1001",
+        "timeline-rescan",
+        death_path,
+        "death.mp4",
+    );
+    let initial_fixture = format!(
+        r#"
+        {{
+          "key_wonderful_list_1001":[{{
+            "matches_id":"timeline-rescan",
+            "videos":[
+              {{
+                "video_id":"ordinary",
+                "video_name":"普通高光",
+                "highLightType":1,
+                "video_src":"{}",
+                "round_clips":[{{
+                  "clip_id":"ordinary-segment",
+                  "clip_sTime":1000,
+                  "clip_duration":8000,
+                  "clip_events":[{{
+                    "event_id":"ordinary-kill",
+                    "event_type":"kill",
+                    "event_sTime":500,
+                    "KilledIsMe":false,
+                    "event_ext":{{"KillerIsMe":1}}
+                  }}]
+                }}]
+              }},
+              {{
+                "video_id":"death",
+                "video_name":"死亡集锦",
+                "highLightType":3,
+                "video_src":"{}",
+                "round_clips":[{{
+                  "clip_id":"death-segment",
+                  "clip_sTime":3000,
+                  "clip_duration":6000,
+                  "clip_events":[{{
+                    "event_id":"self-death",
+                    "event_type":"death",
+                    "event_sTime":1500,
+                    "event_ext":{{"KilledIsMe":"1"}}
+                  }}]
+                }}]
+              }}
+            ]
+          }}]
+        }}
+        "#,
+        ordinary_path.replace('\\', "\\\\"),
+        death_path.replace('\\', "\\\\"),
+    );
+    let initial = vec![WonderfulAccountRecord {
+        openid: "1001".to_string(),
+        matches: parse_wonderful_db_text("1001", &initial_fixture)
+            .expect("real-shaped timeline fixture should parse"),
+    }];
+
+    let first_summary = ingest_wonderful_metadata(&connection, &initial)
+        .expect("initial timeline ingest should succeed");
+    assert_eq!(first_summary.warning_count, 0);
+    let ordinary_event = db::list_clip_events_for_clip(&connection, ordinary_clip_id)
+        .expect("ordinary event should load")
+        .pop()
+        .expect("ordinary event should exist");
+    let death_event = db::list_clip_events_for_clip(&connection, death_clip_id)
+        .expect("death event should load")
+        .pop()
+        .expect("death event should exist");
+    assert_eq!(ordinary_event.video_time_ms, Some(1_500));
+    assert_eq!(ordinary_event.killed_is_me, Some(false));
+    assert_eq!(death_event.video_time_ms, Some(1_500));
+    assert_eq!(death_event.killed_is_me, Some(true));
+
+    let rescanned_fixture = initial_fixture
+        .replace(r#""event_sTime":1500"#, r#""event_sTime":1600"#)
+        .replace(r#""KilledIsMe":"1""#, r#""KilledIsMe":"0""#);
+    let rescanned = vec![WonderfulAccountRecord {
+        openid: "1001".to_string(),
+        matches: parse_wonderful_db_text("1001", &rescanned_fixture)
+            .expect("rescanned timeline fixture should parse"),
+    }];
+    ingest_wonderful_metadata(&connection, &rescanned)
+        .expect("rescanned timeline should replace old state");
+
+    let death_events = db::list_clip_events_for_clip(&connection, death_clip_id)
+        .expect("rescanned death event should load");
+    assert_eq!(death_events.len(), 1);
+    assert_eq!(death_events[0].video_time_ms, Some(1_600));
+    assert_eq!(death_events[0].killed_is_me, Some(false));
+}
+
+#[test]
+fn reports_bounded_ingest_warnings_and_persists_unknown_flags_and_times() {
+    let connection = Connection::open_in_memory().expect("database should open");
+    db::initialize_schema(&connection).expect("schema should initialize");
+    let clip_path = r"D:\synthetic\wonderfulVideos1001\timeline-warnings\warnings.mp4";
+    let clip_id = insert_indexed_clip(
+        &connection,
+        "1001",
+        "timeline-warnings",
+        clip_path,
+        "warnings.mp4",
+    );
+    let events = (0..25)
+        .map(|index| {
+            format!(
+                r#"{{"event_id":"warning-{index}","event_type":"death","event_sTime":2000,"KilledIsMe":2}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let fixture = format!(
+        r#"
+        {{
+          "key_wonderful_list_1001":[{{
+            "matches_id":"timeline-warnings",
+            "videos":[{{
+              "video_id":"warnings",
+              "video_name":"死亡集锦",
+              "highLightType":3,
+              "video_src":"{}",
+              "round_clips":[{{
+                "clip_id":"warning-segment",
+                "clip_sTime":0,
+                "clip_duration":1000,
+                "clip_events":[{events}]
+              }}]
+            }}]
+          }}]
+        }}
+        "#,
+        clip_path.replace('\\', "\\\\"),
+    );
+    let accounts = vec![WonderfulAccountRecord {
+        openid: "1001".to_string(),
+        matches: parse_wonderful_db_text("1001", &fixture).expect("warning fixture should parse"),
+    }];
+
+    let summary = ingest_wonderful_metadata(&connection, &accounts)
+        .expect("warning timeline should ingest without clipping");
+
+    assert_eq!(summary.warning_count, 50);
+    assert_eq!(summary.warnings.len(), 20);
+    assert!(summary
+        .warnings
+        .iter()
+        .any(|warning| warning.ends_with("invalid-top-level-killed-is-me")));
+    assert!(summary
+        .warnings
+        .iter()
+        .any(|warning| warning.ends_with("video-time-out-of-bounds")));
+    let stored =
+        db::list_clip_events_for_clip(&connection, clip_id).expect("warning events should load");
+    assert_eq!(stored.len(), 25);
+    assert!(stored
+        .iter()
+        .all(|event| event.video_time_ms.is_none() && event.killed_is_me == Some(false)));
+}
+
+#[test]
+fn uses_indexed_duration_when_wonderful_segments_do_not_provide_one() {
+    let connection = Connection::open_in_memory().expect("database should open");
+    db::initialize_schema(&connection).expect("schema should initialize");
+    let clip_path = r"D:\synthetic\wonderfulVideos1001\timeline-indexed-duration\duration.mp4";
+    let clip_id = insert_indexed_clip(
+        &connection,
+        "1001",
+        "timeline-indexed-duration",
+        clip_path,
+        "duration.mp4",
+    );
+    connection
+        .execute(
+            "UPDATE clips SET duration_ms = 1000 WHERE id = ?1",
+            params![clip_id],
+        )
+        .expect("indexed duration should seed");
+    let fixture = format!(
+        r#"
+        {{
+          "key_wonderful_list_1001":[{{
+            "matches_id":"timeline-indexed-duration",
+            "videos":[{{
+              "video_id":"duration",
+              "video_name":"击杀集锦",
+              "highLightType":2,
+              "video_src":"{}",
+              "round_clips":[{{
+                "clip_sTime":500,
+                "clip_events":[{{
+                  "event_id":"too-late",
+                  "event_type":"kill",
+                  "event_sTime":1500
+                }}]
+              }}]
+            }}]
+          }}]
+        }}
+        "#,
+        clip_path.replace('\\', "\\\\"),
+    );
+    let accounts = vec![WonderfulAccountRecord {
+        openid: "1001".to_string(),
+        matches: parse_wonderful_db_text("1001", &fixture)
+            .expect("duration fallback fixture should parse"),
+    }];
+
+    let summary = ingest_wonderful_metadata(&connection, &accounts)
+        .expect("indexed duration should validate Wonderful events");
+
+    assert_eq!(summary.warning_count, 1);
+    assert!(summary.warnings[0].ends_with("video-time-out-of-bounds"));
+    let event = db::list_clip_events_for_clip(&connection, clip_id)
+        .expect("validated event should load")
+        .pop()
+        .expect("validated event should exist");
+    assert_eq!(event.video_time_ms, None);
+}
+
+#[test]
+fn fallback_event_hash_distinguishes_killed_is_me_state() {
+    let connection = Connection::open_in_memory().expect("database should open");
+    db::initialize_schema(&connection).expect("schema should initialize");
+    let clip_path = r"D:\synthetic\wonderfulVideos1001\timeline-hash\hash.mp4";
+    let clip_id = insert_indexed_clip(&connection, "1001", "timeline-hash", clip_path, "hash.mp4");
+    let mut self_death = event_without_id("Player#1001", 1_500, 7);
+    self_death.event_type = "death".to_string();
+    self_death.killed_is_me = Some(true);
+    let mut other_death = self_death.clone();
+    other_death.killed_is_me = Some(false);
+    let mut video = video_record("hash", "死亡集锦", "3", Some(clip_path), 0);
+    video.segments[0].events = vec![self_death, other_death];
+    let accounts = vec![account_with_videos("1001", "timeline-hash", vec![video])];
+
+    ingest_wonderful_metadata(&connection, &accounts)
+        .expect("events differing only by killed state should ingest");
+
+    let events =
+        db::list_clip_events_for_clip(&connection, clip_id).expect("hashed events should load");
+    assert_eq!(events.len(), 2);
+    assert_ne!(events[0].event_key, events[1].event_key);
+}
+
+#[test]
 fn ingests_official_rounds_shape_with_six_kills_score_and_title() {
     let connection = Connection::open_in_memory().expect("database should open");
     db::initialize_schema(&connection).expect("schema should initialize");
@@ -1789,6 +2049,8 @@ fn video_record(
                     killer_name: Some("Player#1001".to_string()),
                     killed_name: Some(format!("Opponent#{index:04}")),
                     killer_is_me: true,
+                    killed_is_me: None,
+                    normalization_warnings: Vec::new(),
                     raw_json: format!(r#"{{"video":"{video_id}","event":{index}}}"#),
                 })
                 .collect(),
@@ -1839,6 +2101,8 @@ fn event_without_id(killed_name: &str, video_time_ms: i64, round_id: i64) -> Won
         killer_name: Some("Player#1001".to_string()),
         killed_name: Some(killed_name.to_string()),
         killer_is_me: true,
+        killed_is_me: None,
+        normalization_warnings: Vec::new(),
         raw_json: format!(r#"{{"killed":"{killed_name}"}}"#),
     }
 }

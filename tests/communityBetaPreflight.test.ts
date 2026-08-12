@@ -32,6 +32,9 @@ test("accepts a fully disclosed, unsigned community beta without public-release 
     assert.equal(output.strictPublicReleaseApproved, false);
     assert.equal(output.publicReleasePolicyReady, false);
     assert.equal(output.updater.enabled, false);
+    assert.equal(output.updater.cargoPluginPresent, true);
+    assert.equal(output.updater.publicKeyEmbedded, false);
+    assert.equal(output.updater.tauriPluginBootstrapPresent, true);
     assert.equal(output.updater.createUpdaterArtifacts, false);
     assert.equal(output.gameContent.assetCount, 42);
     assert.equal(output.gameContent.thirdPartyApprovalClaimed, false);
@@ -152,7 +155,7 @@ test("binds the Community Beta game-content scope to the exact manifest and asse
   });
 });
 
-test("rejects updater enablement in npm, Cargo, Tauri config, or updater artifacts", () => {
+test("permits only the dormant Cargo updater runtime in Community Beta", () => {
   const cases: Array<[string, (root: string) => void]> = [
     [
       "npm manifest",
@@ -169,19 +172,24 @@ test("rejects updater enablement in npm, Cargo, Tauri config, or updater artifac
         }),
     ],
     [
-      "Cargo",
-      (root) =>
-        writeText(
-          root,
-          "src-tauri/Cargo.toml",
-          `${readText(root, "src-tauri/Cargo.toml")}tauri-plugin-updater = "2"\n`,
-        ),
-    ],
-    [
-      "Tauri plugin",
+      "Tauri updater endpoint",
       (root) =>
         mutateJson(root, "src-tauri/tauri.conf.json", (value) => {
-          value.plugins = { updater: { endpoints: ["https://example.invalid/update.json"] } };
+          value.plugins.updater.endpoints = ["https://example.invalid/update.json"];
+        }),
+    ],
+    [
+      "Tauri updater null bootstrap",
+      (root) =>
+        mutateJson(root, "src-tauri/tauri.conf.json", (value) => {
+          value.plugins.updater = null;
+        }),
+    ],
+    [
+      "Tauri updater embedded public key",
+      (root) =>
+        mutateJson(root, "src-tauri/tauri.conf.json", (value) => {
+          value.plugins.updater.pubkey = "forbidden-in-community-beta";
         }),
     ],
     [
@@ -208,6 +216,20 @@ test("rejects updater enablement in npm, Cargo, Tauri config, or updater artifac
       assert.match(result.stderr, /updater/i);
     });
   }
+
+  withFixture((root) => {
+    writeText(
+      root,
+      "src-tauri/Cargo.toml",
+      readText(root, "src-tauri/Cargo.toml").replace(
+        'tauri-plugin-updater = "2"\n',
+        "",
+      ),
+    );
+    const result = runPreflight(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /dormant tauri-plugin-updater runtime/i);
+  });
 });
 
 test("requires every community-beta disclosure, including the unofficial disclaimer", () => {
@@ -305,14 +327,19 @@ function createFixture(root: string) {
   writeJson(root, "src-tauri/tauri.conf.json", {
     productName: "Fixture",
     version: "0.1.0",
+    plugins: { updater: { pubkey: "" } },
     bundle: { icon: ["icons/icon.ico"] },
   });
   writeText(
     root,
     "src-tauri/Cargo.toml",
-    '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\ntauri = "2"\n',
+    '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\ntauri = "2"\ntauri-plugin-updater = "2"\n',
   );
-  writeText(root, "src-tauri/Cargo.lock", 'version = 4\n\n[[package]]\nname = "tauri"\nversion = "2.0.0"\n');
+  writeText(
+    root,
+    "src-tauri/Cargo.lock",
+    'version = 4\n\n[[package]]\nname = "tauri"\nversion = "2.0.0"\n\n[[package]]\nname = "tauri-plugin-updater"\nversion = "2.0.0"\n',
+  );
   writeText(root, "src-tauri/icons/icon.ico", "fixture-icon");
   writeText(root, "src-tauri/resources/licenses/ffmpeg/LICENSE.txt", "fixture license");
   writeText(root, "src-tauri/resources/licenses/ffmpeg/SOURCE-OFFER.md", "fixture source availability");

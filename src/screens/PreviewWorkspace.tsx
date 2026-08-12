@@ -1,9 +1,9 @@
 import {
   ArrowLeft,
+  ArrowSquareOut,
   Check,
   Copy,
   Crosshair,
-  Flag,
   FolderOpen,
   Heart,
   Pause,
@@ -12,6 +12,7 @@ import {
   Plus,
   SpeakerHigh,
   SpeakerSlash,
+  Skull,
   Tag as TagIcon,
   Timer,
   UserCircle,
@@ -20,7 +21,13 @@ import {
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { commandErrorMessage, displayHighlightTitle, getClipMedia } from "../api/backend";
 import { ThumbnailImage } from "../components/ThumbnailImage";
+import {
+  PLAYBACK_KEY_SHORTCUTS,
+  isPlaybackShortcutFocusProtected,
+  usePlaybackShortcuts,
+} from "../hooks/usePlaybackShortcuts";
 import { formatBytes, formatDateTime } from "../lib/formatters";
+import { previewTimelineMarkerMode } from "../lib/videoTypes";
 import type { Clip, ClipEvent, ClipMedia, ClipSummary, Tag } from "../types";
 
 type PreviewWorkspaceProps = {
@@ -28,13 +35,20 @@ type PreviewWorkspaceProps = {
   clips: ClipSummary[];
   detailStatus?: "idle" | "loading" | "ready" | "not-found" | "error";
   detailError?: string | null;
+  initialVolumePercent?: number;
+  initialMuted?: boolean;
   tags: Tag[];
   activityMessage: string;
+  onAudioPreferenceChange?: (preference: {
+    volumePercent: number;
+    muted: boolean;
+  }) => void;
   onBack: () => void;
   onCopyPath: (clipId: string) => void;
   onCreateTag: (name: string) => Promise<Tag | null>;
   onManageTags: () => void;
   onOpenOriginal: (clipId: string) => void;
+  onOpenExternal: (clipId: string) => void;
   onRetryDetail?: () => void;
   onSelectClip: (clipId: string) => void;
   onToggleFavorite: (clipId: string) => void;
@@ -42,18 +56,44 @@ type PreviewWorkspaceProps = {
   onUpdateNote: (clipId: string, note: string) => Promise<void>;
 };
 
+const PREVIEW_ESCAPE_BLOCKED_LAYER_SELECTOR = [
+  ".app-backdrop--sidebar",
+  "dialog[open]",
+  "[aria-modal='true']",
+  "[data-state='open'][role='dialog']",
+  "[data-state='open'][role='alertdialog']",
+  "[data-state='open'][role='menu']",
+  "[data-state='open'][role='listbox']",
+  ".ui-dialog-content",
+  ".ui-alert-dialog-content",
+].join(",");
+
+const PREVIEW_ESCAPE_BLOCKED_CONTROL_SELECTOR = [
+  "select[aria-expanded='true']",
+  "[role='combobox'][aria-expanded='true']",
+  "[role='listbox']",
+  "[role='menu']",
+  "[cmdk-root]",
+  "[cmdk-input]",
+  ".ui-command",
+].join(",");
+
 export function PreviewWorkspace({
   clip,
   clips,
   detailStatus = clip ? "ready" : "idle",
   detailError = null,
+  initialVolumePercent = 100,
+  initialMuted = false,
   tags,
   activityMessage,
+  onAudioPreferenceChange,
   onBack,
   onCopyPath,
   onCreateTag,
   onManageTags,
   onOpenOriginal,
+  onOpenExternal,
   onRetryDetail = () => undefined,
   onSelectClip,
   onToggleFavorite,
@@ -65,9 +105,11 @@ export function PreviewWorkspace({
   const [isMediaLoading, setIsMediaLoading] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [mediaDuration, setMediaDuration] = useState(0);
-  const [volume, setVolume] = useState(1);
-  const [isMuted, setIsMuted] = useState(false);
+  const [mediaDuration, setMediaDuration] = useState<number | null>(null);
+  const initialVolume = normalizeVolumePercent(initialVolumePercent) / 100;
+  const [volume, setVolume] = useState(initialVolume);
+  const [isMuted, setIsMuted] = useState(initialMuted || initialVolume === 0);
+  const [embeddedPlaybackFailed, setEmbeddedPlaybackFailed] = useState(false);
   const [noteDraft, setNoteDraft] = useState(clip?.note ?? "");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [newTagName, setNewTagName] = useState("");
@@ -76,7 +118,11 @@ export function PreviewWorkspace({
   const activeClipIdRef = useRef<string | null>(clip?.id ?? null);
   const mediaRequestTokenRef = useRef(0);
   const noteSaveRequestTokenRef = useRef(0);
-  const lastAudibleVolumeRef = useRef(1);
+  const isApplyingAudioPreferenceRef = useRef(false);
+  const lastReportedAudioPreferenceRef = useRef({
+    volumePercent: Math.round(initialVolume * 100),
+    muted: initialMuted || initialVolume === 0,
+  });
   activeClipIdRef.current = clip?.id ?? null;
 
   const relatedClips = useMemo(() => {
@@ -102,13 +148,78 @@ export function PreviewWorkspace({
   const activeIsPlaying = activeMedia ? isPlaying : false;
   const activeMediaError = isDetailPending ? "" : mediaError;
   const displayedNoteDraft = isDetailPending ? "" : noteDraft;
-  const durationSeconds = (activeMedia ? mediaDuration : 0) || ((clip?.durationMs ?? 0) / 1000);
+  const clipDurationSeconds = clip?.durationMs != null &&
+    Number.isFinite(clip.durationMs) &&
+    clip.durationMs >= 0
+    ? clip.durationMs / 1000
+    : null;
+  const loadedMediaDurationSeconds = activeMedia &&
+    mediaDuration !== null &&
+    Number.isFinite(mediaDuration) &&
+    mediaDuration >= 0
+    ? mediaDuration
+    : null;
+  const knownDurationSeconds = loadedMediaDurationSeconds ?? clipDurationSeconds;
+  const durationSeconds = knownDurationSeconds ?? 0;
+  const markerMode = clip ? previewTimelineMarkerMode(clip) : null;
   const timelineEvents = (clip?.clipEvents ?? []).filter(
-    (event): event is ClipEvent & { videoTimeMs: number } => event.videoTimeMs !== null,
+    (event): event is ClipEvent & { videoTimeMs: number } => {
+      if (event.videoTimeMs === null || !Number.isFinite(event.videoTimeMs)) return false;
+      const eventSeconds = event.videoTimeMs / 1000;
+      if (eventSeconds < 0) return false;
+      if (knownDurationSeconds !== null && eventSeconds > knownDurationSeconds) return false;
+      const eventType = event.eventType.trim().toLocaleLowerCase("en-US");
+      if (markerMode === "kill") return eventType === "kill" && event.killerIsMe;
+      if (markerMode === "death") return eventType === "death" && event.killedIsMe;
+      return false;
+    },
   );
   const progressPercent = durationSeconds > 0
     ? Math.min(100, (activeCurrentTime / durationSeconds) * 100)
     : 0;
+  const shortcutsActive = Boolean(
+    clip &&
+    !isDetailPending &&
+    activeMedia?.playable &&
+    activeMedia.mediaUrl,
+  );
+  const { togglePlayback, toggleMute } = usePlaybackShortcuts({
+    videoRef,
+    active: shortcutsActive,
+  });
+
+  useEffect(() => {
+    if (!clip) return;
+
+    const handlePreviewNavigation = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.repeat ||
+        event.isComposing ||
+        event.keyCode === 229 ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        event.shiftKey
+      ) {
+        return;
+      }
+
+      if (event.key === "Escape") {
+        if (isPreviewEscapeNavigationBlocked(event)) return;
+        event.preventDefault();
+        onBack();
+        return;
+      }
+
+      if (!/^[1-9]$/.test(event.key) || isPlaybackShortcutFocusProtected(event)) return;
+      const targetClip = relatedClips[Number(event.key) - 1];
+      if (targetClip) onSelectClip(targetClip.id);
+    };
+
+    window.addEventListener("keydown", handlePreviewNavigation);
+    return () => window.removeEventListener("keydown", handlePreviewNavigation);
+  }, [clip, onBack, onSelectClip, relatedClips]);
 
   useEffect(() => {
     const clipId = clip?.id ?? null;
@@ -118,7 +229,8 @@ export function PreviewWorkspace({
     setIsMediaLoading(false);
     setIsPlaying(false);
     setCurrentTime(0);
-    setMediaDuration(0);
+    setMediaDuration(null);
+    setEmbeddedPlaybackFailed(false);
 
     if (!clip || !clipId) return;
     setIsMediaLoading(true);
@@ -163,8 +275,13 @@ export function PreviewWorkspace({
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.volume = volume;
-    video.muted = isMuted || volume === 0;
+    isApplyingAudioPreferenceRef.current = true;
+    try {
+      video.volume = volume;
+      video.muted = isMuted || volume === 0;
+    } finally {
+      isApplyingAudioPreferenceRef.current = false;
+    }
   }, [activeMedia?.mediaUrl, clip?.id, isMuted, volume]);
 
   useEffect(() => {
@@ -213,35 +330,56 @@ export function PreviewWorkspace({
     setCurrentTime(bounded);
   };
 
-  const togglePlayback = async () => {
+  const updateVolume = (nextVolume: number) => {
+    const boundedVolume = Math.max(0, Math.min(1, nextVolume));
     const video = videoRef.current;
-    if (!video) return;
-    if (video.paused) {
-      await video.play();
-    } else {
-      video.pause();
-    }
-  };
-
-  const toggleMute = () => {
-    if (isMuted || volume === 0) {
-      const restoredVolume = Math.max(0.05, lastAudibleVolumeRef.current);
-      setVolume(restoredVolume);
-      setIsMuted(false);
+    if (!video) {
+      setVolume(boundedVolume);
+      setIsMuted(boundedVolume === 0);
       return;
     }
 
-    lastAudibleVolumeRef.current = volume;
-    setIsMuted(true);
+    isApplyingAudioPreferenceRef.current = true;
+    try {
+      video.volume = boundedVolume;
+      video.muted = boundedVolume === 0;
+    } finally {
+      isApplyingAudioPreferenceRef.current = false;
+    }
+    syncAudioPreference(video);
   };
 
-  const updateVolume = (nextVolume: number) => {
-    const boundedVolume = Math.max(0, Math.min(1, nextVolume));
-    if (boundedVolume > 0) {
-      lastAudibleVolumeRef.current = boundedVolume;
+  const syncAudioPreference = (video: HTMLVideoElement) => {
+    const nextVolume = Number.isFinite(video.volume)
+      ? Math.max(0, Math.min(1, video.volume))
+      : 0;
+    const nextPreference = {
+      volumePercent: Math.round(nextVolume * 100),
+      muted: video.muted || nextVolume === 0,
+    };
+    setVolume(nextVolume);
+    setIsMuted(nextPreference.muted);
+
+    const previousPreference = lastReportedAudioPreferenceRef.current;
+    if (
+      previousPreference.volumePercent === nextPreference.volumePercent &&
+      previousPreference.muted === nextPreference.muted
+    ) {
+      return;
     }
-    setVolume(boundedVolume);
-    setIsMuted(boundedVolume === 0);
+    lastReportedAudioPreferenceRef.current = nextPreference;
+    onAudioPreferenceChange?.(nextPreference);
+  };
+
+  const toggleAudioMute = () => {
+    isApplyingAudioPreferenceRef.current = true;
+    try {
+      toggleMute();
+    } finally {
+      isApplyingAudioPreferenceRef.current = false;
+    }
+    const video = videoRef.current;
+    if (video) syncAudioPreference(video);
   };
 
   const saveNote = async () => {
@@ -291,21 +429,34 @@ export function PreviewWorkspace({
       className="preview-workspace"
     >
       <aside className="preview-clip-rail">
-        <button className="preview-back-button" type="button" onClick={onBack}>
+        <button
+          aria-keyshortcuts="Escape"
+          className="preview-back-button"
+          title="返回素材库（Esc）"
+          type="button"
+          onClick={onBack}
+        >
           <ArrowLeft weight="bold" />
           返回素材库
         </button>
         <div className="preview-rail-heading">
           <span>当前对局</span>
           <strong>{clip.accountDisplayName}</strong>
-          <small>{relatedClips.length} 条片段</small>
+          <small>
+            {relatedClips.length} 条片段
+            {relatedClips.length > 1
+              ? ` · 数字键 1–${Math.min(9, relatedClips.length)} 切换`
+              : null}
+          </small>
         </div>
         <div className="preview-rail-list">
           {relatedClips.map((candidate, index) => (
             <button
               aria-current={candidate.id === clip.id ? "true" : undefined}
+              aria-keyshortcuts={index < 9 ? String(index + 1) : undefined}
               className={candidate.id === clip.id ? "preview-rail-clip preview-rail-clip--active" : "preview-rail-clip"}
               key={candidate.id}
+              title={index < 9 ? `选择第 ${index + 1} 条片段（数字键 ${index + 1}）` : undefined}
               type="button"
               onClick={() => onSelectClip(candidate.id)}
             >
@@ -342,12 +493,28 @@ export function PreviewWorkspace({
               ref={videoRef}
               preload="metadata"
               src={activeMedia.mediaUrl}
-              onDurationChange={(event) => setMediaDuration(event.currentTarget.duration || 0)}
+              onDurationChange={(event) => {
+                const nextDuration = event.currentTarget.duration;
+                setMediaDuration(
+                  Number.isFinite(nextDuration) && nextDuration >= 0
+                    ? nextDuration
+                    : null,
+                );
+              }}
               onEnded={() => setIsPlaying(false)}
-              onError={() => setMediaError("预览加载失败")}
+              onError={() => {
+                setIsPlaying(false);
+                setEmbeddedPlaybackFailed(true);
+                setMediaError("当前系统无法内嵌播放此视频")
+              }}
               onPause={() => setIsPlaying(false)}
               onPlay={() => setIsPlaying(true)}
               onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+              onVolumeChange={(event) => {
+                if (!isApplyingAudioPreferenceRef.current) {
+                  syncAudioPreference(event.currentTarget);
+                }
+              }}
             />
           ) : (
             <ClipArtwork clip={clip} hero />
@@ -355,9 +522,10 @@ export function PreviewWorkspace({
           {(!activeMedia?.playable || !activeIsPlaying) ? (
             <button
               aria-label="播放视频"
+              aria-keyshortcuts={PLAYBACK_KEY_SHORTCUTS.togglePlayback}
               className="preview-video-play"
               disabled={isMediaLoading || !activeMedia?.playable}
-              title={activeMediaError || activeMedia?.message || undefined}
+              title={activeMediaError || activeMedia?.message || "播放 / 暂停（空格或 K）"}
               type="button"
               onClick={() => void togglePlayback()}
             >
@@ -366,20 +534,36 @@ export function PreviewWorkspace({
           ) : null}
           {isMediaLoading ? <span className="preview-media-state">正在检查本地视频…</span> : null}
           {activeMediaError ? <span className="preview-media-state preview-media-state--error">{activeMediaError}</span> : null}
+          {embeddedPlaybackFailed && activeMedia?.playable ? (
+            <div className="preview-external-fallback" role="alert">
+              <span>视频已安全入库，但当前 WebView2 解码链无法播放。</span>
+              <button type="button" onClick={() => onOpenExternal(clip.id)}>
+                <ArrowSquareOut weight="bold" />使用系统默认播放器打开
+              </button>
+            </div>
+          ) : null}
         </div>
 
         <div className="preview-player-controls">
-          <button aria-label={activeIsPlaying ? "暂停" : "播放"} disabled={!activeMedia?.playable} type="button" onClick={() => void togglePlayback()}>
+          <button
+            aria-keyshortcuts={PLAYBACK_KEY_SHORTCUTS.togglePlayback}
+            aria-label={activeIsPlaying ? "暂停" : "播放"}
+            disabled={!activeMedia?.playable}
+            title="播放 / 暂停（空格或 K）"
+            type="button"
+            onClick={togglePlayback}
+          >
             {activeIsPlaying ? <Pause weight="fill" /> : <Play weight="fill" />}
           </button>
           <div className="preview-volume-control">
             <button
               aria-label={isMuted || volume === 0 ? "恢复声音" : "静音"}
+              aria-keyshortcuts={PLAYBACK_KEY_SHORTCUTS.toggleMute}
               aria-pressed={isMuted || volume === 0}
               disabled={!activeMedia?.playable}
-              title={isMuted || volume === 0 ? "恢复声音" : "静音"}
+              title={`${isMuted || volume === 0 ? "恢复声音" : "静音"}（M）`}
               type="button"
-              onClick={toggleMute}
+              onClick={toggleAudioMute}
             >
               {isMuted || volume === 0
                 ? <SpeakerSlash weight="duotone" />
@@ -407,6 +591,8 @@ export function PreviewWorkspace({
           <div className="preview-timeline-track">
             <button
               aria-label="调整播放进度"
+              aria-keyshortcuts={PLAYBACK_KEY_SHORTCUTS.seek}
+              title="点击跳转；← / → 5 秒，Shift + ← / → 或 J / L 10 秒"
               type="button"
               onClick={(event) => {
                 const rect = event.currentTarget.getBoundingClientRect();
@@ -414,24 +600,34 @@ export function PreviewWorkspace({
               }}
             />
             {timelineEvents.map((event, index) => {
-              const left = durationSeconds > 0 ? Math.min(100, (event.videoTimeMs / 1000 / durationSeconds) * 100) : 0;
+              const eventSeconds = event.videoTimeMs / 1000;
+              const left = durationSeconds > 0 ? (eventSeconds / durationSeconds) * 100 : 0;
+              const markerLabel = markerMode === "death" ? "本人死亡" : "本人击杀";
+              const markerTitle = `${markerLabel} · ${formatSeconds(eventSeconds)}`;
               return (
                 <button
-                  aria-label={`${eventLabel(event)} ${formatSeconds(event.videoTimeMs / 1000)}`}
-                  className={`preview-timeline-flag preview-timeline-flag--${eventTone(event)}`}
+                  aria-label={markerTitle}
+                  className={`preview-timeline-flag preview-timeline-flag--${markerMode}`}
                   key={event.id || `${event.videoTimeMs}-${index}`}
                   style={{ left: `${left}%` }}
+                  title={markerTitle}
                   type="button"
-                  onClick={() => seekTo(event.videoTimeMs / 1000)}
+                  onClick={() => seekTo(eventSeconds)}
                 >
-                  <Flag weight="fill" />
+                  {markerMode === "death"
+                    ? <Skull aria-hidden="true" className="preview-timeline-icon--death" weight="fill" />
+                    : <Crosshair aria-hidden="true" className="preview-timeline-icon--kill" weight="bold" />}
                 </button>
               );
             })}
             <span className="preview-timeline-progress" style={{ width: `${progressPercent}%` }} />
             <span className="preview-timeline-playhead" style={{ left: `${progressPercent}%` }} />
           </div>
-          <div><span>00:00</span><span>{formatSeconds(durationSeconds / 3)}</span><span>{formatSeconds(durationSeconds * 2 / 3)}</span><span>{formatSeconds(durationSeconds)}</span></div>
+          <div className="preview-timeline-scale"><span>00:00</span><span>{formatSeconds(durationSeconds / 3)}</span><span>{formatSeconds(durationSeconds * 2 / 3)}</span><span>{formatSeconds(durationSeconds)}</span></div>
+          <div aria-label="时间轴标记图例" className="preview-timeline-legend">
+            <span className="preview-timeline-legend--kill"><Crosshair aria-hidden="true" weight="bold" />本人击杀</span>
+            <span className="preview-timeline-legend--death"><Skull aria-hidden="true" weight="fill" />本人死亡</span>
+          </div>
         </div>
       </main>
 
@@ -490,10 +686,12 @@ export function PreviewWorkspace({
           <div className="preview-detail-heading"><span>视频信息</span></div>
           <dl className="preview-intel-list">
             <div><dt>账号</dt><dd><UserCircle weight="duotone" />{clip.accountDisplayName}</dd></div>
+            <div><dt>来源</dt><dd>{sourceKindLabel(clip.sourceKind)} · {clip.sourceDirName}</dd></div>
+            <div><dt>相对目录</dt><dd>{clip.sourceRelativeDir || "根目录"}</dd></div>
             <div><dt>英雄</dt><dd>{clip.agentName || "未知"}</dd></div>
             <div><dt>地图</dt><dd>{clip.mapName || "未知"}</dd></div>
             <div><dt>模式</dt><dd>{clip.gameMode || "未知"}</dd></div>
-            <div><dt>比赛时间</dt><dd>{formatDateTime(clip.matchStartedAt ?? clip.createdAt)}</dd></div>
+            <div><dt>{clip.matchStartedAt ? "比赛时间" : "有效录制日期"}</dt><dd>{formatDateTime(clip.matchStartedAt ?? clip.createdAt)}</dd></div>
             <div><dt>文件大小</dt><dd>{formatBytes(clip.sizeBytes)}</dd></div>
             <div><dt>时长</dt><dd>{formatDuration(clip.durationMs)}</dd></div>
           </dl>
@@ -540,22 +738,25 @@ function ClipArtwork({ clip, hero = false }: { clip: ClipSummary; hero?: boolean
   );
 }
 
-function eventTone(event: ClipEvent): "red" | "amber" | "violet" {
-  const type = event.eventType.toLowerCase();
-  if (type.includes("kill") || type.includes("击杀")) return "red";
-  if (type.includes("assist") || type.includes("助攻")) return "amber";
-  return "violet";
+function sourceKindLabel(kind: Clip["sourceKind"]): string {
+  switch (kind) {
+    case "nvidia": return "NVIDIA";
+    case "tracker": return "Tracker";
+    case "generic": return "普通目录";
+    case "aclos": return "ACLOS";
+  }
 }
 
 function clipTitle(clip: ClipSummary): string {
   return displayHighlightTitle(clip);
 }
 
-function eventLabel(event: ClipEvent): string {
-  const type = event.eventType.toLowerCase();
-  if (type.includes("kill") || type.includes("击杀")) return "击杀";
-  if (type.includes("assist") || type.includes("助攻")) return "助攻";
-  return "事件";
+function isPreviewEscapeNavigationBlocked(event: KeyboardEvent): boolean {
+  const ownerDocument = event.view?.document ?? document;
+  if (ownerDocument.querySelector(PREVIEW_ESCAPE_BLOCKED_LAYER_SELECTOR)) return true;
+
+  const target = event.target instanceof Element ? event.target : ownerDocument.activeElement;
+  return Boolean(target?.closest(PREVIEW_ESCAPE_BLOCKED_CONTROL_SELECTOR));
 }
 
 function formatDuration(durationMs: number | null): string {
@@ -566,4 +767,9 @@ function formatSeconds(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "00:00";
   const total = Math.round(value);
   return `${Math.floor(total / 60).toString().padStart(2, "0")}:${(total % 60).toString().padStart(2, "0")}`;
+}
+
+function normalizeVolumePercent(volumePercent: number): number {
+  if (!Number.isFinite(volumePercent)) return 100;
+  return Math.round(Math.max(0, Math.min(100, volumePercent)));
 }

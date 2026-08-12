@@ -70,6 +70,7 @@ type MatchLibraryProps = {
   onCopyPath: (clipId: string) => void;
   onOpenOriginal: (clipId: string) => void;
   isTrashMode: boolean;
+  removableFromIndexIds: ReadonlySet<string>;
   onSelectionGesture: (clipId: string, gesture: ClipSelectionGesture) => void;
   onRequestTrash: (clipId: string) => void;
   onRequestPermanentDelete: (clipId: string) => void;
@@ -84,8 +85,8 @@ const GRID_GAP = 12;
 const COMPACT_GRID_GAP = 10;
 const MATCH_HEADER_HEIGHT = 52;
 const MATCH_ROW_BOTTOM_GAP = 10;
-const GRID_CARD_FOOTER_HEIGHT = 44;
-const GRID_CARD_TAGGED_FOOTER_HEIGHT = 58;
+const GRID_CARD_FOOTER_HEIGHT = 59;
+const GRID_CARD_TAGGED_FOOTER_HEIGHT = 73;
 
 export const MatchLibrary = memo(function MatchLibrary({
   matchGroups,
@@ -112,6 +113,7 @@ export const MatchLibrary = memo(function MatchLibrary({
   onCopyPath,
   onOpenOriginal,
   isTrashMode,
+  removableFromIndexIds,
   onSelectionGesture,
   onRequestTrash,
   onRequestPermanentDelete,
@@ -308,6 +310,7 @@ export const MatchLibrary = memo(function MatchLibrary({
                     clips={matchGroup.clips}
                     groupKey={matchGroupKey(matchGroup)}
                     isTrashMode={isTrashMode}
+                    removableFromIndexIds={removableFromIndexIds}
                     motionProfile={sharedMotionProfile}
                     positionSignal={virtualRow.start}
                     scrollElementRef={effectiveScrollElementRef}
@@ -334,6 +337,7 @@ export const MatchLibrary = memo(function MatchLibrary({
                         isActive={clip.id === selectedClipId}
                         isSelected={selectedClipIds.has(clip.id)}
                         isTrashMode={isTrashMode}
+                        canRemoveFromIndex={removableFromIndexIds.has(clip.id)}
                         key={clip.id}
                         motionProfile={sharedMotionProfile}
                         tagById={tagById}
@@ -380,6 +384,7 @@ type MatchClipCardProps = {
   isActive: boolean;
   isSelected: boolean;
   isTrashMode: boolean;
+  canRemoveFromIndex: boolean;
   motionProfile: MotionProfile;
   tagById: ReadonlyMap<string, Tag>;
   viewMode: LibraryViewMode;
@@ -400,6 +405,7 @@ const MatchClipCard = memo(function MatchClipCard({
   isActive,
   isSelected,
   isTrashMode,
+  canRemoveFromIndex,
   motionProfile: profile,
   tagById,
   viewMode,
@@ -555,10 +561,18 @@ const MatchClipCard = memo(function MatchClipCard({
             </UiContextMenuItem>
           </>
         ) : (
-          <UiContextMenuItem className="ui-context-menu-item--danger" onSelect={() => onRequestTrash(clip.id)}>
-            <Trash weight="bold" />
-            <span>移入回收站</span>
-          </UiContextMenuItem>
+          <>
+            {canRemoveFromIndex ? (
+              <UiContextMenuItem className="ui-context-menu-item--danger" onSelect={() => onRequestPermanentRemove(clip.id)}>
+                <Database weight="bold" />
+                <span>仅移除失联索引</span>
+              </UiContextMenuItem>
+            ) : null}
+            <UiContextMenuItem className="ui-context-menu-item--danger" onSelect={() => onRequestTrash(clip.id)}>
+              <Trash weight="bold" />
+              <span>移入回收站</span>
+            </UiContextMenuItem>
+          </>
         )}
       </UiContextMenuContent>
     </UiContextMenu>
@@ -569,6 +583,7 @@ type VirtualizedMatchClipsProps = {
   clips: ClipSummary[];
   groupKey: string;
   isTrashMode: boolean;
+  removableFromIndexIds: ReadonlySet<string>;
   motionProfile: MotionProfile;
   positionSignal: number;
   scrollElementRef: RefObject<HTMLDivElement | null>;
@@ -599,6 +614,7 @@ const VirtualizedMatchClips = memo(function VirtualizedMatchClips({
   clips,
   groupKey,
   isTrashMode,
+  removableFromIndexIds,
   motionProfile: profile,
   positionSignal,
   scrollElementRef,
@@ -767,6 +783,7 @@ const VirtualizedMatchClips = memo(function VirtualizedMatchClips({
                     isActive={clip.id === selectedClipId}
                     isSelected={selectedClipIds.has(clip.id)}
                     isTrashMode={isTrashMode}
+                    canRemoveFromIndex={removableFromIndexIds.has(clip.id)}
                     key={clip.id}
                     motionProfile={profile}
                     tagById={tagById}

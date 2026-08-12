@@ -18,10 +18,14 @@ export type TagController = {
   tags: Tag[];
   isLoading: boolean;
   error: string | null;
-  refresh: () => Promise<boolean>;
+  refresh: (options?: TagRefreshOptions) => Promise<boolean>;
   create: (name: string, color?: TagColor) => Promise<Tag | null>;
   update: (tagId: string, name: string, color: TagColor) => Promise<Tag | null>;
   remove: (tagId: string) => Promise<boolean>;
+};
+
+export type TagRefreshOptions = {
+  preserveActivity?: boolean;
 };
 
 export function useTagController({
@@ -68,7 +72,9 @@ export function useTagController({
     }
   }, []);
 
-  const refresh = useCallback(async (): Promise<boolean> => {
+  const refresh = useCallback(async (
+    { preserveActivity = false }: TagRefreshOptions = {},
+  ): Promise<boolean> => {
     const requestToken = requestTokenRef.current + 1;
     requestTokenRef.current = requestToken;
     if (mountedRef.current) setIsLoading(true);
@@ -86,7 +92,7 @@ export function useTagController({
       }
       const message = commandErrorMessage(requestError);
       setError(message);
-      activityRef.current(`标签加载失败：${message}`);
+      if (!preserveActivity) activityRef.current(`标签加载失败：${message}`);
       return false;
     } finally {
       if (mountedRef.current && requestTokenRef.current === requestToken) {
