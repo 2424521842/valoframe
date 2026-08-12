@@ -263,7 +263,10 @@ function App() {
     onActivityMessage: setActivityMessage,
   });
   const refreshCurrentClipQuery = useCallback(
-    (options: LoadClipPageOptions = { preserveActivity: true }) =>
+    (options: LoadClipPageOptions = {
+      preserveActivity: true,
+      preserveItems: true,
+    }) =>
       reloadClipPages(options),
     [reloadClipPages],
   );
@@ -509,6 +512,7 @@ function App() {
   const visibleTotalClipCount = reviewResultSelection
     ? reviewResultSelection.clipIds.length
     : totalClipCount;
+  const libraryScrollResetKey = `${productionListQueryGenerationKey}|review:${reviewResultSelection?.selectionRequestId ?? "all"}`;
 
   const libraryFilterLabels = useMemo(() => {
     const labels = deriveActiveFilters({
@@ -1078,6 +1082,7 @@ function App() {
             loadMoreError={loadMoreError}
             libraryMode={libraryMode}
             query={query}
+            scrollResetKey={libraryScrollResetKey}
             selectedClipId={selectedClipId}
             sortBy={sortBy}
             tagId={selectedTagId}

@@ -57,7 +57,7 @@ type MatchLibraryProps = {
   isLoadingMore?: boolean;
   hasMore?: boolean;
   loadMoreError?: string | null;
-  listGeneration?: number;
+  scrollResetKey: string;
   scrollElementRef?: RefObject<HTMLDivElement | null>;
   errorMessage: string | null;
   onClearFilters: () => void;
@@ -100,7 +100,7 @@ export const MatchLibrary = memo(function MatchLibrary({
   isLoadingMore = false,
   hasMore = false,
   loadMoreError = null,
-  listGeneration = 0,
+  scrollResetKey,
   scrollElementRef,
   errorMessage,
   onClearFilters,
@@ -201,7 +201,7 @@ export const MatchLibrary = memo(function MatchLibrary({
 
   useEffect(() => {
     rowVirtualizer.scrollToOffset(0);
-  }, [listGeneration]);
+  }, [scrollResetKey]);
 
   useEffect(() => {
     rowVirtualizer.measure();

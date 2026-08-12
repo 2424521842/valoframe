@@ -536,6 +536,57 @@ describe("production batch mutation flow", () => {
     expect(mocks.getLibraryFacets.mock.calls.length).toBeGreaterThan(facetsBeforeRestore);
   });
 
+  it("keeps the library scroll position after recycling a clip from its context menu", async () => {
+    const user = userEvent.setup();
+    fixtureClips = Array.from({ length: 12 }, (_, index) => ({
+      ...cloneClip(mockClips[index % mockClips.length]),
+      id: `scroll-${index}`,
+      fileName: `scroll-${index}.mp4`,
+      filePath: `D:\\Highlights\\scroll-${index}.mp4`,
+      matchId: `scroll-match-${index}`,
+      clipGroupId: `scroll-group-${index}`,
+    }));
+    mocks.getLibraryFacets.mockResolvedValue(libraryFacets({
+      totalCount: fixtureClips.length,
+      activeCount: fixtureClips.length,
+    }));
+    render(<App />);
+    await screen.findByRole("checkbox", { name: /选择全部 \d+ 条结果/ });
+
+    const targetId = fixtureClips[0].id;
+    fireEvent.contextMenu(card(targetId));
+    const recycleItem = await screen.findByRole("menuitem", { name: "移入回收站" });
+    const scrollRegion = document.querySelector<HTMLElement>(".library-workspace-scroll");
+    if (!scrollRegion) throw new Error("library scroll region not found");
+    let currentScrollTop = 760;
+    const scrollTo = vi.fn((options: ScrollToOptions | number, y?: number) => {
+      currentScrollTop = typeof options === "number"
+        ? y ?? 0
+        : options.top ?? currentScrollTop;
+    });
+    Object.defineProperties(scrollRegion, {
+      scrollTop: {
+        configurable: true,
+        get: () => currentScrollTop,
+        set: (value: number) => {
+          currentScrollTop = value;
+        },
+      },
+      scrollTo: {
+        configurable: true,
+        value: scrollTo,
+      },
+    });
+
+    await user.click(recycleItem);
+    const confirmation = await screen.findByRole("alertdialog");
+    await user.click(within(confirmation).getByRole("button", { name: "移入回收站" }));
+
+    await waitFor(() => expect(mocks.setClipsTrashed).toHaveBeenCalledWith([targetId], true));
+    await waitFor(() => expect(scrollRegion.scrollTop).toBe(760));
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
   it("permanently deletes selected recycle-bin videos after an irreversible warning", async () => {
     const user = userEvent.setup();
     fixtureClips = fixtureClips.map((clip) => ({
