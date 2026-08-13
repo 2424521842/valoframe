@@ -43,7 +43,7 @@ test("tag checkout is bound to one source commit and all application versions", 
 });
 
 test("repository updater signing remains mandatory for the personal community channel", () => {
-  assert.equal(stableConfig.bundle.createUpdaterArtifacts, true);
+  assert.equal(stableConfig.bundle.createUpdaterArtifacts, "v1Compatible");
   assert.match(
     workflow,
     /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/u,
