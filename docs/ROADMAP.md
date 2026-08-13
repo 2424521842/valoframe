@@ -28,7 +28,7 @@
 | v0.2.1 可靠性 | 🟡 集成收敛 | 扫描新鲜度/新增数量、同源重连、根恢复、仅移除索引、本人击杀/死亡时间轴和 schema v16 已实现并进入 M7 回归/文档收敛 |
 | Community Beta | 📚 历史 | `v0.1.0-beta.1` 已发布；该未签名、无 updater 的渠道不构成稳定发布或 v0.2.x updater 起点 |
 | 发布实机回归 | ⏳ 未完成 | 仍需手动安装 v0.2.1，并验证 v0.2.1→v0.2.2 签名 updater、安装/失败恢复和数据安全 |
-| 稳定发布配置 | ⏳ 未完成 | 需配置 updater 私钥/密码 Secrets、公钥 Variable 和离线备份；Authenticode 暂不要求 |
+| 稳定发布配置 | ✅ 已完成 | updater 私钥/密码 Secrets、公钥 Variable 和可读取的加密离线备份已配置；Authenticode 暂不要求 |
 
 ## 2. 已落地的关键契约
 

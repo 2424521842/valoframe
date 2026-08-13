@@ -28,7 +28,9 @@ MIT 不会改变仓库中第三方材料原有的许可或权利归属：
 
 素材清单 [`src/data/valorantAssets.json`](../src/data/valorantAssets.json) 固定精确来源 URL、路径、尺寸、字节数和 SHA-256；集合指纹为 `26c4c77a5a13d3ca1a84f4616b0cba1f251462882a0e86f9592d5fc8ef2e1c13`。`npm run assets:verify` 会校验 42 个 PNG 的完整结构、清单哈希和负责人声明记录绑定。自动化只能证明仓库字节与记录一致，不能证明授权真实性、有效性或范围。
 
-除上述精确限定的 v0.1.0 Community Beta 外，在人工审阅完成并形成新的批准记录前，严格正式 Windows 发布、商业分发、转授权、第三方复用和独立修改/派生素材文件仍视为未获确认，公开发布 policy 保持 fail closed。负责人声明不会把游戏内容纳入 MIT，也不会让仓库接收者获得独立复用权，更不表示 Riot Games、腾讯或其关联公司对 VALOFRAME 存在隶属、赞助或认可。
+2026-08-13，仓库负责人又为 `v0.2.1` 建立了 [`personal-community-stable` 渠道决定](../release/approvals/personal-community-stable-v0.2.1.json)：允许清单完全一致的 42 个文件用于免费个人社区版的 GitHub Stable Release、Windows 安装包和应用内展示。该记录只表达仓库负责人的单版本渠道决定，不声称自动化看过授权原件，不声称 Riot Games、腾讯或其他第三方批准，也不把这些素材纳入 MIT 或授予接收者独立复用权。
+
+除已记录的 Community Beta 与 `personal-community-stable` 精确渠道外，在人工审阅完成并形成新的批准记录前，未来严格企业式发行、商业分发、转授权、第三方复用和独立修改/派生素材文件仍视为未获确认，严格 public policy 保持 fail closed。免费或非商业的发布意图不会免除第三方许可证义务；项目第一方 MIT 代码也不会因此增加“禁止商业使用”的附加限制。
 
 ## 二进制分发
 

@@ -13,8 +13,101 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  ffmpeg:
+    name: Build exact minimal FFmpeg and corresponding source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      FFMPEG_COMMIT: ce3c09c101c83add623774d414a9f9498caf5c25
+    steps:
+      - name: Check out the tagged VALOFRAME source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+
+      - name: Install MinGW-w64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends mingw-w64 nasm xz-utils
+
+      - name: Check out the exact FFmpeg source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/ffmpeg-source"
+          git -C "$RUNNER_TEMP/ffmpeg-source" init
+          git -C "$RUNNER_TEMP/ffmpeg-source" remote add origin https://github.com/FFmpeg/FFmpeg.git
+          git -C "$RUNNER_TEMP/ffmpeg-source" fetch --depth 1 origin "$FFMPEG_COMMIT"
+          git -C "$RUNNER_TEMP/ffmpeg-source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/ffmpeg-source" rev-parse HEAD)" = "$FFMPEG_COMMIT"
+
+      - name: Build the pinned zero-external-library LGPL FFmpeg
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./scripts/release/build-minimal-ffmpeg.sh \
+            "$RUNNER_TEMP/ffmpeg-source" \
+            ./third_party/ffmpeg/minimal-windows-x64-candidate.json \
+            "$RUNNER_TEMP/candidate-output"
+
+      - name: Package exact corresponding source and build evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_epoch="$(git -C "$RUNNER_TEMP/ffmpeg-source" show -s --format=%ct HEAD)"
+          package_root="$RUNNER_TEMP/corresponding-source-root"
+          artifact_root="$RUNNER_TEMP/stable-ffmpeg-candidate"
+          mkdir -p "$package_root/ffmpeg" "$package_root/valoframe-build" "$artifact_root"
+          git -C "$RUNNER_TEMP/ffmpeg-source" archive --format=tar "$FFMPEG_COMMIT" | tar -xf - -C "$package_root/ffmpeg"
+          cp ./scripts/release/build-minimal-ffmpeg.sh "$package_root/valoframe-build/"
+          cp ./third_party/ffmpeg/minimal-windows-x64-candidate.json "$package_root/valoframe-build/"
+          cp ./third_party/ffmpeg/personal-community-stable-minimal-windows-x64.json "$package_root/valoframe-build/"
+          cp "$RUNNER_TEMP/candidate-output/BUILD-METADATA.json" "$package_root/valoframe-build/"
+          tar \
+            --sort=name \
+            --mtime="@$source_epoch" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            --pax-option=delete=atime,delete=ctime \
+            -cJf "$artifact_root/ffmpeg-corresponding-source.tar.xz" \
+            -C "$package_root" .
+
+          cp "$RUNNER_TEMP/candidate-output/ffmpeg.exe" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/BUILD-METADATA.json" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/configure-flags.txt" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/compiler-version.txt" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/pe-imports.txt" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/config.h" "$artifact_root/"
+          cp "$RUNNER_TEMP/candidate-output/config.mak" "$artifact_root/"
+          (
+            cd "$artifact_root"
+            sha256sum \
+              BUILD-METADATA.json \
+              compiler-version.txt \
+              config.h \
+              config.mak \
+              configure-flags.txt \
+              ffmpeg-corresponding-source.tar.xz \
+              ffmpeg.exe \
+              pe-imports.txt \
+              > SHA256SUMS.txt
+          )
+
+      - name: Upload the run-pinned FFmpeg candidate
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: stable-ffmpeg-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stable-ffmpeg-candidate
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: true
+
   release:
     name: Build, verify, and atomically publish stable release
+    needs: ffmpeg
     runs-on: windows-2025
     timeout-minutes: 90
     permissions:
@@ -32,6 +125,11 @@ jobs:
           "STABLE_ASSET_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-stable-assets')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_REMOTE_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-stable-remote-proof')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_PUBLIC_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-stable-public-proof')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFMPEG_CANDIDATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'vhm-stable-ffmpeg-candidate')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFMPEG_PACKAGE_ROOT=$(Join-Path $env:RUNNER_TEMP 'vhm-stable-ffmpeg-package')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFMPEG_ARCHIVE_OUTPUT_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-stable-ffmpeg-release-assets')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_COMPLIANCE_DIR=$(Join-Path $env:RUNNER_TEMP 'vhm-stable-third-party-compliance')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_VERIFIED_PAYLOAD=$(Join-Path $env:RUNNER_TEMP 'vhm-stable-verified-payload')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Check out the tagged source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -218,13 +316,101 @@ jobs:
             }
           } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'vhm-stable-toolchain.json') -Encoding utf8
 
-      - name: Prepare and verify bundled FFmpeg
+      - name: Download the run-pinned minimal FFmpeg candidate
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: stable-ffmpeg-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.FFMPEG_CANDIDATE_ROOT }}
+
+      - name: Verify minimal FFmpeg on native Windows x64
         shell: pwsh
         run: |
-          & ./scripts/release/prepare-ffmpeg.ps1 -CacheDirectory (Join-Path $env:RUNNER_TEMP 'vhm-ffmpeg-cache')
-          if ($LASTEXITCODE -ne 0) { throw 'Bundled FFmpeg preparation failed.' }
-          & ./scripts/release/verify-ffmpeg.ps1
-          if ($LASTEXITCODE -ne 0) { throw 'Bundled FFmpeg verification failed.' }
+          $metadataPath = Join-Path $env:FFMPEG_CANDIDATE_ROOT 'BUILD-METADATA.json'
+          $metadata = Get-Content -Raw -LiteralPath $metadataPath -Encoding UTF8 | ConvertFrom-Json -Depth 20
+          $reportPath = Join-Path $env:FFMPEG_CANDIDATE_ROOT 'WINDOWS-VERIFICATION.json'
+          $reportJson = & ./scripts/release/verify-minimal-ffmpeg-candidate.ps1 `
+            -FfmpegPath (Join-Path $env:FFMPEG_CANDIDATE_ROOT 'ffmpeg.exe') `
+            -ExpectedSha256 ([string] $metadata.executable.sha256) `
+            -OutputPath $reportPath
+          $report = ($reportJson -join "`n") | ConvertFrom-Json -Depth 20
+          if ($report.status -cne 'passed-candidate-not-promoted' -or $report.promotionAuthorized -ne $false) {
+            throw 'Minimal FFmpeg native verification did not return the hash-bound candidate state.'
+          }
+
+      - name: Package and stage owner-authorized personal community FFmpeg
+        shell: pwsh
+        run: |
+          node ./scripts/release/package-minimal-ffmpeg-community-beta.mjs `
+            --candidate-root $env:FFMPEG_CANDIDATE_ROOT `
+            --contract third_party/ffmpeg/personal-community-stable-minimal-windows-x64.json `
+            --output $env:FFMPEG_PACKAGE_ROOT
+          if ($LASTEXITCODE -ne 0) { throw 'Personal community FFmpeg technical packaging failed.' }
+
+          $manifestPath = Join-Path $env:GITHUB_WORKSPACE '.tmp\personal-community-stable\ffmpeg-windows-x64.json'
+          $stageJson = & ./scripts/release/stage-personal-community-stable-ffmpeg.ps1 `
+            -PackageRoot $env:FFMPEG_PACKAGE_ROOT `
+            -BinaryArchiveOutputDirectory $env:FFMPEG_ARCHIVE_OUTPUT_DIR `
+            -ReleaseTag $env:RELEASE_TAG `
+            -RepositorySlug $env:GITHUB_REPOSITORY `
+            -ApplicationSourceCommit $env:SOURCE_COMMIT `
+            -DecisionPath release/approvals/personal-community-stable-v0.2.1.json `
+            -RepositoryRoot $env:GITHUB_WORKSPACE `
+            -OutputManifestPath $manifestPath
+          $stage = ($stageJson -join "`n") | ConvertFrom-Json -Depth 30
+          if ($stage.status -cne 'staged-for-personal-community-stable' -or
+              $stage.ownerAuthorizedForThisChannel -ne $true -or
+              $stage.strictPublicReleaseApproved -ne $false) {
+            throw 'FFmpeg staging did not return the approved personal-community-stable state.'
+          }
+          "STABLE_FFMPEG_MANIFEST=$($stage.manifestPath)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_FFMPEG_ARCHIVE=$($stage.binaryArchive.path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_FFMPEG_SOURCE=$($stage.correspondingSource.path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Generate and install personal community compliance evidence
+        shell: pwsh
+        run: |
+          node ./scripts/release/generate-compliance-evidence.mjs `
+            --output $env:STABLE_COMPLIANCE_DIR `
+            --offline `
+            --release-profile personal-community-stable `
+            --ffmpeg-manifest .tmp/personal-community-stable/ffmpeg-windows-x64.json
+          if ($LASTEXITCODE -ne 0) { throw 'Personal community compliance generation failed.' }
+
+          $summary = Get-Content -Raw -LiteralPath (Join-Path $env:STABLE_COMPLIANCE_DIR 'COMPLIANCE-SUMMARY.json') -Encoding UTF8 | ConvertFrom-Json -Depth 30
+          if ($summary.releaseProfile -cne 'personal-community-stable' -or
+              $summary.status -cne 'ready-for-channel' -or
+              $summary.channelDistributionReady -ne $true -or
+              @($summary.blockers).Count -ne 0) {
+            throw 'Personal community compliance evidence is not ready for this channel.'
+          }
+
+          $repositoryRoot = [System.IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\')
+          $source = [System.IO.Path]::GetFullPath($env:STABLE_COMPLIANCE_DIR)
+          $destination = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot 'src-tauri\resources\licenses\third-party'))
+          $expectedSource = [System.IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'vhm-stable-third-party-compliance'))
+          $expectedDestination = [System.IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'src-tauri\resources\licenses\third-party'))
+          if (-not [string]::Equals($source, $expectedSource, [System.StringComparison]::OrdinalIgnoreCase) -or
+              -not [string]::Equals($destination, $expectedDestination, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Personal community compliance paths escaped their controlled roots.'
+          }
+          foreach ($path in @($source, (Split-Path -Parent $destination))) {
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if (-not $item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "Compliance path must be a regular directory: $path"
+            }
+          }
+          if (Test-Path -LiteralPath $destination) {
+            $existing = Get-Item -LiteralPath $destination -Force -ErrorAction Stop
+            if (-not $existing.PSIsContainer -or ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw 'Existing third-party compliance destination must be a regular directory.'
+            }
+            Remove-Item -LiteralPath $destination -Recurse -Force
+          }
+          Move-Item -LiteralPath $source -Destination $destination
+          $installed = Get-Item -LiteralPath $destination -Force -ErrorAction Stop
+          if (-not $installed.PSIsContainer -or ($installed.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Installed third-party compliance evidence must be a regular directory.'
+          }
 
       - name: Build Tauri-signed updater artifacts
         shell: pwsh
@@ -252,9 +438,10 @@ jobs:
           $main = Join-Path $releaseRoot 'valorant-highlight-manager.exe'
           $installers = @(Get-ChildItem -LiteralPath $nsisRoot -Filter '*.exe' -File)
           $updaterPackages = @(Get-ChildItem -LiteralPath $nsisRoot -Filter '*.nsis.zip' -File)
-          if ($installers.Count -ne 1 -or $updaterPackages.Count -ne 1 -or
+          $nsisScripts = @(Get-ChildItem -LiteralPath (Join-Path $releaseRoot 'nsis') -Filter 'installer.nsi' -File -Recurse)
+          if ($installers.Count -ne 1 -or $updaterPackages.Count -ne 1 -or $nsisScripts.Count -ne 1 -or
               -not (Test-Path -LiteralPath $main -PathType Leaf)) {
-            throw "Expected one installer, one updater package, and the unpacked application executable."
+            throw "Expected one installer, one updater package, one installer.nsi, and the unpacked application executable."
           }
           $signaturePath = "$($updaterPackages[0].FullName).sig"
           if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
@@ -318,12 +505,56 @@ jobs:
             signatureSha256 = (Get-FileHash -LiteralPath $signaturePath -Algorithm SHA256).Hash.ToLowerInvariant()
           } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'vhm-stable-updater-verification.json') -Encoding utf8
 
-          $smokeJson = & ./scripts/release/windows-release-smoke.ps1 `
-            -ExecutablePath $main `
+          [void] (New-Item -ItemType Directory -Path $env:STABLE_VERIFIED_PAYLOAD)
+          $sevenZip = (Get-Command 7z.exe -CommandType Application -ErrorAction Stop).Source
+          $bundleReportJson = & ./scripts/release/check-bundle.ps1 `
+            -MainExecutablePath $main `
+            -NsisBundlePath $installers[0].FullName `
+            -NsisScriptPath $nsisScripts[0].FullName `
+            -NsisExtractorPath $sevenZip `
+            -VerifiedPayloadOutputDirectory $env:STABLE_VERIFIED_PAYLOAD `
             -ResourceDirectory $releaseRoot `
+            -FfmpegManifestPath $env:STABLE_FFMPEG_MANIFEST `
+            -AllowPersonalCommunityStable `
+            -PersonalCommunityStableDecisionPath (Join-Path $env:GITHUB_WORKSPACE 'release\approvals\personal-community-stable-v0.2.1.json') `
+            -FFmpegArchivePath $env:STABLE_FFMPEG_ARCHIVE `
+            -SourceBundlePath $env:STABLE_FFMPEG_SOURCE
+          $bundleReportText = $bundleReportJson -join "`n"
+          $bundleReportPath = Join-Path $env:RUNNER_TEMP 'vhm-stable-bundle-verification.json'
+          $bundleReportText | Set-Content -LiteralPath $bundleReportPath -Encoding utf8
+          $bundleReport = $bundleReportText | ConvertFrom-Json -Depth 30
+          if ($bundleReport.status -cne 'passed' -or
+              $bundleReport.releaseMode -cne 'personal-community-stable' -or
+              $bundleReport.strictPublicReleaseApproved -ne $false -or
+              $bundleReport.nsisPayload.verifiedPayloadOutputVerification.entriesMatchedReport -ne $true) {
+            throw 'Personal community stable bundle gate did not return the required verified state.'
+          }
+
+          $expectedPayloadRoot = [System.IO.Path]::GetFullPath($env:STABLE_VERIFIED_PAYLOAD)
+          $payloadRoot = [System.IO.Path]::GetFullPath([string] $bundleReport.nsisPayload.verifiedPayloadOutputDirectory)
+          if (-not [string]::Equals($payloadRoot, $expectedPayloadRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Bundle gate report points outside the controlled verified-payload directory.'
+          }
+          $payloadRootItem = Get-Item -LiteralPath $payloadRoot -Force -ErrorAction Stop
+          if (($payloadRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Verified stable payload root must not be a reparse point.'
+          }
+          $mainEntries = @($bundleReport.nsisPayload.entries | Where-Object { $_.destination -ceq 'valorant-highlight-manager.exe' })
+          if ($mainEntries.Count -ne 1) { throw 'Bundle gate report must identify exactly one embedded main executable.' }
+          $verifiedMain = Join-Path $payloadRoot 'valorant-highlight-manager.exe'
+          $expectedMainHash = [string] $mainEntries[0].normalization.rawEmbeddedSha256
+          if ($expectedMainHash -notmatch '^[0-9a-fA-F]{64}$' -or
+              -not [string]::Equals($expectedMainHash, [string] $mainEntries[0].sha256, [System.StringComparison]::OrdinalIgnoreCase) -or
+              -not [string]::Equals((Get-FileHash -LiteralPath $verifiedMain -Algorithm SHA256).Hash, $expectedMainHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Verified embedded application hash is missing or inconsistent.'
+          }
+
+          $smokeJson = & ./scripts/release/windows-release-smoke.ps1 `
+            -ExecutablePath $verifiedMain `
+            -ResourceDirectory $payloadRoot `
             -FfmpegMode ResourceOverride `
             -IsolationParent $env:RUNNER_TEMP `
-            -ExpectedExecutableSha256 ((Get-FileHash -LiteralPath $main -Algorithm SHA256).Hash)
+            -ExpectedExecutableSha256 $expectedMainHash
           $smokeReportJson = $smokeJson -join "`n"
           $smokeReportJson | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'vhm-stable-startup-smoke.json') -Encoding utf8
           $smoke = $smokeReportJson | ConvertFrom-Json -Depth 30
@@ -332,6 +563,7 @@ jobs:
           "STABLE_INSTALLER=$($installers[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_UPDATER_PACKAGE=$($updaterPackages[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_UPDATER_SIGNATURE=$signaturePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_BUNDLE_REPORT=$bundleReportPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Assemble and independently verify stable release assets
         shell: pwsh
@@ -343,6 +575,55 @@ jobs:
           Copy-Item -LiteralPath $env:STABLE_UPDATER_PACKAGE -Destination $env:STABLE_ASSET_DIR
           Copy-Item -LiteralPath $env:STABLE_UPDATER_SIGNATURE -Destination $env:STABLE_ASSET_DIR
           Copy-Item -LiteralPath $env:STABLE_NOTES -Destination (Join-Path $env:STABLE_ASSET_DIR 'RELEASE-NOTES.md')
+          Copy-Item -LiteralPath $env:STABLE_FFMPEG_ARCHIVE -Destination (Join-Path $env:STABLE_ASSET_DIR 'valoframe-ffmpeg-minimal-windows-x64.zip')
+          Copy-Item -LiteralPath $env:STABLE_FFMPEG_SOURCE -Destination (Join-Path $env:STABLE_ASSET_DIR 'ffmpeg-corresponding-source.tar.xz')
+          Copy-Item -LiteralPath $env:STABLE_FFMPEG_MANIFEST -Destination (Join-Path $env:STABLE_ASSET_DIR 'FFMPEG-MANIFEST.json')
+
+          $releaseRoot = Join-Path $env:CARGO_TARGET_DIR 'release'
+          $sourceOffer = Join-Path $releaseRoot 'licenses\ffmpeg\SOURCE-OFFER.md'
+          $licenseEvidenceRoot = Join-Path $releaseRoot 'licenses'
+          $thirdPartyComplianceRoot = Join-Path $licenseEvidenceRoot 'third-party'
+          if (-not (Test-Path -LiteralPath $sourceOffer -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $thirdPartyComplianceRoot -PathType Container)) {
+            throw 'The built installer resources omit FFmpeg source availability or third-party compliance evidence.'
+          }
+          Copy-Item -LiteralPath $sourceOffer -Destination (Join-Path $env:STABLE_ASSET_DIR 'FFMPEG-SOURCE-OFFER.md')
+          $compliancePackageRoot = Join-Path $env:RUNNER_TEMP 'vhm-stable-compliance-package'
+          [void] (New-Item -ItemType Directory -Path $compliancePackageRoot)
+          Copy-Item -LiteralPath $licenseEvidenceRoot -Destination (Join-Path $compliancePackageRoot 'licenses') -Recurse
+          Copy-Item -LiteralPath $env:STABLE_FFMPEG_MANIFEST -Destination (Join-Path $compliancePackageRoot 'FFMPEG-MANIFEST.json')
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'release\personal-community-stable-policy.json') -Destination $compliancePackageRoot
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'release\approvals\personal-community-stable-v0.2.1.json') -Destination $compliancePackageRoot
+          $complianceZip = Join-Path $env:STABLE_ASSET_DIR 'personal-community-stable-compliance.zip'
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $compliancePackageRoot,
+            $complianceZip,
+            [System.IO.Compression.CompressionLevel]::Optimal,
+            $false
+          )
+
+          $personalNotice = @'
+          VALOFRAME personal community stable release notice
+
+          This release is provided free of charge by an individual developer for a non-commercial community project.
+          It is unofficial and is not affiliated with, sponsored by, or endorsed by Riot Games, Tencent, FFmpeg, or any other third party.
+          FFmpeg is provided under LGPL-3.0-or-later; its exact corresponding source and build evidence are attached to this same release.
+          The Windows installer is not Authenticode signed, so Windows may show Unknown Publisher or a SmartScreen warning.
+          Tauri updater packages remain cryptographically signed; the updater signature is not an Authenticode publisher identity.
+          Non-commercial distribution does not waive any third-party license obligations.
+          '@
+          $noticePath = Join-Path $env:STABLE_ASSET_DIR 'PERSONAL-COMMUNITY-STABLE-NOTICE.txt'
+          $personalNotice | Set-Content -LiteralPath $noticePath -Encoding utf8
+          $publishNotes = Join-Path $env:RUNNER_TEMP 'vhm-stable-publish-notes.md'
+          @(
+            Get-Content -Raw -LiteralPath $env:STABLE_NOTES -Encoding UTF8
+            ''
+            '## 个人社区发行说明'
+            ''
+            $personalNotice
+          ) | Set-Content -LiteralPath $publishNotes -Encoding utf8
+          "STABLE_PUBLISH_NOTES=$publishNotes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
           $package = Join-Path $env:STABLE_ASSET_DIR ([System.IO.Path]::GetFileName($env:STABLE_UPDATER_PACKAGE))
           $signature = "$package.sig"
           $publishedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'")
@@ -375,7 +656,27 @@ jobs:
           $hashLines = @($assets | ForEach-Object {
             "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
           })
-          $hashLines | Set-Content -LiteralPath (Join-Path $env:STABLE_ASSET_DIR 'SHA256SUMS.txt') -Encoding ascii
+          $checksumPath = Join-Path $env:STABLE_ASSET_DIR 'SHA256SUMS.txt'
+          $hashLines | Set-Content -LiteralPath $checksumPath -Encoding utf8NoBOM
+          $checksumLines = @(Get-Content -LiteralPath $checksumPath -Encoding utf8)
+          if ($checksumLines.Count -ne $assets.Count) {
+            throw 'SHA256SUMS.txt must cover every other release asset exactly once.'
+          }
+          $declaredNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+          foreach ($line in $checksumLines) {
+            if ($line -cnotmatch '^(?<hash>[0-9a-f]{64})  (?<name>[^\\/:*?"<>|]+)$') {
+              throw "SHA256SUMS.txt contains an invalid line: $line"
+            }
+            $name = [string] $Matches['name']
+            if (-not $declaredNames.Add($name)) {
+              throw "SHA256SUMS.txt contains a duplicate asset: $name"
+            }
+            $assetPath = Join-Path $env:STABLE_ASSET_DIR $name
+            if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf) -or
+                (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string] $Matches['hash']) {
+              throw "SHA256SUMS.txt does not match release asset: $name"
+            }
+          }
 
       - name: Create an invisible draft release with all verified assets
         shell: pwsh
@@ -387,7 +688,7 @@ jobs:
             --repo $env:GITHUB_REPOSITORY `
             --verify-tag `
             --title "瓦刻（VALOFRAME）$env:RELEASE_TAG" `
-            --notes-file $env:STABLE_NOTES `
+            --notes-file $env:STABLE_PUBLISH_NOTES `
             --draft
           if ($LASTEXITCODE -ne 0) { throw 'Could not create the stable draft release.' }
 
@@ -397,7 +698,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VALOFRAME_UPDATER_PUBLIC_KEY: ${{ vars.VALOFRAME_UPDATER_PUBLIC_KEY }}
         run: |
-          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json id,isDraft,isPrerelease,tagName,targetCommitish,assets | ConvertFrom-Json -Depth 20
+          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json databaseId,isDraft,isPrerelease,tagName,targetCommitish,assets | ConvertFrom-Json -Depth 20
           if ($release.isDraft -ne $true -or $release.isPrerelease -ne $false -or $release.tagName -cne $env:RELEASE_TAG) {
             throw 'Remote release must remain a stable-channel draft during verification.'
           }
@@ -446,7 +747,7 @@ jobs:
             status = 'passed'
             phase = 'remote-draft'
             sourceCommit = $env:SOURCE_COMMIT
-            releaseId = [long] $release.id
+            releaseId = [long] $release.databaseId
             tag = $env:RELEASE_TAG
             assets = @($expectedNames | ForEach-Object {
               [ordered]@{
@@ -477,10 +778,10 @@ jobs:
           VALOFRAME_UPDATER_PUBLIC_KEY: ${{ vars.VALOFRAME_UPDATER_PUBLIC_KEY }}
         run: |
           [void] (New-Item -ItemType Directory -Path $env:STABLE_PUBLIC_DIR)
-          $published = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json id,isDraft,isPrerelease,tagName,assets | ConvertFrom-Json -Depth 20
+          $published = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json databaseId,isDraft,isPrerelease,tagName,assets | ConvertFrom-Json -Depth 20
           $latest = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" | ConvertFrom-Json -Depth 20
           if ($published.isDraft -ne $false -or $published.isPrerelease -ne $false -or
-              [long] $latest.id -ne [long] $published.id) {
+              [long] $latest.id -ne [long] $published.databaseId) {
             throw 'The public release is not the non-prerelease GitHub latest release.'
           }
 
@@ -572,7 +873,7 @@ jobs:
             phase = 'public-latest'
             checkedAtUtc = [DateTime]::UtcNow.ToString('o')
             sourceCommit = $env:SOURCE_COMMIT
-            releaseId = [long] $published.id
+            releaseId = [long] $published.databaseId
             tag = $env:RELEASE_TAG
             latestManifestSha256 = (Get-FileHash -LiteralPath $publicManifest -Algorithm SHA256).Hash.ToLowerInvariant()
             updaterPackageSha256 = (Get-FileHash -LiteralPath $directPackage -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -594,13 +895,13 @@ jobs:
 
           $releaseJson = & gh release view $env:RELEASE_TAG `
             --repo $env:GITHUB_REPOSITORY `
-            --json id,isDraft,isPrerelease,tagName
+            --json databaseId,isDraft,isPrerelease,tagName
           if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the exact release for rollback.' }
           $release = ($releaseJson -join "`n") | ConvertFrom-Json
-          if ([string] $release.tagName -cne $env:RELEASE_TAG -or [long] $release.id -le 0) {
+          if ([string] $release.tagName -cne $env:RELEASE_TAG -or [long] $release.databaseId -le 0) {
             throw 'Resolved rollback release does not match the exact approved tag.'
           }
-          $releaseId = [long] $release.id
+          $releaseId = [long] $release.databaseId
 
           gh release edit $env:RELEASE_TAG `
             --repo $env:GITHUB_REPOSITORY `
@@ -610,10 +911,10 @@ jobs:
 
           $rolledBackJson = & gh release view $env:RELEASE_TAG `
             --repo $env:GITHUB_REPOSITORY `
-            --json id,isDraft,isPrerelease,tagName
+            --json databaseId,isDraft,isPrerelease,tagName
           if ($LASTEXITCODE -ne 0) { throw 'Could not verify the rolled-back release.' }
           $rolledBack = ($rolledBackJson -join "`n") | ConvertFrom-Json
-          if ([long] $rolledBack.id -ne $releaseId -or
+          if ([long] $rolledBack.databaseId -ne $releaseId -or
               [string] $rolledBack.tagName -cne $env:RELEASE_TAG -or
               $rolledBack.isDraft -ne $true -or
               $rolledBack.isPrerelease -ne $false) {

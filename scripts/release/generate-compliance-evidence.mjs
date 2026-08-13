@@ -65,6 +65,10 @@ const cargoLockIndex = parseCargoLock(readFileSync(cargoLockPath, "utf8"));
 const ffmpegManifest = readJson(ffmpegManifestPath);
 const licenseOverrideManifest = readJson(licenseOverrideManifestPath);
 const licenseOverrideApprovals = readJson(licenseOverrideApprovalPath);
+if (releaseProfile === "personal-community-stable") {
+  validatePersonalCommunityStableFfmpeg(ffmpegManifest);
+  validatePersonalCommunityStableLicenseOverrides(licenseOverrideManifest);
+}
 const npmRuntimeSpdx = runNpmSbom(["--omit", "dev"]);
 const npmBuildSpdx = runNpmSbom([]);
 const cargoMetadata = runCargoMetadata(targetTriple, options.offline);
@@ -110,6 +114,27 @@ const blockers = collectBlockers({
   ffmpegManifest,
   licenseOverrideBlockers: licenseOverrideResult.blockers,
 });
+const personalCommunityStable = releaseProfile === "personal-community-stable";
+const effectiveBlockers = personalCommunityStable
+  ? blockers.filter((blocker) => ![
+      "NPM_LICENSE_OVERRIDE_REVIEW_PENDING",
+      "CARGO_LICENSE_OVERRIDE_REVIEW_PENDING",
+      "FFMPEG_REDISTRIBUTION_BLOCKED",
+      "FFMPEG_LICENSE_AUDIT_INCOMPLETE",
+      "FFMPEG_PATENT_REVIEW_INCOMPLETE",
+      "FFMPEG_LEGAL_APPROVAL_MISSING",
+    ].includes(blocker.code))
+  : blockers;
+const advisories = personalCommunityStable
+  ? [
+      ...blockers.filter((blocker) => !effectiveBlockers.includes(blocker)),
+      {
+        code: "MPL_SOURCE_FORM_AVAILABLE",
+        component: "selectors@0.36.1",
+        message: "MPL-2.0 source form is pinned at https://github.com/servo/stylo/tree/635e1a19d02960588a00e189bd4bd5bdb150ec3d/selectors and remains available to recipients.",
+      },
+    ]
+  : [];
 
 writeJson("npm-runtime.spdx.json", npmRuntimeSpdx);
 writeJson("npm-build.spdx.json", npmBuildSpdx);
@@ -128,10 +153,15 @@ const summary = {
   schemaVersion: 1,
   releaseProfile,
   productionApproval: false,
-  status: blockers.length === 0 ? "ready-for-approval" : "generated-with-blockers",
+  status: effectiveBlockers.length === 0
+    ? personalCommunityStable ? "ready-for-channel" : "ready-for-approval"
+    : "generated-with-blockers",
   generatedAt,
   target: targetTriple,
-  publicRedistributionReady: blockers.length === 0,
+  publicRedistributionReady: !personalCommunityStable && effectiveBlockers.length === 0,
+  ...(personalCommunityStable
+    ? { channelDistributionReady: effectiveBlockers.length === 0 }
+    : {}),
   scope: {
     npmRuntime: "production dependency graph from package-lock.json",
     npmBuild: "complete dependency graph from package-lock.json",
@@ -149,7 +179,8 @@ const summary = {
     cargo: cargoLicenseIndex.coverage,
   },
   licenseTextOverrides: licenseOverrideResult.summary,
-  blockers,
+  blockers: effectiveBlockers,
+  ...(personalCommunityStable ? { advisories } : {}),
   limitations: [
     "Generated inventory and consolidated license texts are technical evidence, not legal approval.",
     "FFmpeg patent review and final corresponding-source publication remain release-owner decisions.",
@@ -167,7 +198,8 @@ writeText(
     ffmpegComponent,
     npmLicenseIndex,
     cargoLicenseIndex,
-    blockers,
+    blockers: effectiveBlockers,
+    advisories,
   }),
 );
 
@@ -256,10 +288,148 @@ function parseArguments(argumentsList) {
   if (parsed.target && !/^[A-Za-z0-9_.-]+$/.test(parsed.target)) {
     throw new Error(`Unsafe target triple: ${parsed.target}`);
   }
-  if (parsed.releaseProfile && !["public", "community-beta"].includes(parsed.releaseProfile)) {
+  if (parsed.releaseProfile && !["public", "community-beta", "personal-community-stable"].includes(parsed.releaseProfile)) {
     throw new Error(`Unsupported release profile: ${parsed.releaseProfile}`);
   }
   return parsed;
+}
+
+function validatePersonalCommunityStableFfmpeg(manifest) {
+  const fail = (message) => {
+    throw new Error(`Personal community stable FFmpeg manifest is invalid: ${message}`);
+  };
+  const requireValue = (condition, message) => {
+    if (!condition) fail(message);
+  };
+  const hashPattern = /^[0-9a-f]{64}$/u;
+  const commitPattern = /^[0-9a-f]{40}$/u;
+  const canonicalTagPattern = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/u;
+
+  requireValue(manifest?.schemaVersion === 2, "schemaVersion must be 2.");
+  requireValue(
+    manifest.releaseChannel === "personal-community-stable",
+    "releaseChannel must be personal-community-stable.",
+  );
+  requireValue(
+    manifest.productionPromotionAuthorized === false,
+    "productionPromotionAuthorized must remain false.",
+  );
+  requireValue(
+    manifest.platform === "windows" && manifest.architecture === "x86_64",
+    "target must be Windows x86_64.",
+  );
+
+  const releaseTag = manifest.provider?.releaseTag;
+  requireValue(canonicalTagPattern.test(releaseTag), "provider.releaseTag must be canonical vX.Y.Z.");
+  const releaseBaseUrl = manifest.provider?.releaseUrl;
+  requireValue(
+    typeof releaseBaseUrl === "string" && releaseBaseUrl.endsWith(`/releases/tag/${releaseTag}`),
+    "provider.releaseUrl must identify the same release tag.",
+  );
+
+  const artifact = manifest.artifact;
+  requireValue(artifact?.fileName === "valoframe-ffmpeg-minimal-windows-x64.zip", "binary sidecar name is not canonical.");
+  requireValue(Number.isSafeInteger(artifact?.sizeBytes) && artifact.sizeBytes > 0, "binary sidecar size is invalid.");
+  requireValue(hashPattern.test(artifact?.sha256), "binary sidecar SHA-256 is invalid.");
+  requireValue(Number.isSafeInteger(artifact?.executableSizeBytes) && artifact.executableSizeBytes > 0, "executable size is invalid.");
+  requireValue(hashPattern.test(artifact?.executableSha256), "executable SHA-256 is invalid.");
+  requireValue(artifact?.executableMember === "bin/ffmpeg.exe", "binary sidecar must contain bin/ffmpeg.exe.");
+  requireValue(artifact?.destination === "src-tauri/resources/bin/ffmpeg.exe", "installer FFmpeg destination is invalid.");
+  requireValue(artifact?.url === artifact?.projectMirrorUrl, "binary and project mirror URLs must be identical.");
+
+  requireValue(manifest.ffmpeg?.licenseExpression === "LGPL-3.0-or-later", "license expression must be LGPL-3.0-or-later.");
+  requireValue(commitPattern.test(manifest.ffmpeg?.upstreamCommit), "upstream commit must be pinned.");
+  requireValue(
+    manifest.ffmpeg.upstreamCommit === "ce3c09c101c83add623774d414a9f9498caf5c25",
+    "upstream commit does not match the reviewed minimal-build contract.",
+  );
+
+  const flags = manifest.build?.configureFlags;
+  requireValue(Array.isArray(flags), "build.configureFlags must be an array.");
+  const requiredFlags = [
+    "--disable-autodetect",
+    "--disable-everything",
+    "--disable-network",
+    "--enable-protocol=file",
+    "--enable-demuxer=mov",
+    "--enable-parser=h264",
+    "--enable-decoder=h264",
+    "--enable-parser=hevc",
+    "--enable-decoder=hevc",
+    "--enable-parser=av1",
+    "--enable-decoder=av1",
+    "--enable-filter=scale",
+    "--enable-encoder=mjpeg",
+    "--enable-muxer=image2",
+    "--enable-version3",
+  ];
+  for (const flag of requiredFlags) {
+    requireValue(flags.includes(flag), `required configure flag is missing: ${flag}`);
+  }
+  requireValue(!flags.includes("--enable-gpl"), "--enable-gpl is forbidden for this profile.");
+  requireValue(!flags.includes("--enable-nonfree"), "--enable-nonfree is forbidden for this profile.");
+  requireValue(
+    !flags.some((flag) => /^--enable-lib/u.test(flag)),
+    "external --enable-lib* integrations are forbidden for this profile.",
+  );
+  requireValue(
+    Array.isArray(manifest.build.externalLibraries) && manifest.build.externalLibraries.length === 0,
+    "externalLibraries must be empty.",
+  );
+
+  const source = manifest.sourceCompliance;
+  requireValue(source?.redistributionReady === false, "strict redistributionReady must remain false.");
+  requireValue(
+    source?.status === "personal-community-stable-source-bundled-owner-attested",
+    "channel status is invalid.",
+  );
+  requireValue(source?.ownerAuthorizedForThisChannel === true, "release-owner channel authorization is missing.");
+  requireValue(source?.ffmpegExternalLibraryAuditComplete === true, "external-library audit must be complete.");
+  requireValue(source?.thirdPartyLicenseAuditComplete === false, "strict third-party legal audit must not be represented as complete.");
+  requireValue(source?.ijgAttributionRequired === true && source?.ijgAttributionIncluded === true, "IJG attribution must be required and included.");
+  requireValue(source?.patentReviewStatus === "pending-for-strict-public-release", "patent review status must remain honestly pending.");
+  requireValue(source?.legalApprovalReference === null, "independent legal approval must not be asserted.");
+  requireValue(source?.binaryMirrorUrl === artifact.url, "source compliance must identify the exact binary sidecar.");
+  requireValue(source?.upstreamSource?.commit === manifest.ffmpeg.upstreamCommit, "corresponding source commit is inconsistent.");
+
+  const sourceBundle = source?.correspondingSourceBundle;
+  requireValue(Number.isSafeInteger(sourceBundle?.sizeBytes) && sourceBundle.sizeBytes > 0, "corresponding-source size is invalid.");
+  requireValue(hashPattern.test(sourceBundle?.sha256), "corresponding-source SHA-256 is invalid.");
+  for (const [description, urlValue, fileName] of [
+    ["binary sidecar", artifact.url, artifact.fileName],
+    ["corresponding source", sourceBundle?.url, "ffmpeg-corresponding-source.tar.xz"],
+  ]) {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(urlValue);
+    } catch {
+      fail(`${description} URL is invalid.`);
+    }
+    requireValue(parsedUrl.protocol === "https:", `${description} URL must use HTTPS.`);
+    requireValue(
+      parsedUrl.pathname.endsWith(`/releases/download/${releaseTag}/${fileName}`),
+      `${description} must be published beside the installer under the same tag.`,
+    );
+  }
+}
+
+function validatePersonalCommunityStableLicenseOverrides(manifest) {
+  const selectors = manifest?.overrides?.find(
+    (entry) => entry.ecosystem === "cargo" && entry.name === "selectors" && entry.version === "0.36.1",
+  );
+  if (
+    !selectors ||
+    selectors.declaredLicense !== "MPL-2.0" ||
+    normalizeRepositoryUrl(selectors.repository) !== "https://github.com/servo/stylo" ||
+    selectors.vcsRevision !== "635e1a19d02960588a00e189bd4bd5bdb150ec3d" ||
+    selectors.vcsPath !== "selectors" ||
+    !selectors.textIds?.includes("mozilla-mpl-2.0") ||
+    !selectors.obligations?.includes("mpl-2.0-source-code-form-review-required")
+  ) {
+    throw new Error(
+      "Personal community stable requires the pinned selectors@0.36.1 MPL-2.0 source-form record.",
+    );
+  }
 }
 
 function assertSafeOutputDirectory(directory) {
@@ -1413,6 +1583,7 @@ function createNotices({
   npmLicenseIndex,
   cargoLicenseIndex,
   blockers,
+  advisories = [],
 }) {
   const lines = [
     "# VALOFRAME third-party component notice",
@@ -1464,6 +1635,17 @@ function createNotices({
         `- ${blocker.code}${blocker.component ? ` (${escapeMarkdown(blocker.component)})` : ""}: ${blocker.message}`,
     ),
     "",
+    ...(advisories.length === 0
+      ? []
+      : [
+          "## Personal community release advisories",
+          "",
+          ...advisories.map(
+          (advisory) =>
+            `- ${advisory.code}${advisory.component ? ` (${escapeMarkdown(advisory.component)})` : ""}: ${advisory.message}`,
+          ),
+          "",
+        ]),
   ];
   return `${lines.join("\n")}\n`;
 }

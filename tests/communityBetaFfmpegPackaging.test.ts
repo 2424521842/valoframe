@@ -31,6 +31,12 @@ const contractPath = join(
   "ffmpeg",
   "community-beta-minimal-windows-x64.json",
 );
+const personalStableContractRelativePath =
+  "third_party/ffmpeg/personal-community-stable-minimal-windows-x64.json";
+const personalStableContractPath = join(
+  repositoryRoot,
+  ...personalStableContractRelativePath.split("/"),
+);
 const candidateManifestPath = join(
   repositoryRoot,
   "third_party",
@@ -38,6 +44,7 @@ const candidateManifestPath = join(
   "minimal-windows-x64-candidate.json",
 );
 const contract = readJson(contractPath);
+const personalStableContract = readJson(personalStableContractPath);
 const candidateManifest = readJson(candidateManifestPath);
 
 function readJson(path: string): JsonObject {
@@ -166,7 +173,11 @@ function createCandidateArtifact(parent: string): {
   return { artifactRoot, checksums };
 }
 
-function runPackager(artifactRoot: string, output: string) {
+function runPackager(
+  artifactRoot: string,
+  output: string,
+  contractRelativePath?: string,
+) {
   return spawnSync(
     process.execPath,
     [
@@ -177,6 +188,9 @@ function runPackager(artifactRoot: string, output: string) {
       output,
       "--repository-root",
       repositoryRoot,
+      ...(contractRelativePath
+        ? ["--contract", contractRelativePath]
+        : []),
     ],
     {
       cwd: repositoryRoot,
@@ -352,6 +366,71 @@ test("community-beta packager rejects forged promotion authorization", () => {
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /promotionAuthorized must be false/u);
     assert.equal(existsSync(output), false);
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("the same verified minimal candidate can be packaged for owner-authorized personal stable", () => {
+  const temporaryRoot = mkdtempSync(
+    join(tmpdir(), "vhm-personal-stable-ffmpeg-test-"),
+  );
+  try {
+    const { artifactRoot, checksums } = createCandidateArtifact(temporaryRoot);
+    const output = join(temporaryRoot, "package");
+    const result = runPackager(
+      artifactRoot,
+      output,
+      personalStableContractRelativePath,
+    );
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+
+    const summary = JSON.parse(result.stdout) as JsonObject;
+    assert.equal(summary.channel, "personal-community-stable");
+    assert.equal(summary.status, personalStableContract.output.status);
+    assert.equal(summary.ownerAuthorizedForThisChannel, true);
+    assert.equal(summary.strictPublicReleaseApproved, false);
+    assert.equal("communityBetaDistributionAuthorized" in summary, false);
+
+    const packageManifest = readJson(
+      join(output, personalStableContract.output.packageManifestFileName),
+    );
+    assert.equal(packageManifest.channel, "personal-community-stable");
+    assert.equal(
+      packageManifest.technicalPromotion.ownerAuthorizedForThisChannel,
+      true,
+    );
+    assert.equal(
+      packageManifest.technicalPromotion.strictPublicReleaseApproved,
+      false,
+    );
+    assert.equal(packageManifest.executable.sha256, checksums["ffmpeg.exe"]);
+    assert.equal(
+      packageManifest.correspondingSource.sha256,
+      checksums["ffmpeg-corresponding-source.tar.xz"],
+    );
+
+    const buildInfo = readJson(
+      join(
+        output,
+        ...String(personalStableContract.output.licenseRootRelativePath).split(
+          "/",
+        ),
+        "BUILD-INFO.json",
+      ),
+    );
+    assert.equal(
+      buildInfo.status,
+      "personal-community-stable-technical-candidate",
+    );
+    assert.equal(
+      buildInfo.complianceBoundary.ownerAuthorizedForThisChannel,
+      true,
+    );
+    assert.equal(
+      buildInfo.complianceBoundary.strictPublicReleaseApproved,
+      false,
+    );
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
   }

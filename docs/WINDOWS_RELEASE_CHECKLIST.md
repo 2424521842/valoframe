@@ -6,7 +6,7 @@
 
 - [ ] 发布工作区干净，或所有未提交改动均已逐项审阅并记录。
 - [ ] `package.json`、`package-lock.json` 顶层/root package、`src-tauri/Cargo.toml`、Cargo.lock 中项目 package 及 `src-tauri/tauri.conf.json` 均精确为 `0.2.1`；没有改写第三方依赖的同名版本值。
-- [ ] `release/notes/v0.2.1.md` 包含 Git 提交、版本、构建时间和构建机/工具链版本，并如实说明尚未完成的外部门禁。
+- [ ] `release/notes/v0.2.1.md` 包含版本与用户可见变更，并如实说明尚未完成的外部门禁；Git 提交、构建时间和构建机/工具链版本由 stable workflow 的 manifest 与证据附件绑定。
 - [ ] 已确认默认产物仅为 NSIS；未把未配置、未测试的 MSI 宣称为支持渠道。
 - [ ] 产品名称、identifier、安装范围和升级策略与上一版本兼容。
 - [ ] 按 `DATABASE_RECOVERY.md` 完成 v13/v14/v15→v16（`pre-v*-to-v16`）原子升级/在线备份、未来 schema 拒绝、损坏库拒绝、最近备份恢复及恢复后再次升级；保留输入库和结果证据。
@@ -46,11 +46,11 @@
 - [ ] 已记录原始下载 URL、下载时间、版本和构建参数。
 - [ ] 已根据实际启用组件完成许可证审核，没有根据项目名猜测 LGPL/GPL 状态。
 - [ ] SBOM 或等价组件清单已生成并归档。
-- [ ] npm/Cargo SPDX、FFmpeg 组件快照、第三方声明、许可证全文和 SHA-256 manifest 均由锁文件重新生成；12 项 tracked license override 已逐项批准，`selectors` 的 MPL 2.0 源代码形式义务和其他人工审核已闭合。
-- [ ] 最小自建 FFmpeg 候选的 checksum/build metadata、12 位 commit、PE 实际 imports 与 objdump 结果已一致，imports 只命中 Windows 系统 DLL allowlist；H.264、HEVC、AV1 三种合成 MP4 均完成受控缩略图烟测，NVIDIA/Tracker 代表性真实高光视频也通过，且对应源码包与最终二进制同址长期提供。通过前仍使用内部 RC 固定版本。
+- [ ] npm/Cargo SPDX、FFmpeg 组件快照、第三方声明、许可证全文和 SHA-256 manifest 均由锁文件重新生成；`personal-community-stable` 必须达到 100% 正文覆盖并固定每项 override 的锁文件/VCS/正文哈希，`selectors` 的 MPL-2.0 源码形式链接必须随声明提供。逐项独立法审属于未来严格发行，当前如实列为 advisory。
+- [ ] 最小自建 FFmpeg 候选的 checksum/build metadata、12 位 commit、PE 实际 imports 与 objdump 结果已一致，imports 只命中 Windows 系统 DLL allowlist；H.264、HEVC、AV1 三种合成 MP4 均完成受控缩略图烟测，且对应源码包与最终二进制在同一 Release 提供。代表性真实高光视频回归属于未来严格发行加固，不阻止个人社区版。
 - [ ] 对应源代码镜像或书面提供方式可长期访问并匹配该二进制。
 - [x] 项目自有代码已选择 MIT，根许可证已纳入仓库，并记录当前不另设重复 EULA。
-- [ ] 第三方声明、缺失许可文本处理和人工审核已获批准并纳入发布材料。
+- [ ] 第三方声明和缺失许可文本处理已由锁文件、上游提交与哈希固定并纳入发布材料；`personal-community-stable` 如实披露尚未完成的逐项人工/独立法审，未来严格发行再要求全部批准。
 
 ## 5. 内部未签名 RC
 
@@ -113,7 +113,7 @@
 - [x] 仓库负责人已确认有权将 `VALOFRAME_正规图标格式包.zip` 及其派生资产复制、修改并发布到公开 GitHub 仓库；确认日期与 SHA-256 见 `src-tauri/icons/README.md`。
 - [ ] 安装器、应用商店或商业分发所需的设计源文件、合同或许可证已另行归档并通过法律与品牌审核。
 - [x] 仓库负责人已声明清单锁定的 42 张游戏图片取得授权；逐文件哈希、集合指纹、待审字段与 verifier 已纳入 policy，但没有把具体渠道写成已核实事实。
-- [ ] 人工取得并核对可验证的授权原始证据，确认权利链、被授权主体、地域、期限、公开源码、应用内展示、GitHub 宣传、内部测试包、`public-windows-installer` 和 `public-release-artifact-download` 等实际渠道，并把审阅结论、manifest 和哈希重新固定到 policy；完成前不得发布本轮源码/宣传图或任何外发包。
+- [ ] 人工取得并核对可验证的授权原始证据，确认权利链、被授权主体、地域、期限、公开源码、应用内展示、GitHub 宣传、安装器和 Release 下载等实际渠道，并把审阅结论、manifest 和哈希重新固定到严格 policy；完成前不得宣称未来严格企业式发行已获第三方或独立法律批准。版本级负责人决定可以授权 `personal-community-stable` 精确渠道，但不产生上述第三方批准声明。
 - [ ] Riot Games、腾讯及《无畏契约》相关商标归属和非官方/非赞助/非认可声明已经批准，并纳入 README、About/许可页和公开发布材料。
 - [ ] FFmpeg provenance、SHA-256、许可证结论、SBOM 和源代码镜像/提供方式齐全。
 - [ ] Authenticode 证书和可信时间戳服务已配置；policy 固定 publisher subject 和证书 thumbprint，最终安装器与内嵌主程序的链、时间戳和 `signtool` 验证成功。

@@ -42,7 +42,7 @@ test("tag checkout is bound to one source commit and all application versions", 
   assert.match(workflow, /src-tauri\/Cargo\.toml/u);
 });
 
-test("repository updater signing material is mandatory without enterprise gates", () => {
+test("repository updater signing remains mandatory for the personal community channel", () => {
   assert.equal(stableConfig.bundle.createUpdaterArtifacts, true);
   assert.match(
     workflow,
@@ -68,8 +68,11 @@ test("repository updater signing material is mandatory without enterprise gates"
   }
   assert.doesNotMatch(
     workflow,
-    /VALOFRAME_RELEASE_EVIDENCE|public-release-preflight|RequireReady|WINDOWS_CERTIFICATE|Authenticode|signtool|check-bundle/u,
+    /VALOFRAME_RELEASE_EVIDENCE|public-release-preflight|RequireReady|WINDOWS_CERTIFICATE|signtool/u,
   );
+  assert.match(workflow, /check-bundle\.ps1/u);
+  assert.match(workflow, /-AllowPersonalCommunityStable/u);
+  assert.doesNotMatch(workflow, /-AllowUnsignedInternalRc|-AllowUnsignedCommunityBeta/u);
   assert.doesNotMatch(workflow, /public-release-policy\.json/u);
   assert.equal(publicPolicy.enforcement, "optional-future-hardening");
   assert.equal(publicPolicy.updater.decision, "enabled");
@@ -98,9 +101,82 @@ test("complete automated checks run before the signed build", () => {
   assert.match(workflow, /cargo clippy[\s\S]*?-D warnings/u);
   assert.match(workflow, /cargo test/u);
   assert.match(workflow, /git diff --check/u);
-  assert.match(workflow, /prepare-ffmpeg\.ps1/u);
-  assert.match(workflow, /verify-ffmpeg\.ps1/u);
+  assert.doesNotMatch(workflow, /prepare-ffmpeg\.ps1|verify-ffmpeg\.ps1|-ValidationOnly/u);
+  assert.match(workflow, /verify-minimal-ffmpeg-candidate\.ps1/u);
   assert.match(workflow, /windows-release-smoke\.ps1/u);
+});
+
+test("a pinned Ubuntu job builds exact minimal FFmpeg and transfers one run-bound artifact", () => {
+  assert.match(workflow, /ffmpeg:\r?\n\s+name: Build exact minimal FFmpeg and corresponding source/u);
+  assert.match(workflow, /runs-on: ubuntu-24\.04/u);
+  assert.match(workflow, /FFMPEG_COMMIT: ce3c09c101c83add623774d414a9f9498caf5c25/u);
+  assert.match(workflow, /git -C "\$RUNNER_TEMP\/ffmpeg-source" rev-parse HEAD/u);
+  assert.match(workflow, /build-minimal-ffmpeg\.sh/u);
+  assert.match(workflow, /minimal-windows-x64-candidate\.json/u);
+  assert.match(workflow, /--sort=name[\s\S]*?ffmpeg-corresponding-source\.tar\.xz/u);
+  assert.match(workflow, /sha256sum[\s\S]*?> SHA256SUMS\.txt/u);
+  assert.match(
+    workflow,
+    /stable-ffmpeg-candidate-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u,
+  );
+  assert.match(workflow, /release:\r?\n[\s\S]*?needs: ffmpeg/u);
+});
+
+test("Windows verifies, packages, stages, and installs personal community compliance before Tauri build", () => {
+  const downloadIndex = workflow.indexOf(
+    "name: Download the run-pinned minimal FFmpeg candidate",
+  );
+  const nativeVerifyIndex = workflow.indexOf(
+    "name: Verify minimal FFmpeg on native Windows x64",
+  );
+  const stageIndex = workflow.indexOf(
+    "name: Package and stage owner-authorized personal community FFmpeg",
+  );
+  const complianceIndex = workflow.indexOf(
+    "name: Generate and install personal community compliance evidence",
+  );
+  const buildIndex = workflow.indexOf(
+    "name: Build Tauri-signed updater artifacts",
+  );
+  assert.ok(
+    downloadIndex > 0 &&
+      nativeVerifyIndex > downloadIndex &&
+      stageIndex > nativeVerifyIndex &&
+      complianceIndex > stageIndex &&
+      buildIndex > complianceIndex,
+  );
+  assert.match(
+    workflow,
+    /package-minimal-ffmpeg-community-beta\.mjs[\s\S]*?--contract third_party\/ffmpeg\/personal-community-stable-minimal-windows-x64\.json/u,
+  );
+  assert.match(workflow, /stage-personal-community-stable-ffmpeg\.ps1/u);
+  assert.match(
+    workflow,
+    /-DecisionPath release\/approvals\/personal-community-stable-v0\.2\.1\.json/u,
+  );
+  assert.match(workflow, /--release-profile personal-community-stable/u);
+  assert.match(workflow, /channelDistributionReady -ne \$true/u);
+  assert.match(workflow, /Move-Item -LiteralPath \$source -Destination \$destination/u);
+});
+
+test("the personal community bundle gate owns the payload used by startup smoke", () => {
+  const gateIndex = workflow.indexOf("check-bundle.ps1");
+  const smokeIndex = workflow.indexOf("windows-release-smoke.ps1");
+  assert.ok(gateIndex > 0 && smokeIndex > gateIndex);
+  for (const parameter of [
+    "-AllowPersonalCommunityStable",
+    "-PersonalCommunityStableDecisionPath",
+    "-FFmpegArchivePath",
+    "-SourceBundlePath",
+    "-VerifiedPayloadOutputDirectory",
+  ]) {
+    assert.match(workflow, new RegExp(parameter, "u"));
+  }
+  assert.match(workflow, /releaseMode -cne 'personal-community-stable'/u);
+  assert.match(workflow, /nsisPayload\.verifiedPayloadOutputDirectory/u);
+  assert.match(workflow, /normalization\.rawEmbeddedSha256/u);
+  assert.match(workflow, /-ExecutablePath \$verifiedMain/u);
+  assert.match(workflow, /-ResourceDirectory \$payloadRoot/u);
 });
 
 test("updater package shape, size, signature, tampering, and wrong key are verified", () => {
@@ -126,8 +202,51 @@ test("release notes are optional and receive a safe default", () => {
   assert.match(workflow, /release\\notes\\\$env:RELEASE_TAG\.md/u);
   assert.match(workflow, /vhm-default-release-notes\.md/u);
   assert.match(workflow, /本版本包含功能改进、错误修复与自动更新支持/u);
-  assert.match(workflow, /--notes-file \$env:STABLE_NOTES/u);
+  assert.match(workflow, /--notes-file \$env:STABLE_PUBLISH_NOTES/u);
   assert.match(workflow, /RELEASE-NOTES\.md/u);
+  assert.match(workflow, /个人社区发行说明/u);
+  assert.match(workflow, /free of charge/u);
+  assert.match(workflow, /not affiliated with, sponsored by, or endorsed by Riot Games, Tencent, FFmpeg/u);
+  assert.match(workflow, /Unknown Publisher/u);
+  assert.match(workflow, /Tauri updater packages remain cryptographically signed/u);
+});
+
+test("the release carries FFmpeg source, notices, manifest, and compliance beside the installer", () => {
+  for (const asset of [
+    "valoframe-ffmpeg-minimal-windows-x64.zip",
+    "ffmpeg-corresponding-source.tar.xz",
+    "FFMPEG-MANIFEST.json",
+    "FFMPEG-SOURCE-OFFER.md",
+    "personal-community-stable-compliance.zip",
+    "PERSONAL-COMMUNITY-STABLE-NOTICE.txt",
+  ]) {
+    assert.match(workflow, new RegExp(asset.replaceAll(".", "\\."), "u"));
+  }
+  const assemblyIndex = workflow.indexOf(
+    "name: Assemble and independently verify stable release assets",
+  );
+  const hashIndex = workflow.indexOf("SHA256SUMS.txt", assemblyIndex);
+  const draftIndex = workflow.indexOf("gh release create $env:RELEASE_TAG");
+  assert.ok(assemblyIndex > 0 && hashIndex > assemblyIndex && draftIndex > hashIndex);
+  assert.match(
+    workflow,
+    /SHA256SUMS\.txt must cover every other release asset exactly once/u,
+  );
+  assert.match(workflow, /\$declaredNames\.Add\(\$name\)/u);
+  assert.match(workflow, /Set-Content[^\r\n]+-Encoding utf8NoBOM/u);
+  assert.doesNotMatch(workflow, /SHA256SUMS[^\r\n]*-Encoding ascii/u);
+  assert.match(
+    workflow,
+    /SHA256SUMS\.txt does not match release asset/u,
+  );
+});
+
+test("stable release verification uses numeric GitHub database IDs", () => {
+  assert.match(workflow, /--json databaseId,isDraft,isPrerelease,tagName/u);
+  assert.match(workflow, /\[long\] \$published\.databaseId/u);
+  assert.match(workflow, /\[long\] \$release\.databaseId/u);
+  assert.match(workflow, /\[long\] \$rolledBack\.databaseId/u);
+  assert.doesNotMatch(workflow, /\[long\] \$(?:published|release|rolledBack)\.id/u);
 });
 
 test("stable releases serialize globally and expose write credentials only to gh steps", () => {
@@ -154,14 +273,18 @@ test("GitHub actions are pinned to immutable revisions", () => {
   const actionUses = [
     ...workflow.matchAll(/uses: (actions\/[a-z-]+)@([^\s#]+)/gu),
   ];
-  assert.equal(actionUses.length, 4);
+  assert.equal(actionUses.length, 7);
   for (const [, action, revision] of actionUses) {
     assert.match(
       action,
-      /^actions\/(?:checkout|setup-node|setup-python|upload-artifact)$/u,
+      /^actions\/(?:checkout|setup-node|setup-python|upload-artifact|download-artifact)$/u,
     );
     assert.match(revision, /^[0-9a-f]{40}$/u);
   }
+  assert.match(
+    workflow,
+    /actions\/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53/u,
+  );
 });
 
 test("publication rejects duplicates and non-increasing SemVer before draft creation", () => {

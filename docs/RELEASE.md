@@ -18,7 +18,7 @@
 
 ### 公开发布
 
-个人开发者稳定发布由规范的 `vMAJOR.MINOR.PATCH` tag 触发。Tauri updater 签名、版本单调递增、下载地址/安装器版本绑定、512 MiB 上限和 draft 远端复核是强制门禁。旧的品牌、法律审批、完整 VM 矩阵和 Authenticode policy 继续作为未来增强检查，但不阻止个人 updater 发布。
+个人开发者稳定发布使用 `personal-community-stable` profile，由规范的 `vMAJOR.MINOR.PATCH` tag 触发。Tauri updater 签名、版本单调递增、下载地址/安装器版本绑定、512 MiB 上限、最终 bundle 内容、启动烟测、最小 FFmpeg 的精确对应源码/许可证附件和 draft 远端复核是强制门禁。旧的品牌、独立法律审批、完整 VM 矩阵和 Authenticode policy 继续作为未来增强检查，但不阻止个人 updater 发布。该 profile 只记录负责人对免费个人社区渠道的决定，不把“非商业”写成 MIT 附加限制，也不声称 Riot Games、腾讯、FFmpeg 项目或独立律师批准。
 
 没有 Authenticode 的安装器可能显示“未知发布者”或 SmartScreen 提示；发布说明和下载页面必须明确披露。Community Beta 仍不得冒充稳定更新版本。
 
@@ -62,7 +62,7 @@
 
 稳定标签必须精确为 `vMAJOR.MINOR.PATCH`。`v0.2.1` 是手动安装起点，`v0.2.2` 是首次 OTA 验收版本。存在对应 `release/notes/vX.Y.Z.md` 时使用该说明，否则 workflow 生成默认说明；不得只修改某一个 manifest，也不得改写第三方依赖中碰巧相同的版本。
 
-公开首发前必须审核并冻结产品名称、合法 publisher 和应用 identifier。公开发布后更改 identifier、安装范围或安装器渠道，可能被 Windows 视为不同产品或破坏升级路径，必须通过干净虚拟机验证。
+个人社区首发仍会冻结产品名称和应用 identifier，避免破坏升级路径。合法 publisher、Authenticode 主体与完整干净 VM 矩阵属于未来严格发行加固；若以后启用或更改 identifier、安装范围、publisher 或安装器渠道，应通过干净虚拟机验证。
 
 ## FFmpeg 发布材料
 
@@ -76,9 +76,9 @@
 
 不要仅凭“FFmpeg”名称推断许可证。许可证义务取决于实际构建及其启用组件；无法追溯的二进制不得进入公开安装包。
 
-当前固定的 BtbN `win64-lgpl` 二进制继续只用于内部 RC，不进入 Community Beta。它实际启用了大量本应用不需要的外部组件，因此仓库另设最小构建链：从固定 FFmpeg commit 交叉编译只保留 `file/mov`、H.264/HEVC/AV1 原生 parser+decoder、`scale/mjpeg/image2`，同时生成精确源码包、构建参数、工具链和三种无用户内容合成 MP4 的逐项缩略图烟测证据。Windows 门禁会复核 `SHA256SUMS.txt`、`BUILD-METADATA.json`、12 位固定 commit 标识，并直接解析 PE import table；实际导入必须与交叉工具链 `objdump` 结果一致且仅命中固定的 Windows 系统 DLL allowlist。候选报告固定为 `passed-candidate-not-promoted` 且 `promotionAuthorized = false`；只有 Community Beta workflow 在发布负责人渠道决定、源码 sidecar 和 beta 专用门禁同时成立时才可把它用于未签名 Prerelease。Beta 证据会如实标记 MinGW/工具链运行时许可复核与目标市场编解码器专利复核尚未完成，不得写成已审批；严格正式发布仍保留 NVIDIA/Tracker 真实 H.264、HEVC、AV1 素材回归、签名、VM 及完整审阅要求。
+当前固定的 BtbN `win64-lgpl` 二进制继续只用于内部 RC，不进入 Community Beta 或个人社区稳定版。它实际启用了大量本应用不需要的外部组件，因此仓库另设最小构建链：从固定 FFmpeg commit 交叉编译只保留 `file/mov`、H.264/HEVC/AV1 原生 parser+decoder、`scale/mjpeg/image2`，同时生成精确源码包、构建参数、工具链和三种无用户内容合成 MP4 的逐项缩略图烟测证据。Windows 门禁会复核 `SHA256SUMS.txt`、`BUILD-METADATA.json`、12 位固定 commit 标识，并直接解析 PE import table；实际导入必须与交叉工具链 `objdump` 结果一致且仅命中固定的 Windows 系统 DLL allowlist。候选报告固定为 `passed-candidate-not-promoted` 且 `promotionAuthorized = false`；Community Beta 或 `personal-community-stable` workflow 只能在各自发布负责人渠道决定、源码 sidecar、许可证正文和专用 bundle 门禁同时成立时使用它。个人社区证据会如实标记 MinGW/工具链运行时许可复核与目标市场编解码器专利复核尚未完成，不得写成已审批；未来严格发行仍保留代表性真实素材回归、Authenticode、VM 及完整审阅要求。
 
-`scripts/release/generate-compliance-evidence.mjs` 从 `package-lock.json`、Windows x64 Cargo 解析图和 FFmpeg manifest 生成两份 npm SPDX 2.3、Windows Cargo SPDX 2.3、FFmpeg 组件快照、第三方声明、去重后的许可证全文、索引、阻断摘要和逐文件 SHA-256 manifest。可在不存在输出目录时运行 `npm run release:compliance:generate`。发布归档漏带正文的精确依赖由 `third_party/licenses/license-text-overrides.json` 补充：manifest 固定版本、锁文件 checksum/integrity、上游提交、SPDX 正文覆盖、正文大小和 SHA-256，生成器只在包内正文确实为空时离线应用，并拒绝未使用、重复、越界、symlink/junction、未进入 Git index、版本/SPDX/VCS/哈希不一致的 override。`license-text-override-approvals.json` 使用绑定组件与正文哈希的独立结构化记录；没有匹配批准时仍输出稳定 pending blocker。bundle 门禁固定生成器、Windows target、全部锁文件、两份 override manifest 及每份正文的哈希；技术证据不能被自动写成“已批准”。
+`scripts/release/generate-compliance-evidence.mjs` 从 `package-lock.json`、Windows x64 Cargo 解析图和 FFmpeg manifest 生成两份 npm SPDX 2.3、Windows Cargo SPDX 2.3、FFmpeg 组件快照、第三方声明、去重后的许可证全文、索引、阻断摘要和逐文件 SHA-256 manifest。可在不存在输出目录时运行 `npm run release:compliance:generate`。发布归档漏带正文的精确依赖由 `third_party/licenses/license-text-overrides.json` 补充：manifest 固定版本、锁文件 checksum/integrity、上游提交、SPDX 正文覆盖、正文大小和 SHA-256，生成器只在包内正文确实为空时离线应用，并拒绝未使用、重复、越界、symlink/junction、未进入 Git index、版本/SPDX/VCS/哈希不一致的 override。`license-text-override-approvals.json` 使用绑定组件与正文哈希的独立结构化记录。严格 profile 会把缺少逐条人工复核记录保留为 blocker；`personal-community-stable` 只把这些人工复核和 FFmpeg 专利/独立法审状态列为 advisory，但许可证正文缺失、锁文件/SPDX/VCS/哈希不一致、`selectors` 的 MPL-2.0 源码形式记录缺失、FFmpeg 对应源码缺失或外部/GPL/nonfree 组件出现仍会硬失败。技术证据不能被自动写成“已批准”。
 
 ## 内部 RC 构建
 
@@ -114,7 +114,7 @@ CI 将已通过检查的全部 NSIS 载荷保留到 `RUNNER_TEMP` 下的预先�
 
 该 workflow 的输入契约固定为 `--no-sign` 内部 RC，并在进入公开反向门禁前再次要求 staging 主程序和安装器均为 `NotSigned`。公开模式调用不会传递 `-AllowUnsignedInternalRc`：它必须因为尚未关闭的 FFmpeg、第三方合规、公开签名 policy 或未签名 Authenticode 阻断而失败；这些预期域使用稳定前缀进入白名单，意外通过或任何其他错误都会使 workflow 失败。证据 artifact 的存在和内部 RC 门禁通过都不构成公开发布批准。
 
-该检查不会运行安装器，只证明最终压缩包中存在与本次输入一致的主程序、FFmpeg 和全部声明的合规文件；它不证明安装、升级、卸载、WebView2 引导或应用运行行为。下面的干净虚拟机矩阵仍是发布必需证据，不能由静态解包替代。
+该检查不会运行安装器，只证明最终压缩包中存在与本次输入一致的主程序、FFmpeg 和全部声明的合规文件；它不证明安装、升级、卸载、WebView2 引导或应用运行行为。个人社区发布另外执行隔离启动烟测；完整安装/升级/卸载、WebView2 引导和干净虚拟机矩阵仍是未来严格发行证据，不能由静态解包替代。
 
 `release/public-release-policy.json` 与 `scripts/release/public-release-preflight.ps1` 保留为严格公开发行的未来加固检查。它们可以报告第三方材料、品牌、publisher、identifier、代码签名和 VM 等未完成项，但不再被个人开发者 `stable-release` workflow 当作 updater 发布阻断。Tauri updater 签名仍不可跳过。
 
@@ -201,4 +201,4 @@ Windows 上 Tauri 通过 Known Folder API 解析应用数据目录；仅在子�
 12. updater 启用决定、密钥托管、公钥引用、稳定 HTTPS endpoint 和发布权限。
 13. 来源媒体只读、永久删除、应用数据边界与卸载保留策略的数据安全证据。
 
-`release/public-release-policy.json` 保留这些状态供诊断和未来严格发行使用。当前稳定发布的硬门禁以 updater 签名、版本/地址绑定、自动化测试和远端资产复核为准。
+`release/public-release-policy.json` 保留这些状态供诊断和未来严格发行使用。当前个人社区稳定发布的硬门禁以 updater 签名、版本/地址绑定、自动化测试、实际 bundle/启动检查、最小 LGPL FFmpeg 的二进制与精确对应源码/许可证附件，以及远端资产复核为准；渠道决定固定在 `release/approvals/personal-community-stable-v0.2.1.json`。

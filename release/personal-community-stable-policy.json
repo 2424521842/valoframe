@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "releaseProfile": "personal-community-stable",
+  "purpose": "Free personal community distribution with stable Tauri updates",
+  "ownerDecision": "release/approvals/personal-community-stable-v0.2.1.json",
+  "mandatory": {
+    "canonicalStableTag": true,
+    "versionAndTagMatch": true,
+    "tauriUpdaterSignature": true,
+    "minimalSourceBuiltFfmpeg": true,
+    "ffmpegExternalLibraries": 0,
+    "ffmpegCorrespondingSourceOnSameRelease": true,
+    "ffmpegLicenseAndBuildEvidence": true,
+    "thirdPartyLicenseTextCoverage": true,
+    "mplSourceAvailability": true,
+    "bundlePayloadVerification": true,
+    "isolatedStartupSmoke": true,
+    "draftAssetRedownloadVerification": true,
+    "sha256ForEveryOtherAsset": true
+  },
+  "futureHardeningNotBlockingThisProfile": [
+    "independent-legal-review",
+    "formal-brand-publisher-identifier-approval",
+    "authenticode-and-trusted-timestamp",
+    "full-clean-vm-matrix",
+    "formal-codec-patent-review",
+    "enterprise-protected-evidence-archive"
+  ],
+  "disclosures": [
+    "free-personal-community-release",
+    "not-official-affiliated-sponsored-or-endorsed",
+    "unknown-publisher-or-smartscreen-may-appear",
+    "tauri-updater-signature-is-not-authenticode",
+    "third-party-licenses-still-apply"
+  ]
+}

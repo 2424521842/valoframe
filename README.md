@@ -10,32 +10,30 @@
   <a href="https://github.com/2424521842/valoframe/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/2424521842/valoframe/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2ea44f"></a>
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4">
-  <a href="https://github.com/2424521842/valoframe/releases/tag/v0.1.0-beta.1"><img alt="Status: Community Beta" src="https://img.shields.io/badge/status-Community%20Beta-ff4655"></a>
+  <a href="https://github.com/2424521842/valoframe/releases/tag/v0.2.1"><img alt="Status: Personal Community Stable" src="https://img.shields.io/badge/status-Personal%20Community%20Stable-ff4655"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/2424521842/valoframe/releases/download/v0.1.0-beta.1/VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe"><strong>下载 Windows 安装包</strong></a>
+  <a href="https://github.com/2424521842/valoframe/releases/download/v0.2.1/%E7%93%A6%E5%88%BB_0.2.1_x64-setup.exe"><strong>下载 Windows 安装包</strong></a>
   ·
-  <a href="https://github.com/2424521842/valoframe/releases/tag/v0.1.0-beta.1">查看 v0.1.0-beta.1 发布说明</a>
+  <a href="https://github.com/2424521842/valoframe/releases/tag/v0.2.1">查看 v0.2.1 发布说明</a>
 </p>
 
 ## 下载
 
-当前版本：[`v0.1.0-beta.1`](https://github.com/2424521842/valoframe/releases/tag/v0.1.0-beta.1) · Windows 10/11 x64 · Community Beta
+当前版本：[`v0.2.1`](https://github.com/2424521842/valoframe/releases/tag/v0.2.1) · Windows 10/11 x64 · Personal Community Stable
 
-- **GitHub（推荐）**：[下载 `VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.1.0-beta.1/VALOFRAME-v0.1.0-beta.1-x64-unsigned-setup.exe)（6.84 MB）
-  - SHA-256：`a4993e5152cddc42623b4fe7dc308100f142617765ddad36aab66ae8aeb40d08`
-- **蓝奏云（备用）**：[下载 `瓦刻_0.1.0_x64-setup.exe`](https://wwbfc.lanzoue.com/iYmie3y080ef)（密码：`4sj6`，6.83 MB）
-  - SHA-256：`3e8bc3692119a8f2c2e32fc4c46928e37cbfa40e6efeeafbc0060c7aac79ef74`
+- **GitHub（唯一发布入口）**：[下载 `瓦刻_0.2.1_x64-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.2.1/%E7%93%A6%E5%88%BB_0.2.1_x64-setup.exe)
+- **完整性校验**：在同一 Release 下载 `SHA256SUMS.txt`，核对安装包文件名与 SHA-256。发布流程会在公开前后重新下载并逐文件复核全部资产。
 
 > [!IMPORTANT]
-> 普通用户只需下载上面列出的 `.exe` 安装包。Release 页中的 `Source code`、FFmpeg 压缩包、许可归档、JSON 报告、校验清单等是源码或技术合规附件，不是安装包。两个下载入口目前对应不同文件，请按所选入口的文件名和 SHA-256 分别核验，不要混用校验值。
+> 普通用户只需下载上面列出的 `.exe` 安装包。Release 页中的 `Source code`、FFmpeg 压缩包与对应源码、许可归档、JSON 报告、更新包和校验清单等是源码或技术附件，不是安装包。
 
 > [!WARNING]
-> v0.1.0 Community Beta 是未签名的早期测试版本，Windows 可能显示“未知发布者”或 SmartScreen 警告。只从项目明确公布的入口下载并核对 SHA-256；该版本没有自动更新，也不等于严格正式发布批准。安装前请阅读 [Community Beta 说明](docs/COMMUNITY_BETA.md)。
+> v0.2.1 安装器当前未使用 Windows Authenticode，Windows 可能显示“未知发布者”或 SmartScreen 警告。只从本项目 GitHub Release 下载并核对 SHA-256。应用内后续更新使用独立的 Tauri/Minisign 签名验证；这不等同于 Windows 发布者签名。
 
 > [!NOTE]
-> 这是非官方社区项目，与 Riot Games、腾讯及其关联公司不存在隶属、赞助或认可关系。发布负责人已确认当前清单锁定的游戏图片可以随 v0.1.0 Community Beta 发布；这是项目负责人的渠道决定，不声称第三方批准或独立法律审核已经完成。记录见 [Community Beta 决定](release/approvals/community-beta-v0.1.0.json)、[本版本素材范围](release/approvals/community-beta-v0.1.0-game-content-scope.json)和[原有游戏素材记录](release/approvals/game-content-rights.json)。
+> 这是非官方、免费、个人社区项目，与 Riot Games、腾讯及其关联公司不存在隶属、赞助或认可关系。发布负责人已将清单锁定的 42 张游戏图片批准用于 v0.2.1 个人社区稳定渠道；该项目内部决定不声称第三方批准或独立法律审核已经完成。记录见 [v0.2.1 渠道决定](release/approvals/personal-community-stable-v0.2.1.json)和[原有游戏素材记录](release/approvals/game-content-rights.json)。
 
 <p align="center">
   <img src="docs/images/valoframe-library.png" width="1280" alt="瓦刻素材库界面，使用 FixtureAlpha 合成对局数据">
@@ -59,17 +57,18 @@
 | --- | --- | --- |
 | 浏览器界面预览 | 可用 | 使用合成 mock 数据体验素材库、扫描、标签和详情；不访问真实本地素材 |
 | 桌面源码运行 | 内部测试 | 可验证真实扫描与本地预览；必须从干净提交构建并记录 commit |
+| 个人社区稳定版 | [v0.2.1 已发布](https://github.com/2424521842/valoframe/releases/tag/v0.2.1) | 免费、非官方 Windows 版；稳定更新包强制验签，安装器可能显示未知发布者 |
 | Community Beta | [v0.1.0-beta.1 已发布](https://github.com/2424521842/valoframe/releases/tag/v0.1.0-beta.1) | GitHub Prerelease；未签名、无自动更新，下载后需核对对应 SHA-256 |
-| 严格正式发布 | 阻断 | 代码签名、可信时间戳、完整许可审阅、干净 VM 与数据安全证据等门禁尚未全部闭合 |
+| 未来严格企业式发行 | 可选加固 | Authenticode、可信时间戳、独立法审和完整干净 VM 矩阵不阻止当前个人社区稳定版 |
 
-Community Beta 的下载要求、Windows 警告、手动更新方式、游戏图片说明及 FFmpeg 许可/对应源码要求见 [Community Beta 说明](docs/COMMUNITY_BETA.md)。FFmpeg 只用于生成缩略图；发布集合必须同时提供其许可证材料与对应源码。
+个人社区稳定版的渠道边界和强制技术门禁见 [Windows 发布说明](docs/RELEASE.md)。FFmpeg 只作为独立命令行程序生成缩略图；同一 Release 必须提供最小二进制、构建证据、许可证材料和精确对应源码。历史 Community Beta 说明仍见 [Community Beta 说明](docs/COMMUNITY_BETA.md)。
 
 ## 安装
 
-1. 从上方任一明确入口下载对应的 `.exe`，不要把 `Source code` 或技术附件当作安装程序。
-2. 在 PowerShell 中运行 `Get-FileHash -Algorithm SHA256 -LiteralPath '.\安装包文件名.exe'`，确认结果与该入口公布的 SHA-256 完全一致。
+1. 从上方 GitHub Release 入口下载 `.exe`，不要把 `Source code`、`.nsis.zip` 或技术附件当作安装程序。
+2. 在 PowerShell 中运行 `Get-FileHash -Algorithm SHA256 -LiteralPath '.\瓦刻_0.2.1_x64-setup.exe'`，确认结果与同一 Release 的 `SHA256SUMS.txt` 完全一致。
 3. 双击安装。如果 Windows 显示“Windows 已保护你的电脑”，先确认来源和哈希，再选择“更多信息”→“仍要运行”；无法确认时请取消安装。
-4. 首次扫描前建议备份重要数据。此版本不会自动更新，新版本需要手动下载安装。
+4. v0.2.1 是稳定更新通道的手动安装起点；后续稳定版本可在设置中检查、验签并确认安装。首次扫描前仍建议备份重要数据。
 
 ## 快速体验
 
@@ -95,14 +94,9 @@ npm run tauri -- dev
 
 从源码运行时未提供受审 FFmpeg 资源会稳定降级为占位缩略图；请不要自行把来源不明的 FFmpeg 二进制加入仓库或测试包。
 
-## 小范围测试
+## 反馈与测试安全
 
-当前只接受两类测试：
-
-1. 使用合成数据的浏览器界面预览；
-2. 负责人或同一法律主体控制设备上的桌面源码/内部 RC 验证。
-
-每次测试都必须绑定唯一 commit、构建方式和 Windows 环境；永久删除只允许使用专门复制出的可丢弃素材。详细矩阵、停止条件和脱敏要求见[小范围测试指南](docs/INTERNAL_TESTING.md)。
+公开稳定版可在个人 Windows 设备使用；涉及永久删除、来源根重定位或升级恢复的测试，仍建议先用专门复制出的可丢弃素材并备份应用数据。内部构建与完整回归的提交绑定、停止条件和脱敏要求见[小范围测试指南](docs/INTERNAL_TESTING.md)。
 
 - [提交测试记录](https://github.com/2424521842/valoframe/issues/new?template=beta_feedback.yml)
 - [报告可复现问题](https://github.com/2424521842/valoframe/issues/new?template=bug_report.yml)
@@ -175,4 +169,4 @@ npm run assets:verify
 
 项目自有源代码和随附文档采用 [MIT License](LICENSE)。第三方依赖、FFmpeg、游戏内容、名称、商标、品牌图标及其他非项目自有素材不因此获得 MIT 授权，详见[许可范围说明](LICENSE-SCOPE.txt)与[许可文档](docs/LICENSING.md)。
 
-本项目旨在作为免费、非商业的社区工具开展，并参考 Riot Games 的 [Legal Jibber Jabber](https://www.riotgames.com/en/legal)。该网页本身不构成授权。发布负责人已确认清单锁定的 42 张游戏图片可以随 v0.1.0 Community Beta 发布；该决定不声称 Riot Games、腾讯或其他第三方批准，也不声称独立法律审核已经完成。Community Beta 不用于商业分发或第三方复用，并且不等于严格正式发布批准。VALORANT、《无畏契约》及相关名称、商标和游戏内容归其各自权利人所有。
+本项目由个人开发者以免费、非商业的社区工具方式发布，并参考 Riot Games 的 [Legal Jibber Jabber](https://www.riotgames.com/en/legal)。该网页本身不构成授权。发布负责人已确认清单锁定的 42 张游戏图片可用于 v0.2.1 `personal-community-stable` 渠道；该决定不声称 Riot Games、腾讯或其他第三方批准，也不声称独立法律审核已经完成。“非商业”描述本次发布目的，不给第一方 MIT 代码增加新的使用限制，也不免除 FFmpeg 等第三方许可证义务。VALORANT、《无畏契约》及相关名称、商标和游戏内容归其各自权利人所有。

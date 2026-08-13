@@ -19,6 +19,14 @@ prerelease channel. That profile still requires the exact minimal FFmpeg binary
 archive and corresponding-source archive beside the installer, validates the
 channel decision record, and keeps the strict public-release policy blocked.
 
+Use -AllowPersonalCommunityStable only for the repository-owner-authorized,
+free personal community stable channel. That profile requires the exact minimal
+FFmpeg binary and corresponding-source archives beside the installer, validates
+their stable-tag binding and channel decision, and does not claim strict public
+release approval. Valid Authenticode signatures are accepted when present, but
+NotSigned application artifacts are also allowed and every other signature
+status remains a hard failure.
+
 .PARAMETER MainExecutablePath
 Path to the post-build external UNK staging executable used for byte provenance.
 The actually shipped NSS variant is extracted from the installer and checked.
@@ -61,6 +69,17 @@ Community Beta installer.
 .PARAMETER CommunityBetaSourceBundlePath
 Path to the exact FFmpeg corresponding-source archive that will be uploaded
 beside a Community Beta installer.
+
+.PARAMETER PersonalCommunityStableDecisionPath
+Path to the repository-owner decision for the personal community stable release.
+
+.PARAMETER FFmpegArchivePath
+Path to the exact minimal FFmpeg binary archive that will be uploaded beside a
+personal community stable installer.
+
+.PARAMETER SourceBundlePath
+Path to the exact FFmpeg corresponding-source archive that will be uploaded
+beside a personal community stable installer.
 
 .EXAMPLE
 pwsh ./scripts/release/check-bundle.ps1 `
@@ -133,12 +152,20 @@ param(
 
     [switch] $AllowUnsignedCommunityBeta,
 
+    [switch] $AllowPersonalCommunityStable,
+
     [string] $CommunityBetaFfmpegArchivePath,
 
     [string] $CommunityBetaSourceBundlePath,
 
     [ValidateNotNullOrEmpty()]
-    [string] $CommunityBetaDecisionPath = (Join-Path $PSScriptRoot '..\..\release\approvals\community-beta-v0.1.0.json')
+    [string] $CommunityBetaDecisionPath = (Join-Path $PSScriptRoot '..\..\release\approvals\community-beta-v0.1.0.json'),
+
+    [string] $PersonalCommunityStableDecisionPath,
+
+    [string] $FFmpegArchivePath,
+
+    [string] $SourceBundlePath
 )
 
 Set-StrictMode -Version Latest
@@ -146,6 +173,9 @@ $ErrorActionPreference = 'Stop'
 
 if ($AllowUnsignedInternalRc -and $AllowUnsignedCommunityBeta) {
     throw '-AllowUnsignedInternalRc and -AllowUnsignedCommunityBeta are mutually exclusive.'
+}
+if ($AllowPersonalCommunityStable -and ($AllowUnsignedInternalRc -or $AllowUnsignedCommunityBeta)) {
+    throw '-AllowPersonalCommunityStable is mutually exclusive with -AllowUnsignedInternalRc and -AllowUnsignedCommunityBeta.'
 }
 
 function Test-IsWindows {
@@ -1500,7 +1530,7 @@ function Get-CompliancePayloadReports {
         [Parameter(Mandatory = $true)] [string] $RelativeRoot,
         [Parameter(Mandatory = $true)] [string] $RepositoryRoot,
         [Parameter(Mandatory = $true)] [string] $FfmpegManifestPath,
-        [Parameter(Mandatory = $true)] [ValidateSet('public', 'community-beta')] [string] $ExpectedReleaseProfile,
+        [Parameter(Mandatory = $true)] [ValidateSet('public', 'community-beta', 'personal-community-stable')] [string] $ExpectedReleaseProfile,
         [Parameter(Mandatory = $true)] [bool] $RequirePublicReady
     )
 
@@ -1853,10 +1883,10 @@ function Get-CompliancePayloadReports {
     if ($summaryProfile -cne $ExpectedReleaseProfile) {
         throw "Compliance summary releaseProfile '$summaryProfile' does not match '$ExpectedReleaseProfile'."
     }
-    if ($ExpectedReleaseProfile -ceq 'community-beta') {
+    if ($ExpectedReleaseProfile -cin @('community-beta', 'personal-community-stable')) {
         $productionApproval = Get-RequiredJsonProperty -Object $summary -Name 'productionApproval' -Context 'compliance summary'
         if ($productionApproval -isnot [bool] -or [bool] $productionApproval) {
-            throw 'Community Beta compliance evidence must explicitly keep productionApproval false.'
+            throw "$ExpectedReleaseProfile compliance evidence must explicitly keep productionApproval false."
         }
     }
     $publicReady = Get-RequiredJsonProperty -Object $summary -Name 'publicRedistributionReady' -Context 'compliance summary'
@@ -1864,8 +1894,18 @@ function Get-CompliancePayloadReports {
         throw 'Compliance summary publicRedistributionReady must be a Boolean.'
     }
     $blockers = @(Get-RequiredJsonProperty -Object $summary -Name 'blockers' -Context 'compliance summary')
+    $overrideReviewItems = $blockers
+    $channelDistributionReady = $false
+    if ($ExpectedReleaseProfile -ceq 'personal-community-stable') {
+        $channelReadyValue = Get-RequiredJsonProperty -Object $summary -Name 'channelDistributionReady' -Context 'compliance summary'
+        if ($channelReadyValue -isnot [bool]) {
+            throw 'Personal community stable compliance summary channelDistributionReady must be a Boolean.'
+        }
+        $channelDistributionReady = [bool] $channelReadyValue
+        $overrideReviewItems = @(Get-RequiredJsonProperty -Object $summary -Name 'advisories' -Context 'compliance summary')
+    }
     $pendingBlockerComponents = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-    foreach ($blocker in $blockers) {
+    foreach ($blocker in $overrideReviewItems) {
         $code = Get-RequiredJsonString -Object $blocker -Name 'code' -Context 'compliance blocker'
         if ($code -cin @('NPM_LICENSE_OVERRIDE_REVIEW_PENDING', 'CARGO_LICENSE_OVERRIDE_REVIEW_PENDING')) {
             $blockedComponent = Get-RequiredJsonString -Object $blocker -Name 'component' -Context "compliance blocker '$code'"
@@ -1879,11 +1919,21 @@ function Get-CompliancePayloadReports {
         @($pendingOverrideComponents | Where-Object { -not $pendingBlockerComponents.Contains($_) }).Count -ne 0) {
         throw 'Compliance summary pending blockers do not match the structured license override approvals.'
     }
-    $expectedReady = $blockers.Count -eq 0
-    if ([bool] $publicReady -ne $expectedReady -or
-        ([bool] $publicReady -and [string] $summary.status -cne 'ready-for-approval') -or
-        (-not [bool] $publicReady -and [string] $summary.status -cne 'generated-with-blockers')) {
-        throw 'Compliance summary readiness state is internally inconsistent.'
+    if ($ExpectedReleaseProfile -ceq 'personal-community-stable') {
+        if ([bool] $publicReady -or
+            -not $channelDistributionReady -or
+            $blockers.Count -ne 0 -or
+            [string] $summary.status -cne 'ready-for-channel') {
+            throw 'Personal community stable compliance evidence must be channel-ready with no technical blockers while keeping strict public redistribution unapproved.'
+        }
+    }
+    else {
+        $expectedReady = $blockers.Count -eq 0
+        if ([bool] $publicReady -ne $expectedReady -or
+            ([bool] $publicReady -and [string] $summary.status -cne 'ready-for-approval') -or
+            (-not [bool] $publicReady -and [string] $summary.status -cne 'generated-with-blockers')) {
+            throw 'Compliance summary readiness state is internally inconsistent.'
+        }
     }
 
     foreach ($spdxFile in @('npm-runtime.spdx.json', 'npm-build.spdx.json', 'cargo-windows-x64.spdx.json')) {
@@ -1914,6 +1964,7 @@ function Get-CompliancePayloadReports {
         manifestPath = $manifestPath
         manifestSha256 = Get-Sha256 -LiteralPath $manifestPath
         publicRedistributionReady = [bool] $publicReady
+        channelDistributionReady = $channelDistributionReady
         fileCount = $reports.Count
         entries = $reports.ToArray()
     }
@@ -1941,6 +1992,12 @@ if (-not [string]::Equals($releasePolicyPath, $approvedReleasePolicyPath, [Syste
 $communityBetaDecision = $null
 $communityBetaFfmpegArchive = $null
 $communityBetaSourceBundle = $null
+$personalCommunityStableDecision = $null
+$personalCommunityStableDecisionPath = $null
+$personalCommunityStableFfmpegArchive = $null
+$personalCommunityStableSourceBundle = $null
+$personalCommunityStableVersion = $null
+$personalCommunityStableTag = $null
 if ($AllowUnsignedCommunityBeta) {
     if ([string]::IsNullOrWhiteSpace($CommunityBetaFfmpegArchivePath) -or
         [string]::IsNullOrWhiteSpace($CommunityBetaSourceBundlePath)) {
@@ -1992,6 +2049,126 @@ if ($AllowUnsignedCommunityBeta) {
     $communityBetaFfmpegArchive = Get-CanonicalExistingPath -LiteralPath $CommunityBetaFfmpegArchivePath -RequireDirectory $false -Description 'Community Beta FFmpeg binary archive'
     $communityBetaSourceBundle = Get-CanonicalExistingPath -LiteralPath $CommunityBetaSourceBundlePath -RequireDirectory $false -Description 'Community Beta FFmpeg corresponding-source archive'
 }
+elseif ($AllowPersonalCommunityStable) {
+    if ([string]::IsNullOrWhiteSpace($PersonalCommunityStableDecisionPath) -or
+        [string]::IsNullOrWhiteSpace($FFmpegArchivePath) -or
+        [string]::IsNullOrWhiteSpace($SourceBundlePath)) {
+        throw 'Personal community stable verification requires the owner decision, FFmpeg binary archive, and corresponding-source archive paths.'
+    }
+
+    $packageJsonPath = Get-CanonicalExistingPath -LiteralPath (Join-Path $repositoryRoot 'package.json') -RequireDirectory $false -Description 'repository package.json'
+    $packageJson = Get-Content -Raw -LiteralPath $packageJsonPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    $personalCommunityStableVersion = Get-RequiredJsonString -Object $packageJson -Name 'version' -Context 'repository package.json'
+    if ($personalCommunityStableVersion -cnotmatch '^\d+\.\d+\.\d+$') {
+        throw "Repository package version is not a supported release version: '$personalCommunityStableVersion'."
+    }
+    $personalCommunityStableTag = "v$personalCommunityStableVersion"
+    $personalCommunityStableDecisionPath = Get-CanonicalExistingPath -LiteralPath $PersonalCommunityStableDecisionPath -RequireDirectory $false -Description 'personal community stable decision record'
+    $approvedPersonalCommunityStableDecisionPath = Get-CanonicalExistingPath `
+        -LiteralPath (Join-Path $repositoryRoot "release\approvals\personal-community-stable-$personalCommunityStableTag.json") `
+        -RequireDirectory $false `
+        -Description 'approved personal community stable decision record'
+    if (-not [string]::Equals($personalCommunityStableDecisionPath, $approvedPersonalCommunityStableDecisionPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "PersonalCommunityStableDecisionPath must resolve to release/approvals/personal-community-stable-$personalCommunityStableTag.json."
+    }
+
+    $personalCommunityStableDecision = Get-Content -Raw -LiteralPath $personalCommunityStableDecisionPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    $strictPublicApproval = Get-RequiredJsonProperty -Object $personalCommunityStableDecision -Name 'strictPublicReleaseApproval' -Context 'personal community stable decision'
+    $independentLegalReview = Get-RequiredJsonProperty -Object $personalCommunityStableDecision -Name 'independentLegalReviewCompleted' -Context 'personal community stable decision'
+    if ([long] (Get-RequiredJsonProperty -Object $personalCommunityStableDecision -Name 'schemaVersion' -Context 'personal community stable decision') -ne 1 -or
+        (Get-RequiredJsonString -Object $personalCommunityStableDecision -Name 'version' -Context 'personal community stable decision') -cne $personalCommunityStableVersion -or
+        (Get-RequiredJsonString -Object $personalCommunityStableDecision -Name 'tag' -Context 'personal community stable decision') -cne $personalCommunityStableTag -or
+        (Get-RequiredJsonString -Object $personalCommunityStableDecision -Name 'channel' -Context 'personal community stable decision') -cne 'personal-community-stable' -or
+        (Get-RequiredJsonString -Object $personalCommunityStableDecision -Name 'decision' -Context 'personal community stable decision') -cne 'approved-by-repository-release-owner' -or
+        (Get-RequiredJsonString -Object $personalCommunityStableDecision -Name 'decisionAuthority' -Context 'personal community stable decision') -cne 'repository-release-owner' -or
+        (Get-RequiredJsonString -Object $personalCommunityStableDecision -Name 'distributionPurpose' -Context 'personal community stable decision') -cne 'free-personal-community' -or
+        $strictPublicApproval -isnot [bool] -or [bool] $strictPublicApproval -or
+        $independentLegalReview -isnot [bool] -or [bool] $independentLegalReview) {
+        throw 'Personal community stable decision must bind the repository version/tag/channel to the release owner while honestly retaining strict-public and independent-legal-review status as false.'
+    }
+
+    $personalDistributionScope = Get-RequiredJsonProperty -Object $personalCommunityStableDecision -Name 'distributionScope' -Context 'personal community stable decision'
+    foreach ($scopeConfirmation in @(
+            'freeOfCharge',
+            'nonCommercialCommunityProject',
+            'githubStableRelease',
+            'publicWindowsInstaller',
+            'inAppStableUpdater'
+        )) {
+        $value = Get-RequiredJsonProperty -Object $personalDistributionScope -Name $scopeConfirmation -Context 'personal community stable distributionScope'
+        if ($value -isnot [bool] -or -not [bool] $value) {
+            throw "Personal community stable distribution scope '$scopeConfirmation' must be true."
+        }
+    }
+
+    $personalConfirmations = Get-RequiredJsonProperty -Object $personalCommunityStableDecision -Name 'releaseOwnerConfirmations' -Context 'personal community stable decision'
+    foreach ($confirmation in @(
+            'manifestExactGameImagesMayBeDistributedInThisChannel',
+            'projectBrandIconMayBeDistributedInThisChannel',
+            'unofficialProjectDisclaimerRequired',
+            'minimalLgplFfmpegMayBeDistributedInThisChannel',
+            'ffmpegUseIsLimitedToThumbnailGeneration',
+            'authenticodeMayBeDeferred',
+            'tauriUpdaterSignatureRemainsRequired'
+        )) {
+        $value = Get-RequiredJsonProperty -Object $personalConfirmations -Name $confirmation -Context 'personal community stable releaseOwnerConfirmations'
+        if ($value -isnot [bool] -or -not [bool] $value) {
+            throw "Personal community stable decision confirmation '$confirmation' must be true."
+        }
+    }
+
+    $personalRequirements = Get-RequiredJsonProperty -Object $personalCommunityStableDecision -Name 'distributionRequirements' -Context 'personal community stable decision'
+    foreach ($requirement in @(
+            'windowsUnsignedWarningMustBeDisclosed',
+            'ffmpegLicenseMaterialsMustAccompanyInstaller',
+            'ffmpegBinaryAndBuildEvidenceMustAccompanyRelease',
+            'ffmpegCorrespondingSourceMustAccompanyRelease',
+            'sha256ManifestMustCoverEveryOtherReleaseAsset',
+            'thirdPartyNoticesMustAccompanyInstaller',
+            'personalCommunityLimitationsMustBeDisclosed'
+        )) {
+        $value = Get-RequiredJsonProperty -Object $personalRequirements -Name $requirement -Context 'personal community stable distributionRequirements'
+        if ($value -isnot [bool] -or -not [bool] $value) {
+            throw "Personal community stable distribution requirement '$requirement' must be true."
+        }
+    }
+
+    $personalAssetSet = Get-RequiredJsonProperty -Object $personalCommunityStableDecision -Name 'assetSet' -Context 'personal community stable decision'
+    $personalAssetManifestRelativePath = Get-RequiredJsonString -Object $personalAssetSet -Name 'manifest' -Context 'personal community stable assetSet'
+    if ($personalAssetManifestRelativePath -cne 'src/data/valorantAssets.json') {
+        throw 'Personal community stable assetSet must bind src/data/valorantAssets.json.'
+    }
+    $personalAssetManifestPath = Get-CanonicalExistingPath `
+        -LiteralPath (Join-Path $repositoryRoot $personalAssetManifestRelativePath) `
+        -RequireDirectory $false `
+        -Description 'personal community stable game asset manifest'
+    if (-not (Test-PathWithinRoot -Root $repositoryRoot -Candidate $personalAssetManifestPath)) {
+        throw 'Personal community stable game asset manifest escapes the repository root.'
+    }
+    Assert-NoReparsePoint -Root $repositoryRoot -Target $personalAssetManifestPath -Description 'personal community stable game asset manifest'
+    $personalAssetManifestSha256 = Get-RequiredJsonString -Object $personalAssetSet -Name 'manifestSha256' -Context 'personal community stable assetSet'
+    Assert-Sha256Text -Value $personalAssetManifestSha256 -Description 'personal community stable game asset manifest SHA-256'
+    if ((Get-Sha256 -LiteralPath $personalAssetManifestPath) -cne $personalAssetManifestSha256) {
+        throw 'Personal community stable game asset manifest SHA-256 does not match the owner decision.'
+    }
+    $personalAssetManifest = Get-Content -Raw -LiteralPath $personalAssetManifestPath -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    $personalAssetCount = @($personalAssetManifest.agents).Count + @($personalAssetManifest.maps).Count
+    if ([long] (Get-RequiredJsonProperty -Object $personalAssetSet -Name 'assetCount' -Context 'personal community stable assetSet') -ne $personalAssetCount) {
+        throw 'Personal community stable game asset count does not match the owner decision.'
+    }
+    $personalCollectionFingerprint = Get-RequiredJsonString -Object $personalAssetSet -Name 'collectionFingerprint' -Context 'personal community stable assetSet'
+    Assert-Sha256Text -Value $personalCollectionFingerprint -Description 'personal community stable game asset collection fingerprint'
+    if ((Get-RequiredJsonString -Object $personalAssetManifest -Name 'collectionFingerprint' -Context 'game asset manifest') -cne $personalCollectionFingerprint) {
+        throw 'Personal community stable game asset collection fingerprint does not match the owner decision.'
+    }
+    $sourceAssetBytesMustRemainManifestExact = Get-RequiredJsonProperty -Object $personalAssetSet -Name 'sourceAssetBytesMustRemainManifestExact' -Context 'personal community stable assetSet'
+    if ($sourceAssetBytesMustRemainManifestExact -isnot [bool] -or -not [bool] $sourceAssetBytesMustRemainManifestExact) {
+        throw 'Personal community stable owner decision must require manifest-exact game asset bytes.'
+    }
+
+    $personalCommunityStableFfmpegArchive = Get-CanonicalExistingPath -LiteralPath $FFmpegArchivePath -RequireDirectory $false -Description 'personal community stable FFmpeg binary archive'
+    $personalCommunityStableSourceBundle = Get-CanonicalExistingPath -LiteralPath $SourceBundlePath -RequireDirectory $false -Description 'personal community stable FFmpeg corresponding-source archive'
+}
 $verifiedPayloadOutput = Resolve-VerifiedPayloadOutput -ConfiguredPath $VerifiedPayloadOutputDirectory
 
 $resourceRootItem = Get-Item -LiteralPath $resourceRoot -Force
@@ -2023,6 +2200,20 @@ if ($AllowUnsignedCommunityBeta) {
             $betaInputItem.Length -le 0 -or
             ($betaInputItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "$($betaInput.description) must be a non-empty regular file without reparse points."
+        }
+    }
+}
+elseif ($AllowPersonalCommunityStable) {
+    foreach ($personalInput in @(
+            [ordered]@{ path = $personalCommunityStableDecisionPath; description = 'personal community stable decision record' },
+            [ordered]@{ path = $personalCommunityStableFfmpegArchive; description = 'personal community stable FFmpeg binary archive' },
+            [ordered]@{ path = $personalCommunityStableSourceBundle; description = 'personal community stable FFmpeg corresponding-source archive' }
+        )) {
+        $personalInputItem = Get-Item -LiteralPath $personalInput.path -Force
+        if ($personalInputItem.PSIsContainer -or
+            $personalInputItem.Length -le 0 -or
+            ($personalInputItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$($personalInput.description) must be a non-empty regular file without reparse points."
         }
     }
 }
@@ -2209,6 +2400,108 @@ if ($AllowUnsignedCommunityBeta) {
         throw 'Community Beta FFmpeg must not claim a formal legal approval reference.'
     }
 }
+elseif ($AllowPersonalCommunityStable) {
+    $releaseChannel = Get-RequiredJsonString -Object $manifest -Name 'releaseChannel' -Context 'personal community stable FFmpeg manifest'
+    $productionPromotionAuthorized = Get-RequiredJsonProperty -Object $manifest -Name 'productionPromotionAuthorized' -Context 'personal community stable FFmpeg manifest'
+    $ownerAuthorized = Get-RequiredJsonProperty -Object $sourceCompliance -Name 'ownerAuthorizedForThisChannel' -Context 'personal community stable FFmpeg sourceCompliance'
+    if ([long] $schemaVersion -ne 2 -or
+        $releaseChannel -cne 'personal-community-stable' -or
+        $productionPromotionAuthorized -isnot [bool] -or [bool] $productionPromotionAuthorized -or
+        $ownerAuthorized -isnot [bool] -or -not [bool] $ownerAuthorized -or
+        $redistributionReady -or
+        $sourceComplianceStatus -cne 'personal-community-stable-source-bundled-owner-attested') {
+        throw 'Personal community stable FFmpeg manifest must be owner-authorized for that channel while retaining strict public promotion and redistribution approval as false.'
+    }
+    if ($providerReleaseTag -cne $personalCommunityStableTag) {
+        throw "Personal community stable FFmpeg provider tag '$providerReleaseTag' does not match owner decision tag '$personalCommunityStableTag'."
+    }
+    $manifestOwnerDecision = Get-RequiredJsonProperty -Object $manifest -Name 'ownerDecision' -Context 'personal community stable FFmpeg manifest'
+    $expectedOwnerDecisionRelativePath = [System.IO.Path]::GetRelativePath($repositoryRoot, $personalCommunityStableDecisionPath).Replace('\', '/')
+    $manifestOwnerDecisionHash = Get-RequiredJsonString -Object $manifestOwnerDecision -Name 'sha256' -Context 'personal community stable FFmpeg ownerDecision'
+    Assert-Sha256Text -Value $manifestOwnerDecisionHash -Description 'personal community stable FFmpeg owner decision hash'
+    if ((Get-RequiredJsonString -Object $manifestOwnerDecision -Name 'path' -Context 'personal community stable FFmpeg ownerDecision') -cne $expectedOwnerDecisionRelativePath -or
+        -not [string]::Equals($manifestOwnerDecisionHash, (Get-Sha256 -LiteralPath $personalCommunityStableDecisionPath), [System.StringComparison]::OrdinalIgnoreCase) -or
+        (Get-RequiredJsonString -Object $manifestOwnerDecision -Name 'version' -Context 'personal community stable FFmpeg ownerDecision') -cne $personalCommunityStableVersion -or
+        (Get-RequiredJsonString -Object $manifestOwnerDecision -Name 'tag' -Context 'personal community stable FFmpeg ownerDecision') -cne $personalCommunityStableTag -or
+        (Get-RequiredJsonString -Object $manifestOwnerDecision -Name 'decision' -Context 'personal community stable FFmpeg ownerDecision') -cne 'approved-by-repository-release-owner') {
+        throw 'Personal community stable FFmpeg manifest ownerDecision does not match the exact approved repository decision.'
+    }
+    $providerReleaseUrl = Get-RequiredJsonString -Object $provider -Name 'releaseUrl' -Context 'personal community stable FFmpeg provider'
+    Assert-HttpsUrl -Value $providerReleaseUrl -Description 'personal community stable FFmpeg provider releaseUrl'
+    $providerReleaseUri = [System.Uri] $providerReleaseUrl
+    if ($providerReleaseUri.AbsolutePath -notlike "*/releases/tag/$providerReleaseTag") {
+        throw "Personal community stable FFmpeg provider release URL is not bound to tag '$providerReleaseTag'."
+    }
+
+    $buildContract = Get-RequiredJsonProperty -Object $manifest -Name 'build' -Context 'personal community stable FFmpeg manifest'
+    $externalLibraries = @(Get-RequiredJsonProperty -Object $buildContract -Name 'externalLibraries' -Context 'personal community stable FFmpeg build')
+    if ($externalLibraries.Count -ne 0) {
+        throw 'Personal community stable FFmpeg must be the minimal build with no external libraries.'
+    }
+
+    $projectMirrorUrl = Get-RequiredJsonString -Object $artifact -Name 'projectMirrorUrl' -Context 'personal community stable FFmpeg artifact'
+    $binaryMirrorUrl = Get-RequiredJsonString -Object $sourceCompliance -Name 'binaryMirrorUrl' -Context 'personal community stable FFmpeg sourceCompliance'
+    Assert-HttpsUrl -Value $projectMirrorUrl -Description 'personal community stable FFmpeg artifact projectMirrorUrl'
+    Assert-HttpsUrl -Value $binaryMirrorUrl -Description 'personal community stable FFmpeg sourceCompliance.binaryMirrorUrl'
+    if ($artifactUrl -cne $projectMirrorUrl -or $artifactUrl -cne $binaryMirrorUrl) {
+        throw 'Personal community stable FFmpeg artifact and binary mirror URLs must match exactly.'
+    }
+
+    $artifactUri = [System.Uri] $artifactUrl
+    $artifactUrlFileName = [System.Uri]::UnescapeDataString([System.IO.Path]::GetFileName($artifactUri.AbsolutePath))
+    $binaryArchiveItem = Get-Item -LiteralPath $personalCommunityStableFfmpegArchive -Force
+    if ($artifactFileName -cne 'valoframe-ffmpeg-minimal-windows-x64.zip' -or
+        $artifactUrlFileName -cne $artifactFileName -or
+        $binaryArchiveItem.Name -cne $artifactFileName -or
+        $binaryArchiveItem.Length -ne [long] $archiveSize -or
+        -not [string]::Equals((Get-Sha256 -LiteralPath $personalCommunityStableFfmpegArchive), $archiveHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Personal community stable FFmpeg binary archive does not match its pinned minimal-build manifest metadata.'
+    }
+
+    $sourceBundle = Get-RequiredJsonProperty -Object $sourceCompliance -Name 'correspondingSourceBundle' -Context 'personal community stable FFmpeg sourceCompliance'
+    $sourceBundleUrl = Get-RequiredJsonString -Object $sourceBundle -Name 'url' -Context 'personal community stable FFmpeg correspondingSourceBundle'
+    Assert-HttpsUrl -Value $sourceBundleUrl -Description 'personal community stable FFmpeg corresponding source URL'
+    $sourceBundleSize = [long] (Get-RequiredJsonProperty -Object $sourceBundle -Name 'sizeBytes' -Context 'personal community stable FFmpeg correspondingSourceBundle')
+    if ($sourceBundleSize -le 0) {
+        throw 'Personal community stable FFmpeg corresponding source sizeBytes must be positive.'
+    }
+    $sourceBundleHash = Get-RequiredJsonString -Object $sourceBundle -Name 'sha256' -Context 'personal community stable FFmpeg correspondingSourceBundle'
+    Assert-Sha256Text -Value $sourceBundleHash -Description 'personal community stable FFmpeg corresponding source hash'
+    $sourceBundleUri = [System.Uri] $sourceBundleUrl
+    $sourceBundleUrlFileName = [System.Uri]::UnescapeDataString([System.IO.Path]::GetFileName($sourceBundleUri.AbsolutePath))
+    $sourceBundleItem = Get-Item -LiteralPath $personalCommunityStableSourceBundle -Force
+    if ($sourceBundleUrlFileName -cne 'ffmpeg-corresponding-source.tar.xz' -or
+        $sourceBundleItem.Name -cne $sourceBundleUrlFileName -or
+        $sourceBundleItem.Length -ne $sourceBundleSize -or
+        -not [string]::Equals((Get-Sha256 -LiteralPath $personalCommunityStableSourceBundle), $sourceBundleHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Personal community stable FFmpeg corresponding-source archive does not match its pinned manifest metadata.'
+    }
+
+    foreach ($releaseUrl in @($artifactUri, $sourceBundleUri)) {
+        if ($releaseUrl.AbsolutePath -notlike "*/releases/download/$providerReleaseTag/*") {
+            throw "Personal community stable FFmpeg release URL is not bound to tag '$providerReleaseTag'."
+        }
+    }
+
+    $externalLibraryAuditComplete = Get-RequiredJsonProperty -Object $sourceCompliance -Name 'ffmpegExternalLibraryAuditComplete' -Context 'personal community stable FFmpeg sourceCompliance'
+    $thirdPartyLicenseAuditComplete = Get-RequiredJsonProperty -Object $sourceCompliance -Name 'thirdPartyLicenseAuditComplete' -Context 'personal community stable FFmpeg sourceCompliance'
+    $toolchainRuntimeLicenseReviewStatus = Get-RequiredJsonString -Object $sourceCompliance -Name 'toolchainRuntimeLicenseReviewStatus' -Context 'personal community stable FFmpeg sourceCompliance'
+    $ijgAttributionRequired = Get-RequiredJsonProperty -Object $sourceCompliance -Name 'ijgAttributionRequired' -Context 'personal community stable FFmpeg sourceCompliance'
+    $ijgAttributionIncluded = Get-RequiredJsonProperty -Object $sourceCompliance -Name 'ijgAttributionIncluded' -Context 'personal community stable FFmpeg sourceCompliance'
+    $patentReviewStatus = Get-RequiredJsonString -Object $sourceCompliance -Name 'patentReviewStatus' -Context 'personal community stable FFmpeg sourceCompliance'
+    if ($externalLibraryAuditComplete -isnot [bool] -or -not [bool] $externalLibraryAuditComplete -or
+        $thirdPartyLicenseAuditComplete -isnot [bool] -or [bool] $thirdPartyLicenseAuditComplete -or
+        $toolchainRuntimeLicenseReviewStatus -cne 'pending-for-strict-public-release' -or
+        $ijgAttributionRequired -isnot [bool] -or -not [bool] $ijgAttributionRequired -or
+        $ijgAttributionIncluded -isnot [bool] -or -not [bool] $ijgAttributionIncluded -or
+        $patentReviewStatus -cne 'pending-for-strict-public-release') {
+        throw 'Personal community stable FFmpeg must prove the zero-external-library audit and IJG notice while retaining honest pending strict-public toolchain, third-party-license, and patent reviews.'
+    }
+    $legalApprovalProperty = $sourceCompliance.PSObject.Properties['legalApprovalReference']
+    if ($null -eq $legalApprovalProperty -or $null -ne $legalApprovalProperty.Value) {
+        throw 'Personal community stable FFmpeg must not claim a formal legal approval reference.'
+    }
+}
 elseif (-not $AllowUnsignedInternalRc) {
     if (-not $redistributionReady) {
         throw 'Public redistribution is blocked: FFmpeg sourceCompliance.redistributionReady is false. Use -AllowUnsignedInternalRc only for a non-redistributed internal RC.'
@@ -2286,6 +2579,10 @@ if ($null -ne $manifestLicenseFilesProperty -and $null -ne $manifestLicenseFiles
         $relative = $normalizedDeclaredPath.Substring($prefix.Length).Replace('/', '\')
         $licenseDeclarations[$relative] = $fileDeclaration
     }
+}
+if ($AllowPersonalCommunityStable -and
+    -not $licenseDeclarations.ContainsKey('licenses\ffmpeg\THIRD-PARTY-NOTICE.md')) {
+    throw 'Personal community stable FFmpeg manifest must declare THIRD-PARTY-NOTICE.md as an installed license payload.'
 }
 
 $licenseReports = [System.Collections.Generic.List[object]]::new()
@@ -2400,14 +2697,35 @@ $sourceOfferText = Get-Content -Raw -LiteralPath $sourceOfferPath -Encoding UTF8
 if ($sourceOfferText -notmatch 'https://[^\s)>]+') {
     throw 'Bundled SOURCE-OFFER.md must contain at least one HTTPS source URL.'
 }
+if ($AllowPersonalCommunityStable) {
+    if ($sourceOfferText.IndexOf($sourceBundleUrl, [System.StringComparison]::Ordinal) -lt 0 -or
+        $sourceOfferText.IndexOf($sourceBundleHash, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw 'Personal community stable SOURCE-OFFER.md must name the exact corresponding-source URL and SHA-256.'
+    }
+    $thirdPartyNoticePath = Get-ResourceFile -Root $resourceRoot -RelativePath 'licenses\ffmpeg\THIRD-PARTY-NOTICE.md' -Description 'bundled personal community stable FFmpeg third-party notice'
+    $thirdPartyNoticeText = Get-Content -Raw -LiteralPath $thirdPartyNoticePath -Encoding UTF8
+    if ($thirdPartyNoticeText -notmatch 'This software is based in part on the work of the Independent JPEG Group\.' -or
+        $thirdPartyNoticeText.IndexOf($sourceBundleUrl, [System.StringComparison]::Ordinal) -lt 0 -or
+        $thirdPartyNoticeText.IndexOf($sourceBundleHash, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw 'Personal community stable THIRD-PARTY-NOTICE.md must contain the IJG attribution and exact corresponding-source reference.'
+    }
+}
 
 $complianceReport = Get-CompliancePayloadReports `
     -ResourceRoot $resourceRoot `
     -RelativeRoot $ThirdPartyComplianceRelativeRoot `
     -RepositoryRoot $repositoryRoot `
     -FfmpegManifestPath $manifestPath `
-    -ExpectedReleaseProfile $(if ($AllowUnsignedCommunityBeta) { 'community-beta' } else { 'public' }) `
-    -RequirePublicReady (-not ([bool] $AllowUnsignedInternalRc -or [bool] $AllowUnsignedCommunityBeta))
+    -ExpectedReleaseProfile $(if ($AllowUnsignedCommunityBeta) {
+        'community-beta'
+    }
+    elseif ($AllowPersonalCommunityStable) {
+        'personal-community-stable'
+    }
+    else {
+        'public'
+    }) `
+    -RequirePublicReady (-not ([bool] $AllowUnsignedInternalRc -or [bool] $AllowUnsignedCommunityBeta -or [bool] $AllowPersonalCommunityStable))
 
 $mainHash = Get-Sha256 -LiteralPath $mainExecutable
 $nsisHash = Get-Sha256 -LiteralPath $nsisBundle
@@ -2457,7 +2775,7 @@ $extractorItem = Get-Item -LiteralPath $nsisExtractor -Force
 if (($extractorItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "NSIS extractor must not be a reparse point: '$nsisExtractor'."
 }
-$permitUnsigned = [bool] ($AllowUnsignedInternalRc -or $AllowUnsignedCommunityBeta)
+$permitUnsigned = [bool] ($AllowUnsignedInternalRc -or $AllowUnsignedCommunityBeta -or $AllowPersonalCommunityStable)
 $signingRequirements = if ($permitUnsigned) {
     $null
 }
@@ -2491,6 +2809,9 @@ $mainSignature = Get-SignatureReport `
     elseif ($AllowUnsignedCommunityBeta) {
         '-AllowUnsignedCommunityBeta was supplied; the installer must be disclosed as unsigned'
     }
+    elseif ($AllowPersonalCommunityStable) {
+        '-AllowPersonalCommunityStable was supplied; NotSigned artifacts must be disclosed for this owner-authorized channel'
+    }
     else {
         'the public artifact signature is verified on the embedded NSS executable'
     })
@@ -2502,7 +2823,16 @@ $nsisSignature = Get-SignatureReport `
     -Description 'NSIS installer' `
     -PermitUnsigned $permitUnsigned `
     -SigningRequirements $signingRequirements
-$ffmpegSignature = Get-SignatureReport -LiteralPath $ffmpegPath -Description 'bundled FFmpeg executable' -PermitUnsigned $true -HashPinnedOnly
+$ffmpegSignature = if ($AllowPersonalCommunityStable) {
+    Get-SignatureReport `
+        -LiteralPath $ffmpegPath `
+        -Description 'bundled personal community stable FFmpeg executable' `
+        -PermitUnsigned $true `
+        -UnsignedAcceptanceReason '-AllowPersonalCommunityStable was supplied and the FFmpeg bytes are pinned to the owner-authorized minimal archive'
+}
+else {
+    Get-SignatureReport -LiteralPath $ffmpegPath -Description 'bundled FFmpeg executable' -PermitUnsigned $true -HashPinnedOnly
+}
 if ($AllowUnsignedCommunityBeta -and
     ($mainSignature.status -cne 'NotSigned' -or
         $nsisSignature.status -cne 'NotSigned' -or
@@ -2518,11 +2848,14 @@ $report = [ordered]@{
     elseif ($AllowUnsignedCommunityBeta) {
         'unsigned-community-beta'
     }
+    elseif ($AllowPersonalCommunityStable) {
+        'personal-community-stable'
+    }
     else {
         'public-redistribution'
     }
     checkedAtUtc = [DateTime]::UtcNow.ToString('o')
-    strictPublicReleaseApproved = -not [bool] ($AllowUnsignedInternalRc -or $AllowUnsignedCommunityBeta)
+    strictPublicReleaseApproved = -not [bool] ($AllowUnsignedInternalRc -or $AllowUnsignedCommunityBeta -or $AllowPersonalCommunityStable)
     communityBetaDecision = if ($AllowUnsignedCommunityBeta) {
         [ordered]@{
             path = $communityBetaDecisionPath
@@ -2537,6 +2870,30 @@ $report = [ordered]@{
                 path = $communityBetaSourceBundle
                 sizeBytes = (Get-Item -LiteralPath $communityBetaSourceBundle -Force).Length
                 sha256 = Get-Sha256 -LiteralPath $communityBetaSourceBundle
+            }
+        }
+    }
+    else {
+        $null
+    }
+    personalCommunityStableDecision = if ($AllowPersonalCommunityStable) {
+        [ordered]@{
+            path = $personalCommunityStableDecisionPath
+            sha256 = Get-Sha256 -LiteralPath $personalCommunityStableDecisionPath
+            version = $personalCommunityStableVersion
+            tag = $personalCommunityStableTag
+            channel = 'personal-community-stable'
+            ownerAuthorizedForThisChannel = $true
+            strictPublicReleaseApproval = $false
+            ffmpegBinaryArchive = [ordered]@{
+                path = $personalCommunityStableFfmpegArchive
+                sizeBytes = (Get-Item -LiteralPath $personalCommunityStableFfmpegArchive -Force).Length
+                sha256 = Get-Sha256 -LiteralPath $personalCommunityStableFfmpegArchive
+            }
+            ffmpegCorrespondingSource = [ordered]@{
+                path = $personalCommunityStableSourceBundle
+                sizeBytes = (Get-Item -LiteralPath $personalCommunityStableSourceBundle -Force).Length
+                sha256 = Get-Sha256 -LiteralPath $personalCommunityStableSourceBundle
             }
         }
     }

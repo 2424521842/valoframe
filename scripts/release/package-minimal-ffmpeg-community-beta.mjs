@@ -25,6 +25,20 @@ const DEFAULT_REPOSITORY_ROOT = resolve(SCRIPT_DIRECTORY, "../..");
 const DEFAULT_CONTRACT = "third_party/ffmpeg/community-beta-minimal-windows-x64.json";
 const HEX_64 = /^[0-9a-f]{64}$/;
 const SAFE_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const PACKAGING_PROFILES = Object.freeze({
+  "community-beta": Object.freeze({
+    contractStatus: "community-beta-technical-packaging-contract",
+    outputStatus: "prepared-community-beta-candidate-not-public-release-approved",
+    buildStatus: "community-beta-technical-candidate",
+    displayName: "Community Beta",
+  }),
+  "personal-community-stable": Object.freeze({
+    contractStatus: "personal-community-stable-technical-packaging-contract",
+    outputStatus: "prepared-personal-community-stable-candidate",
+    buildStatus: "personal-community-stable-technical-candidate",
+    displayName: "Personal Community Stable",
+  }),
+});
 
 function fail(message) {
   throw new Error(message);
@@ -76,7 +90,8 @@ function printHelp() {
       "",
       "The candidate root must contain the exact artifact produced by",
       "ffmpeg-minimal-candidate.yml plus WINDOWS-VERIFICATION.json.",
-      "The output is a technical community-beta package, not distribution approval.",
+      "The output is a hash-bound technical package for the contract's channel.",
+      "The default contract remains the existing Community Beta contract.",
       "",
     ].join("\n"),
   );
@@ -245,11 +260,15 @@ function parseChecksums(pathValue, requiredNames) {
 }
 
 function validateContract(contract) {
-  assert(contract.schemaVersion === 1, "Unsupported community-beta FFmpeg contract schemaVersion.");
-  assert(contract.status === "community-beta-technical-packaging-contract", "Community-beta contract status is invalid.");
-  assert(contract.channel === "community-beta", "Community-beta contract channel is invalid.");
-  assert(contract.platform === "windows" && contract.architecture === "x86_64", "Community-beta contract target is invalid.");
-  assert(/^[0-9a-f]{40}$/u.test(contract.sourceCommit), "Community-beta contract sourceCommit is invalid.");
+  assert(contract.schemaVersion === 1, "Unsupported FFmpeg packaging contract schemaVersion.");
+  const channel = requireString(contract.channel, "contract.channel");
+  const declaredProfile = contract.profile ?? contract.releaseProfile ?? channel;
+  assert(declaredProfile === channel, "FFmpeg contract profile must match its channel.");
+  const profile = PACKAGING_PROFILES[channel];
+  assert(profile, `Unsupported FFmpeg packaging channel '${channel}'.`);
+  assert(contract.status === profile.contractStatus, `${profile.displayName} contract status is invalid.`);
+  assert(contract.platform === "windows" && contract.architecture === "x86_64", `${profile.displayName} contract target is invalid.`);
+  assert(/^[0-9a-f]{40}$/u.test(contract.sourceCommit), `${profile.displayName} contract sourceCommit is invalid.`);
   const requiredInput = requireObject(contract.requiredInput, "requiredInput");
   requireStringArray(requiredInput.artifactFiles, "requiredInput.artifactFiles");
   for (const name of requiredInput.artifactFiles) {
@@ -275,7 +294,7 @@ function validateContract(contract) {
     requireHash(material.sha256, `license material '${material.outputFileName}' sha256`);
   }
   const output = requireObject(contract.output, "output");
-  assert(output.status === "prepared-community-beta-candidate-not-public-release-approved", "Community-beta package output status is unsafe.");
+  assert(output.status === profile.outputStatus, `${profile.displayName} package output status is unsafe.`);
   for (const field of [
     "runtimeRelativePath",
     "licenseRootRelativePath",
@@ -290,13 +309,21 @@ function validateContract(contract) {
   assert(SAFE_FILE_NAME.test(requireString(output.checksumManifestFileName, "output.checksumManifestFileName")), "Checksum manifest output file name is unsafe.");
   const boundary = requireObject(contract.complianceBoundary, "complianceBoundary");
   requireBoolean(boundary.technicalPackagingOnly, true, "complianceBoundary.technicalPackagingOnly");
-  requireBoolean(boundary.communityBetaDistributionAuthorized, false, "complianceBoundary.communityBetaDistributionAuthorized");
-  requireBoolean(boundary.publicReleaseApproved, false, "complianceBoundary.publicReleaseApproved");
-  requireBoolean(boundary.modifiesPublicReleasePolicy, false, "complianceBoundary.modifiesPublicReleasePolicy");
-  requireBoolean(boundary.requiresReleaseOwnerApprovalBeforeDistribution, true, "complianceBoundary.requiresReleaseOwnerApprovalBeforeDistribution");
+  if (channel === "community-beta") {
+    requireBoolean(boundary.communityBetaDistributionAuthorized, false, "complianceBoundary.communityBetaDistributionAuthorized");
+    requireBoolean(boundary.publicReleaseApproved, false, "complianceBoundary.publicReleaseApproved");
+    requireBoolean(boundary.modifiesPublicReleasePolicy, false, "complianceBoundary.modifiesPublicReleasePolicy");
+    requireBoolean(boundary.requiresReleaseOwnerApprovalBeforeDistribution, true, "complianceBoundary.requiresReleaseOwnerApprovalBeforeDistribution");
+  } else {
+    requireBoolean(boundary.ownerAuthorizedForThisChannel, true, "complianceBoundary.ownerAuthorizedForThisChannel");
+    requireBoolean(boundary.strictPublicReleaseApproved, false, "complianceBoundary.strictPublicReleaseApproved");
+    requireBoolean(boundary.modifiesStrictPublicReleasePolicy, false, "complianceBoundary.modifiesStrictPublicReleasePolicy");
+    requireBoolean(boundary.requiresExactCorrespondingSourceBesideInstaller, true, "complianceBoundary.requiresExactCorrespondingSourceBesideInstaller");
+  }
   requireBoolean(boundary.requiresCodecPatentReviewBeforeStrictPublicRelease, true, "complianceBoundary.requiresCodecPatentReviewBeforeStrictPublicRelease");
   requireBoolean(boundary.requiresToolchainRuntimeLicenseReviewBeforeStrictPublicRelease, true, "complianceBoundary.requiresToolchainRuntimeLicenseReviewBeforeStrictPublicRelease");
   requireString(boundary.notice, "complianceBoundary.notice");
+  return profile;
 }
 
 function validateCandidate({ artifactRoot, candidate, contract }) {
@@ -475,7 +502,7 @@ function copyPayload(source, destination) {
   copyFileSync(source, destination, 1);
 }
 
-function buildPackage({ candidateManifestHash, contract, contractHash, contractRelativePath, outputPath, repositoryRoot, validated }) {
+function buildPackage({ candidateManifestHash, contract, contractHash, contractRelativePath, outputPath, profile, repositoryRoot, validated }) {
   const requestedOutputPath = resolve(outputPath);
   const outputParent = canonicalDirectory(dirname(requestedOutputPath), "package output parent");
   const outputName = parse(requestedOutputPath).base;
@@ -517,7 +544,7 @@ function buildPackage({ candidateManifestHash, contract, contractHash, contractR
     const executableHash = validated.checksums.get("ffmpeg.exe");
     const buildInfo = {
       schemaVersion: 1,
-      status: "community-beta-technical-candidate",
+      status: profile.buildStatus,
       channel: contract.channel,
       component: "FFmpeg",
       sourceCommit: contract.sourceCommit,
@@ -547,7 +574,7 @@ function buildPackage({ candidateManifestHash, contract, contractHash, contractR
     writeUtf8(join(licenseRoot, "BUILD-INFO.json"), `${JSON.stringify(buildInfo, null, 2)}\n`);
 
     const sourceOffer = [
-      "# FFmpeg corresponding source for the community-beta candidate",
+      `# FFmpeg corresponding source for the ${profile.displayName} candidate`,
       "",
       "This package contains an unmodified, separately executed FFmpeg command-line program built from:",
       "",
@@ -559,13 +586,15 @@ function buildPackage({ candidateManifestHash, contract, contractHash, contractR
       "",
       "Any channel that distributes an installer containing this executable must make the exact corresponding-source archive available beside that installer at no additional charge and keep a clear source link next to the binary download.",
       "",
-      "This generated notice records technical provenance only. Community-beta distribution additionally requires the repository release-owner decision. Codec-patent and toolchain-runtime-license review remain gates for the strict public-release channel.",
+      contract.channel === "community-beta"
+        ? "This generated notice records technical provenance only. Community-beta distribution additionally requires the repository release-owner decision. Codec-patent and toolchain-runtime-license review remain gates for the strict public-release channel."
+        : "This generated notice records technical provenance for the owner-authorized personal, free community stable channel. It does not claim independent legal review or strict public-release approval.",
       "",
     ].join("\n");
     writeUtf8(join(licenseRoot, "SOURCE-OFFER.md"), sourceOffer);
 
     const notice = [
-      "# FFmpeg community-beta component notice",
+      `# FFmpeg ${profile.displayName} component notice`,
       "",
       "This package uses FFmpeg under the GNU Lesser General Public License version 3 or later. FFmpeg is executed as a separate command-line program. The accompanying LGPLv3 and GPLv3 texts and exact corresponding source are included in this package.",
       "",
@@ -581,6 +610,25 @@ function buildPackage({ candidateManifestHash, contract, contractHash, contractR
     const manifestPath = join(temporaryPath, output.packageManifestFileName);
     const checksumOutputPath = join(temporaryPath, output.checksumManifestFileName);
     const payloadFiles = collectFiles(temporaryPath).map((pathValue) => makeFileRecord(temporaryPath, pathValue));
+    const technicalPromotion = contract.channel === "community-beta"
+      ? {
+          installerResourceOverlayPrepared: true,
+          correspondingSourcePackaged: true,
+          licensesPackaged: true,
+          buildEvidencePackaged: true,
+          windowsRuntimeVerificationPassed: true,
+          communityBetaDistributionAuthorized: false,
+          publicReleaseApproved: false,
+        }
+      : {
+          installerResourceOverlayPrepared: true,
+          correspondingSourcePackaged: true,
+          licensesPackaged: true,
+          buildEvidencePackaged: true,
+          windowsRuntimeVerificationPassed: true,
+          ownerAuthorizedForThisChannel: true,
+          strictPublicReleaseApproved: false,
+        };
     const packageManifest = {
       schemaVersion: 1,
       status: output.status,
@@ -591,15 +639,7 @@ function buildPackage({ candidateManifestHash, contract, contractHash, contractR
         path: contractRelativePath,
         sha256: contractHash,
       },
-      technicalPromotion: {
-        installerResourceOverlayPrepared: true,
-        correspondingSourcePackaged: true,
-        licensesPackaged: true,
-        buildEvidencePackaged: true,
-        windowsRuntimeVerificationPassed: true,
-        communityBetaDistributionAuthorized: false,
-        publicReleaseApproved: false,
-      },
+      technicalPromotion,
       executable: {
         path: output.runtimeRelativePath,
         sizeBytes: validated.executableSize,
@@ -629,16 +669,23 @@ function buildPackage({ candidateManifestHash, contract, contractHash, contractR
       .join("\n");
     writeUtf8(checksumOutputPath, `${checksumText}\n`);
     renameSync(temporaryPath, finalPath);
-    return {
+    const summary = {
       output: finalPath,
       packageManifest: join(finalPath, output.packageManifestFileName),
       checksumManifest: join(finalPath, output.checksumManifestFileName),
       status: output.status,
+      channel: contract.channel,
       executableSha256: executableHash,
       correspondingSourceSha256: sourceHash,
-      communityBetaDistributionAuthorized: false,
-      publicReleaseApproved: false,
     };
+    if (contract.channel === "community-beta") {
+      summary.communityBetaDistributionAuthorized = false;
+      summary.publicReleaseApproved = false;
+    } else {
+      summary.ownerAuthorizedForThisChannel = true;
+      summary.strictPublicReleaseApproved = false;
+    }
+    return summary;
   } catch (error) {
     if (existsSync(temporaryPath)) rmSync(temporaryPath, { recursive: true, force: true });
     throw error;
@@ -654,8 +701,8 @@ function main() {
   const repositoryRoot = canonicalDirectory(args.repositoryRoot, "repository root");
   assert(!isAbsolute(args.contract), "--contract must be repository-relative.");
   const contractPath = canonicalFile(resolveInside(repositoryRoot, args.contract.replaceAll("\\", "/"), "community-beta contract"), "community-beta contract");
-  const contract = readJson(contractPath, "community-beta contract");
-  validateContract(contract);
+  const contract = readJson(contractPath, "FFmpeg packaging contract");
+  const profile = validateContract(contract);
   const candidateManifestPath = canonicalFile(resolveInside(repositoryRoot, contract.candidateManifest, "candidate manifest"), "candidate manifest");
   const candidate = readJson(candidateManifestPath, "candidate manifest");
   const artifactRoot = canonicalDirectory(args.candidateRoot, "verified candidate artifact root");
@@ -666,6 +713,7 @@ function main() {
     contractHash: sha256File(contractPath),
     contractRelativePath: args.contract.replaceAll("\\", "/"),
     outputPath: resolve(args.output),
+    profile,
     repositoryRoot,
     validated,
   });

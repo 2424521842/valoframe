@@ -21,8 +21,8 @@
 
 ## 审批决定
 
-当前状态：**待负责人/法律审核**。`third_party/licenses/license-text-override-approvals.json` 当前没有任何批准记录，因此 12 项 override 均保持 pending。
+当前状态：**待负责人/独立法律审核**。`third_party/licenses/license-text-override-approvals.json` 当前没有任何批准记录，因此 12 项 override 的严格公开发行审核均保持 pending。
 
-批准某项映射时，不直接改 override 状态；应在独立 approval manifest 中增加结构化记录，绑定完整组件标识、声明的 SPDX 表达式、排序后的正文 SHA-256、明确的 `approved` 决定、审核人、UTC 时间和可追溯引用。缺字段、未知组件、重复/过期记录或正文哈希不一致都会使生成失败。在明确批准前，生成器会继续输出 `NPM_LICENSE_OVERRIDE_REVIEW_PENDING` 或 `CARGO_LICENSE_OVERRIDE_REVIEW_PENDING`。
+批准某项映射时，不直接改 override 状态；应在独立 approval manifest 中增加结构化记录，绑定完整组件标识、声明的 SPDX 表达式、排序后的正文 SHA-256、明确的 `approved` 决定、审核人、UTC 时间和可追溯引用。缺字段、未知组件、重复/过期记录或正文哈希不一致都会使生成失败。严格 `public`/Community Beta profile 在明确批准前继续输出 `NPM_LICENSE_OVERRIDE_REVIEW_PENDING` 或 `CARGO_LICENSE_OVERRIDE_REVIEW_PENDING` blocker；`personal-community-stable` 将逐项人工复核状态列为 advisory，但仍硬性要求正文 100% 覆盖、锁文件/checksum/VCS/SPDX/哈希一致，并固定 `selectors@0.36.1` 的 MPL-2.0 源码形式链接。
 
 即使这 12 项全部批准，也不得自动把 `release/public-release-policy.json` 中的 `thirdPartyCompliance.approved` 改为 `true`。FFmpeg 对应源码、第三方许可、专利和最终法律审批仍需独立闭合。
