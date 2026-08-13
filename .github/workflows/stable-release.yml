@@ -424,8 +424,13 @@ jobs:
               [string]::IsNullOrWhiteSpace($env:VALOFRAME_UPDATER_PUBLIC_KEY)) {
             throw 'Repository updater signing material is missing.'
           }
+          $pubkeyConfigPath = Join-Path $env:RUNNER_TEMP 'vhm-stable-updater-pubkey.conf.json'
+          @{ plugins = @{ updater = @{ pubkey = $env:VALOFRAME_UPDATER_PUBLIC_KEY } } } |
+            ConvertTo-Json -Depth 4 |
+            Set-Content -LiteralPath $pubkeyConfigPath -Encoding utf8 -NoNewline
           npm exec tauri -- build --bundles nsis --ci `
-            --config src-tauri/tauri.stable.conf.json
+            --config src-tauri/tauri.stable.conf.json `
+            --config $pubkeyConfigPath
           if ($LASTEXITCODE -ne 0) { throw 'Signed stable Tauri build failed.' }
 
       - name: Verify bundle shape, updater signature, and tamper rejection

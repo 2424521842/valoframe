@@ -66,6 +66,11 @@ test("repository updater signing remains mandatory for the personal community ch
       new RegExp(`IsNullOrWhiteSpace\\(\\$env:${name}\\)`, "u"),
     );
   }
+  assert.match(
+    workflow,
+    /plugins = @\{ updater = @\{ pubkey = \$env:VALOFRAME_UPDATER_PUBLIC_KEY \} \} \}/u,
+  );
+  assert.match(workflow, /--config \$pubkeyConfigPath/u);
   assert.doesNotMatch(
     workflow,
     /VALOFRAME_RELEASE_EVIDENCE|public-release-preflight|RequireReady|WINDOWS_CERTIFICATE|signtool/u,
