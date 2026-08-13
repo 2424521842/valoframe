@@ -219,7 +219,7 @@ WonderfulDb clip record
 - 主窗口 capability 只开放事件 listen/unlisten 和目录选择；未使用的 `tauri-plugin-opener` 已删除。
 - “打开原位置”通过受控 Rust command 以独立参数调用系统文件管理器，不接受任意 shell 字符串。
 - FFmpeg 只从应用资源 `bin/ffmpeg(.exe)` 或绝对路径 `VHM_FFMPEG_PATH` 解析，不搜索 `PATH`，不经 shell 启动；进程有超时、取消和隐藏窗口控制。
-- 最小 FFmpeg 运行契约固定验证 H.264、HEVC 和 AV1 解码能力，并分别用合成 MP4 执行受限 MP4→JPEG 烟测；WebView2 无法内嵌解码时，`open_clip_externally` 会重新从数据库取路径并复核 MP4、来源根、canonical 边界及整条 reparse 链后才调用系统默认播放器。
+- 最小 FFmpeg 运行契约固定验证 H.264 与 HEVC 软件解码能力，并分别用合成 MP4 执行受限 MP4→JPEG 烟测。AV1 MP4 仍可索引和保留，但 v0.2.1 随包构建不提供 AV1 缩略图；WebView2 无法内嵌解码时，`open_clip_externally` 会重新从数据库取路径并复核 MP4、来源根、canonical 边界及整条 reparse 链后才调用系统默认播放器，最终能否播放取决于系统解码能力。
 - 缓存清理只处理严格命名的直接文件和陈旧 `.part`，拒绝路径穿越、目录和符号链接，不递归删除未知内容。
 - 永久删除只处理回收站内、属于已验证来源且与持久化意图快照一致的 MP4；待删除记录会阻止普通恢复和仅删除索引。
 - “仅移除索引”只接受 missing 或来源不可用且没有删除 intent 的普通库素材；它可以删除应用内标签、备注等索引状态，但不调用回收/永久删除文件路径。批量结果逐项报告成功与失败。

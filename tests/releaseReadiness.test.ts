@@ -602,8 +602,6 @@ test("minimal FFmpeg candidate is narrow, self-built, and cannot self-promote", 
     "--enable-decoder=h264",
     "--enable-parser=hevc",
     "--enable-decoder=hevc",
-    "--enable-parser=av1",
-    "--enable-decoder=av1",
     "--enable-filter=scale",
     "--enable-encoder=mjpeg",
     "--enable-muxer=image2",
@@ -613,6 +611,10 @@ test("minimal FFmpeg candidate is narrow, self-built, and cannot self-promote", 
   assert.equal(flags.some((flag) => flag === "--enable-gpl"), false);
   assert.equal(flags.some((flag) => flag === "--enable-nonfree"), false);
   assert.equal(flags.some((flag) => flag.startsWith("--enable-lib")), false);
+  assert.equal(flags.includes("--enable-parser=av1"), false);
+  assert.equal(flags.includes("--enable-decoder=av1"), false);
+  assert.equal((build.forbiddenFlags as string[]).includes("--enable-parser=av1"), true);
+  assert.equal((build.forbiddenFlags as string[]).includes("--enable-decoder=av1"), true);
   assert.equal(
     flags.some((flag) => /--extra-version=.*ce3c09c101c8/.test(flag)),
     true,
@@ -620,7 +622,7 @@ test("minimal FFmpeg candidate is narrow, self-built, and cannot self-promote", 
   const runtimeContract = objectAt(minimalFfmpegCandidate, "runtimeContract");
   assert.deepEqual(
     objectAt(runtimeContract, "requiredCapabilities").decoders,
-    ["h264", "hevc", "av1"],
+    ["h264", "hevc"],
   );
   assert.equal(
     (runtimeContract.allowedSystemDllImports as string[]).includes("KERNEL32.dll"),
@@ -636,7 +638,8 @@ test("minimal FFmpeg candidate is narrow, self-built, and cannot self-promote", 
   assert.equal(smokeBytes.includes(Buffer.from("avc1", "ascii")), true);
   assert.equal(smokeBytes.includes(Buffer.from("mp4v", "ascii")), false);
   const additionalSmokeFixtures = runtimeContract.additionalSmokeFixtures as Array<Record<string, unknown>>;
-  assert.deepEqual(additionalSmokeFixtures.map((fixture) => fixture.codec), ["hevc", "av1"]);
+  const enabledSmokeFixtures = additionalSmokeFixtures.filter((fixture) => fixture.enabled !== false);
+  assert.deepEqual(enabledSmokeFixtures.map((fixture) => fixture.codec), ["hevc"]);
   for (const fixture of additionalSmokeFixtures) {
     const fixtureBytes = Buffer.from(String(fixture.base64), "base64");
     assert.equal(fixtureBytes.length, fixture.sizeBytes);
@@ -650,11 +653,9 @@ test("minimal FFmpeg candidate is narrow, self-built, and cannot self-promote", 
       .includes(Buffer.from("hev1", "ascii")),
     true,
   );
-  assert.equal(
-    Buffer.from(String(additionalSmokeFixtures[1].base64), "base64")
-      .includes(Buffer.from("av01", "ascii")),
-    true,
-  );
+  const av1Reference = additionalSmokeFixtures.find((fixture) => fixture.codec === "av1");
+  assert.equal(av1Reference?.enabled, false);
+  assert.match(String(av1Reference?.description), /excluded from the v0\.2\.1 thumbnail contract/u);
   assert.match(minimalFfmpegBuildScript, /source checkout must be clean/);
   assert.match(minimalFfmpegBuildScript, /SOURCE_DATE_EPOCH/);
   assert.match(minimalFfmpegBuildScript, /Output directory must not already exist/);
@@ -664,6 +665,7 @@ test("minimal FFmpeg candidate is narrow, self-built, and cannot self-promote", 
   assert.match(minimalFfmpegVerifyScript, /SHA256SUMS\.txt/);
   assert.match(minimalFfmpegVerifyScript, /objdump imports do not match the Windows PE parser/);
   assert.match(minimalFfmpegVerifyScript, /additionalSmokeFixtures/);
+  assert.match(minimalFfmpegVerifyScript, /Properties\.Name -contains 'enabled'/);
   assert.doesNotMatch(
     minimalFfmpegVerifyScript,
     /^\s*\$outputPath\s*=/im,

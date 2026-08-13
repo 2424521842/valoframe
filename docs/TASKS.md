@@ -186,7 +186,7 @@
 - [x] 将 29 张英雄图和 13 张地图图固化为逐文件来源/尺寸/大小/SHA-256 清单，记录负责人声明、保守操作假设和待人工核对项，并以完整 PNG verifier 接入测试与构建；Community Beta 与 `personal-community-stable` 必须由版本级负责人渠道决定绑定精确 manifest，未来严格/商业渠道继续 fail closed。
 - [x] 自动生成 npm/Cargo SPDX、FFmpeg 组件快照、第三方声明、去重许可证全文和哈希 manifest，并把全部材料纳入 NSIS 逐字节门禁。
 - [x] 建立最小自建 FFmpeg 候选构建、精确源码包与 Windows 合成视频验证链；候选默认不可自我晋升。
-- [x] 最小 FFmpeg 候选固定 H.264、HEVC、AV1 原生解码器，并用三种合成 MP4 分别验证受控缩略图链；内嵌播放失败时提供重新校验边界的系统默认播放器回退。
+- [x] 最小 FFmpeg 候选固定 H.264、HEVC 软件解码器，并用两种合成 MP4 分别验证受控缩略图链；AV1 仍可索引和保留，但 v0.2.1 不提供 AV1 缩略图，内嵌播放失败时仅在重新校验边界后交给系统默认播放器。
 - [x] `personal-community-stable` 发布改用固定提交、零外部库的最小自建 LGPL FFmpeg，并强制同一 Release 提供二进制/构建证据、许可证、IJG 声明和精确对应源码；专利、工具链与独立法律审批保留为未来严格发行 advisory，不伪造为已完成。BtbN 构建仍禁止进入主体外稳定分发。
 
 ### 4.5 效率与发布

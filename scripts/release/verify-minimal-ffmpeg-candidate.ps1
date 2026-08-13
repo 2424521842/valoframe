@@ -382,7 +382,9 @@ $smokeRoot = Join-Path $tempParent ('vhm-minimal-ffmpeg-' + [Guid]::NewGuid().To
 try {
     $smokeFixtures = @($manifest.runtimeContract.smokeFixture)
     if ($manifest.runtimeContract.PSObject.Properties.Name -contains 'additionalSmokeFixtures') {
-        $smokeFixtures += @($manifest.runtimeContract.additionalSmokeFixtures)
+        $smokeFixtures += @($manifest.runtimeContract.additionalSmokeFixtures | Where-Object {
+                -not ($_.PSObject.Properties.Name -contains 'enabled') -or $_.enabled -ne $false
+            })
     }
     Assert-Condition -Condition ($smokeFixtures.Count -ge 1) -Message 'At least one smoke fixture is required.'
     $smokeReports = @()

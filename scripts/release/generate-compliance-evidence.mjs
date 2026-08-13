@@ -356,8 +356,6 @@ function validatePersonalCommunityStableFfmpeg(manifest) {
     "--enable-decoder=h264",
     "--enable-parser=hevc",
     "--enable-decoder=hevc",
-    "--enable-parser=av1",
-    "--enable-decoder=av1",
     "--enable-filter=scale",
     "--enable-encoder=mjpeg",
     "--enable-muxer=image2",
@@ -366,6 +364,10 @@ function validatePersonalCommunityStableFfmpeg(manifest) {
   for (const flag of requiredFlags) {
     requireValue(flags.includes(flag), `required configure flag is missing: ${flag}`);
   }
+  requireValue(
+    !flags.includes("--enable-parser=av1") && !flags.includes("--enable-decoder=av1"),
+    "native AV1 must remain disabled until a pinned software decoder is packaged and verified.",
+  );
   requireValue(!flags.includes("--enable-gpl"), "--enable-gpl is forbidden for this profile.");
   requireValue(!flags.includes("--enable-nonfree"), "--enable-nonfree is forbidden for this profile.");
   requireValue(

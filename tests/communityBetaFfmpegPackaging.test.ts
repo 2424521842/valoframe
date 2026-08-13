@@ -157,7 +157,9 @@ function createCandidateArtifact(parent: string): {
     },
     smokeFixtures: [
       candidateManifest.runtimeContract.smokeFixture,
-      ...(candidateManifest.runtimeContract.additionalSmokeFixtures ?? []),
+      ...(candidateManifest.runtimeContract.additionalSmokeFixtures ?? []).filter(
+        (fixture: JsonObject) => fixture.enabled !== false,
+      ),
     ].map((fixture: JsonObject) => ({
       codec: fixture.codec,
       fixtureSha256: fixture.sha256,

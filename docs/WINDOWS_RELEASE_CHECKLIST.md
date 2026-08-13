@@ -47,7 +47,7 @@
 - [ ] 已根据实际启用组件完成许可证审核，没有根据项目名猜测 LGPL/GPL 状态。
 - [ ] SBOM 或等价组件清单已生成并归档。
 - [ ] npm/Cargo SPDX、FFmpeg 组件快照、第三方声明、许可证全文和 SHA-256 manifest 均由锁文件重新生成；`personal-community-stable` 必须达到 100% 正文覆盖并固定每项 override 的锁文件/VCS/正文哈希，`selectors` 的 MPL-2.0 源码形式链接必须随声明提供。逐项独立法审属于未来严格发行，当前如实列为 advisory。
-- [ ] 最小自建 FFmpeg 候选的 checksum/build metadata、12 位 commit、PE 实际 imports 与 objdump 结果已一致，imports 只命中 Windows 系统 DLL allowlist；H.264、HEVC、AV1 三种合成 MP4 均完成受控缩略图烟测，且对应源码包与最终二进制在同一 Release 提供。代表性真实高光视频回归属于未来严格发行加固，不阻止个人社区版。
+- [ ] 最小自建 FFmpeg 候选的 checksum/build metadata、12 位 commit、PE 实际 imports 与 objdump 结果已一致，imports 只命中 Windows 系统 DLL allowlist；H.264、HEVC 两种合成 MP4 均完成受控缩略图烟测，且对应源码包与最终二进制在同一 Release 提供。AV1 只验证索引保留与安全外部打开边界，本版不承诺 AV1 缩略图；代表性真实高光视频与固定软件 AV1 decoder 回归属于未来严格发行加固，不阻止个人社区版。
 - [ ] 对应源代码镜像或书面提供方式可长期访问并匹配该二进制。
 - [x] 项目自有代码已选择 MIT，根许可证已纳入仓库，并记录当前不另设重复 EULA。
 - [ ] 第三方声明和缺失许可文本处理已由锁文件、上游提交与哈希固定并纳入发布材料；`personal-community-stable` 如实披露尚未完成的逐项人工/独立法审，未来严格发行再要求全部批准。

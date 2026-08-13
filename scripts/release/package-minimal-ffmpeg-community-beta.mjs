@@ -344,8 +344,6 @@ function validateCandidate({ artifactRoot, candidate, contract }) {
     "--enable-decoder=h264",
     "--enable-parser=hevc",
     "--enable-decoder=hevc",
-    "--enable-parser=av1",
-    "--enable-decoder=av1",
     "--enable-filter=scale",
     "--enable-encoder=mjpeg",
     "--enable-muxer=image2",
@@ -353,6 +351,10 @@ function validateCandidate({ artifactRoot, candidate, contract }) {
   ]) {
     assert(flags.includes(required), `Candidate configure flags are missing '${required}'.`);
   }
+  assert(
+    !flags.includes("--enable-parser=av1") && !flags.includes("--enable-decoder=av1"),
+    "Candidate must not advertise the hardware-only native AV1 decoder as thumbnail support.",
+  );
   assert(!flags.includes("--enable-gpl") && !flags.includes("--enable-nonfree"), "Candidate enables GPL or nonfree code.");
   assert(!flags.some((flag) => flag.startsWith("--enable-lib")), "Candidate enables an external FFmpeg library.");
 
@@ -433,7 +435,7 @@ function validateCandidate({ artifactRoot, candidate, contract }) {
   const expectedSmokeFixtures = [
     candidate.runtimeContract.smokeFixture,
     ...(Array.isArray(candidate.runtimeContract.additionalSmokeFixtures)
-      ? candidate.runtimeContract.additionalSmokeFixtures
+      ? candidate.runtimeContract.additionalSmokeFixtures.filter((fixture) => fixture.enabled !== false)
       : []),
   ];
   assert(Array.isArray(verification.smokeFixtures), "Windows verification smokeFixtures must be an array.");
