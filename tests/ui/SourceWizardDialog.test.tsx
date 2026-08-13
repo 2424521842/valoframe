@@ -59,7 +59,7 @@ describe("SourceWizardDialog", () => {
     expect(screen.getByRole("button", { name: "取消" })).toBeEnabled();
   });
 
-  it("collects source type, directory, display name, and startup policy", async () => {
+  it("collects source type, directory, display name, and automatic-sync eligibility", async () => {
     const user = userEvent.setup();
     const onChooseDirectory = vi.fn(async () => "D:\\Tracker\\Clips");
     const onRegister = vi.fn(async () => registeredResult());
@@ -72,6 +72,9 @@ describe("SourceWizardDialog", () => {
         onRegister={onRegister}
       />,
     );
+
+    expect(screen.getByRole("checkbox", { name: /加入自动同步/ })).toBeChecked();
+    expect(screen.getByText(/开启“启动时自动扫描”后会同步此来源/)).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: /Tracker 录制/ }));
     await user.click(screen.getByRole("button", { name: "选择目录" }));

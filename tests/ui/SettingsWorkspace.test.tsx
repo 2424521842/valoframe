@@ -29,7 +29,7 @@ describe("SettingsWorkspace", () => {
     expect(screen.queryByRole("heading", { name: "常规", level: 2 })).not.toBeInTheDocument();
   });
 
-  it("updates startup and motion preferences from the general section", async () => {
+  it("updates startup, automatic scan, and motion preferences from the general section", async () => {
     const user = userEvent.setup();
     const preferences = preferenceController();
     renderSettings({ preferences });
@@ -37,6 +37,11 @@ describe("SettingsWorkspace", () => {
     await user.click(screen.getByRole("combobox", { name: "启动后打开" }));
     await user.click(screen.getByRole("option", { name: "快速挑片" }));
     expect(preferences.updatePreferences).toHaveBeenCalledWith({ startupDestination: "review" });
+
+    const startupScan = screen.getByRole("switch", { name: "启动时自动扫描" });
+    expect(startupScan).not.toBeChecked();
+    await user.click(startupScan);
+    expect(preferences.updatePreferences).toHaveBeenCalledWith({ scanOnStartup: true });
 
     await user.click(screen.getByRole("combobox", { name: "动态效果" }));
     await user.click(screen.getByRole("option", { name: "始终减少动效" }));
@@ -85,6 +90,7 @@ describe("SettingsWorkspace", () => {
     await user.click(screen.getByRole("button", { name: "恢复默认设置" }));
     expect(preferences.resetPreferences).not.toHaveBeenCalled();
     expect(screen.getByText("恢复默认设置？")).toBeVisible();
+    expect(screen.getByText(/启动扫描、素材库视图与排序/)).toBeVisible();
     expect(screen.getByText(/来源、标签、索引、缓存、视频和更新检查记录不会改变/)).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "确认恢复" }));

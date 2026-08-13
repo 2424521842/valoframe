@@ -49,16 +49,20 @@ pub fn classify_timeline_event_time(
 ) -> Option<TimelineEventTimeSemantics> {
     let descriptive_text = format!("{video_name} {video_type}");
 
-    if matches!(highlight_type, Some(2 | 3))
-        || is_kill_collection_text(&descriptive_text)
-        || is_death_moment_text(&descriptive_text)
-    {
+    if let Some(highlight_type) = highlight_type.filter(|value| *value > 0) {
+        return Some(if matches!(highlight_type, 2 | 3) {
+            TimelineEventTimeSemantics::VideoAbsolute
+        } else {
+            TimelineEventTimeSemantics::SegmentRelative
+        });
+    }
+
+    if is_kill_collection_text(&descriptive_text) || is_death_moment_text(&descriptive_text) {
         return Some(TimelineEventTimeSemantics::VideoAbsolute);
     }
 
-    if highlight_type.is_some_and(|highlight_type| highlight_type > 0)
-        || contains_any(&descriptive_text, &["三杀", "3杀", "三连杀"])
-        || contains_any(&descriptive_text, &["四杀", "4杀", "四连杀"])
+    if contains_highlight_marker(&descriptive_text, &["三杀", "3杀", "三连杀"])
+        || contains_highlight_marker(&descriptive_text, &["四杀", "4杀", "四连杀"])
         || is_five_kill_text(&descriptive_text)
         || is_six_kill_text(&descriptive_text)
     {
@@ -198,11 +202,11 @@ fn parse_video_export_config(path: PathBuf) -> VideoExportConfigMetadata {
     }
 
     let is_mvp = contains_case_insensitive(&extracted_text, "MVP");
-    let is_triple_kill = contains_any(&extracted_text, &["三杀", "3杀", "三连杀"]);
-    let is_quadra_kill = contains_any(&extracted_text, &["四杀", "4杀", "四连杀"]);
+    let is_triple_kill = contains_highlight_marker(&extracted_text, &["三杀", "3杀", "三连杀"]);
+    let is_quadra_kill = contains_highlight_marker(&extracted_text, &["四杀", "4杀", "四连杀"]);
     let is_five_kill = is_five_kill_text(&extracted_text);
     let is_six_kill = is_six_kill_text(&extracted_text);
-    let is_ace = contains_case_insensitive(&extracted_text, "ACE");
+    let is_ace = is_ace_text(&extracted_text);
     let kda = find_kda(&extracted_text);
     let map_name = find_labeled_value(&strings, &["地图名", "地图名称", "地图", "map name", "map"])
         .or_else(|| find_known_value(&strings, MAP_NAMES))
@@ -622,6 +626,11 @@ fn is_six_kill_text(text: &str) -> bool {
     contains_highlight_marker(text, &["六杀", "6杀", "六连杀"])
 }
 
+fn is_ace_text(text: &str) -> bool {
+    text.split_whitespace()
+        .any(|token| token.eq_ignore_ascii_case("ace"))
+}
+
 fn contains_highlight_marker(text: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| {
         text.match_indices(marker)
@@ -757,3 +766,51 @@ const KILL_COLLECTION_KEYWORDS: &[&str] = &[
 
 const HIGHLIGHT_MARKER_SUFFIXES: &[&str] =
     &["时刻", "集锦", "高光", "片段", "剪辑", "回放", "合集"];
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        classify_timeline_event_time, contains_highlight_marker, is_ace_text,
+        TimelineEventTimeSemantics::SegmentRelative, TimelineEventTimeSemantics::VideoAbsolute,
+    };
+
+    #[test]
+    fn ace_detection_requires_a_standalone_token() {
+        assert!(is_ace_text("ACE clutch"));
+        assert!(is_ace_text("五杀 ace"));
+        assert!(!is_ace_text("surface setup"));
+        assert!(!is_ace_text("place"));
+    }
+
+    #[test]
+    fn multi_kill_detection_requires_a_highlight_marker_boundary() {
+        assert!(contains_highlight_marker("四杀！", &["四杀"]));
+        assert!(contains_highlight_marker("三杀时刻", &["三杀"]));
+        assert!(!contains_highlight_marker("四杀手", &["四杀"]));
+        assert!(!contains_highlight_marker("3杀虫剂", &["3杀"]));
+    }
+
+    #[test]
+    fn official_numeric_type_wins_over_conflicting_timeline_text() {
+        assert_eq!(
+            classify_timeline_event_time(Some(4), "击杀集锦", "击杀集锦"),
+            Some(SegmentRelative)
+        );
+        assert_eq!(
+            classify_timeline_event_time(Some(2), "四杀时刻", "四杀时刻"),
+            Some(VideoAbsolute)
+        );
+    }
+
+    #[test]
+    fn timeline_text_remains_a_fallback_without_an_official_numeric_type() {
+        assert_eq!(
+            classify_timeline_event_time(None, "击杀集锦", ""),
+            Some(VideoAbsolute)
+        );
+        assert_eq!(
+            classify_timeline_event_time(None, "四杀时刻", ""),
+            Some(SegmentRelative)
+        );
+    }
+}

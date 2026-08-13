@@ -509,6 +509,10 @@ fn applies_relative_and_absolute_wonderful_event_time_semantics() {
            "round_clips":[{"clip_sTime":1000,"clip_duration":4000,"clip_events":[{"event_sTime":250}]}]},
           {"video_id":"death-type","video_name":"死亡集锦","highLightType":3,
            "round_clips":[{"clip_sTime":1000,"clip_duration":4000,"clip_events":[{"event_sTime":250}]}]},
+          {"video_id":"ordinary-type-conflict","video_name":"击杀集锦","highLightType":4,
+           "round_clips":[{"clip_sTime":1000,"clip_duration":4000,"clip_events":[{"event_sTime":250}]}]},
+          {"video_id":"kill-type-conflict","video_name":"四杀时刻","highLightType":2,
+           "round_clips":[{"clip_sTime":1000,"clip_duration":4000,"clip_events":[{"event_sTime":250}]}]},
           {"video_id":"kill-name","video_name":"精彩击杀合集",
            "round_clips":[{"clip_sTime":1000,"clip_duration":4000,"clip_events":[{"event_sTime":250}]}]},
           {"video_id":"death-name","video_type":"death compilation",
@@ -536,6 +540,8 @@ fn applies_relative_and_absolute_wonderful_event_time_semantics() {
     assert_eq!(event_time("ordinary-multikill"), Some(1_250));
     assert_eq!(event_time("kill-type"), Some(250));
     assert_eq!(event_time("death-type"), Some(250));
+    assert_eq!(event_time("ordinary-type-conflict"), Some(1_250));
+    assert_eq!(event_time("kill-type-conflict"), Some(250));
     assert_eq!(event_time("kill-name"), Some(250));
     assert_eq!(event_time("death-name"), Some(250));
     assert_eq!(event_time("unknown"), None);

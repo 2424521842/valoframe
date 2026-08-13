@@ -54,6 +54,16 @@ export type ReviewScopeEditor = {
   onClearFilters: () => void;
 };
 
+/**
+ * The available values for a quick-pick scope. Values and callbacks remain
+ * local to the quick-pick workspace so changing a round never changes the
+ * material-library toolbar.
+ */
+export type ReviewScopeOptions = Pick<
+  ReviewScopeEditor,
+  "accounts" | "agentNames" | "mapNames" | "gameModes" | "tags" | "videoTypes"
+>;
+
 type ReviewSetupProps = {
   filterLabels: readonly string[];
   scopeEditor: ReviewScopeEditor;
@@ -74,7 +84,7 @@ const SORT_OPTIONS: Array<{ value: ReviewSessionSort; label: string; detail: str
   { value: "oldest", label: "最早优先", detail: "从最早录制的素材开始" },
   { value: "kills", label: "击杀数优先", detail: "优先浏览击杀数更多的对局" },
   { value: "score", label: "战绩评分优先", detail: "优先浏览战斗评分更高的对局" },
-  { value: "library", label: "继承素材库排序", detail: "保留素材库当前的排列顺序" },
+  { value: "library", label: "使用素材库排序", detail: "仅在选中后按素材库当前顺序浏览" },
 ];
 
 const SCOPE_OPTIONS: Array<{
@@ -83,7 +93,7 @@ const SCOPE_OPTIONS: Array<{
   detail: string;
   icon: typeof ListChecks;
 }> = [
-  { value: "all", label: "全部素材", detail: "在当前素材库范围内逐条挑片", icon: ListChecks },
+  { value: "all", label: "全部素材", detail: "在全部可用素材中逐条挑片", icon: ListChecks },
   { value: "not-selected", label: "仅尚未挑选", detail: "排除过去会话中已入选的素材", icon: CheckSquare },
   { value: "recent", label: "最近新增", detail: "按录制时间筛选最近 7 天的素材", icon: CalendarDots },
 ];
@@ -104,7 +114,6 @@ export function ReviewSetup({
 }: ReviewSetupProps) {
   const resumeCounts = resumableSession ? reviewSessionCounts(resumableSession) : null;
   const hasCandidates = candidateCount > 0;
-  const shouldResume = resumableSession !== null;
   const [isScopeEditorOpen, setIsScopeEditorOpen] = useState(false);
 
   return (
@@ -112,7 +121,7 @@ export function ReviewSetup({
       <header className="review-setup-heading">
         <div>
           <h1 id="review-setup-title">快速挑片</h1>
-          <p>继承素材库当前范围，专注决定这一轮真正要使用的素材。</p>
+          <p>从全部可用素材开始，按需收窄这一轮真正要使用的范围。</p>
         </div>
         <button
           aria-controls="review-scope-editor"
@@ -151,7 +160,7 @@ export function ReviewSetup({
           <div className="review-scope-chips">
             {filterLabels.length > 0 ? filterLabels.map((label) => (
               <span key={label}>{label}</span>
-            )) : <span>素材库当前的全部可用素材</span>}
+            )) : <span>全部可用素材</span>}
           </div>
           <p>可在此页修改账号、英雄、地图、模式、日期、视频类型、标签或搜索条件。</p>
         </section>
@@ -205,11 +214,11 @@ export function ReviewSetup({
         </div>
         <button
           className="cinematic-button cinematic-button--primary"
-          disabled={isPreparing || (!shouldResume && !hasCandidates)}
+          disabled={isPreparing || !hasCandidates}
           type="button"
-          onClick={shouldResume ? onResume : onStart}
+          onClick={onStart}
         >
-          {shouldResume ? "继续挑片" : "开始挑片"} <ArrowRight weight="bold" />
+          开始新的挑片 <ArrowRight weight="bold" />
         </button>
       </footer>
     </section>

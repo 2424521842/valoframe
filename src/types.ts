@@ -389,7 +389,7 @@ export type ClipListQuery = {
 
 /** A frozen, serializable record of one quick-pick round. */
 export type ReviewSessionFilters = {
-  /** The library query at the moment the session was started, without pagination. */
+  /** The frozen quick-pick candidate query for this session, without pagination. */
   query: Omit<ClipListQuery, "offset" | "limit" | "reviewDecision">;
   labels: string[];
   sort: ReviewSessionSort;

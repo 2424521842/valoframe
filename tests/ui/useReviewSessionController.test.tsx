@@ -3,6 +3,7 @@ import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockClips } from "../../src/data/mockData";
 import { useReviewSessionController } from "../../src/hooks/useReviewSessionController";
+import { saveReviewSession } from "../../src/lib/reviewSessions";
 import type { ClipListQuery, ClipPage, ClipSummary, ReviewSessionFilters } from "../../src/types";
 
 const mocks = vi.hoisted(() => ({
@@ -154,6 +155,94 @@ describe("useReviewSessionController", () => {
     expect(second.result.current.counts).toMatchObject({ selected: 1, reviewed: 1, remaining: 4 });
   });
 
+  it("finds saved progress even when the next setup starts from the default scope", async () => {
+    const narrowedFilters: ReviewSessionFilters = {
+      ...filters,
+      query: {
+        ...filters.query,
+        accountId: "summer",
+        query: "review-only",
+      },
+      labels: ["搜索：review-only", "账号：Summer"],
+    };
+    const first = renderHook(() => useReviewSessionController());
+    await act(async () => {
+      await first.result.current.prepare(narrowedFilters);
+      await first.result.current.startNew(narrowedFilters);
+      await first.result.current.decide("selected");
+    });
+    const sessionId = first.result.current.session?.id;
+    first.unmount();
+
+    const second = renderHook(() => useReviewSessionController());
+    await act(async () => {
+      await second.result.current.prepare({
+        ...filters,
+        query: { sortBy: "modified-desc" },
+        labels: [],
+        sort: "latest",
+      });
+    });
+    expect(second.result.current.resumableSession).toMatchObject({
+      id: sessionId,
+      filters: expect.objectContaining({ query: expect.objectContaining({
+        accountId: "summer",
+        query: "review-only",
+      }) }),
+    });
+
+    await act(async () => {
+      expect(await second.result.current.resume(second.result.current.resumableSession!)).toBe(true);
+    });
+    expect(mocks.listClipPage).toHaveBeenLastCalledWith({
+      ...narrowedFilters.query,
+      offset: 0,
+      limit: 200,
+    });
+    expect(second.result.current.currentClip?.id).toBe("2");
+  });
+
+  it("offers the most recently saved cross-scope session when setup filters are reset", async () => {
+    const olderScope: ReviewSessionFilters = {
+      ...filters,
+      query: { ...filters.query, accountId: "winter" },
+    };
+    const newerScope: ReviewSessionFilters = {
+      ...filters,
+      query: { ...filters.query, accountId: "summer" },
+    };
+    const older = renderHook(() => useReviewSessionController());
+    await act(async () => {
+      await older.result.current.prepare(olderScope);
+      await older.result.current.startNew(olderScope);
+      await older.result.current.decide("selected");
+    });
+    saveReviewSession({
+      ...older.result.current.session!,
+      updatedAt: "2020-01-01T00:00:00.000Z",
+    });
+    older.unmount();
+
+    const newer = renderHook(() => useReviewSessionController());
+    await act(async () => {
+      await newer.result.current.prepare(newerScope);
+      await newer.result.current.startNew(newerScope);
+    });
+    const newerSessionId = newer.result.current.session?.id;
+    newer.unmount();
+
+    const resetSetup = renderHook(() => useReviewSessionController());
+    await act(async () => {
+      await resetSetup.result.current.prepare({
+        ...filters,
+        query: { sortBy: "modified-desc" },
+        labels: [],
+        sort: "latest",
+      });
+    });
+    expect(resetSetup.result.current.resumableSession?.id).toBe(newerSessionId);
+  });
+
   it("prefers saved progress over a newer empty session with the same conditions", async () => {
     const first = renderHook(() => useReviewSessionController());
     await act(async () => {
@@ -185,6 +274,41 @@ describe("useReviewSessionController", () => {
     });
     expect(third.result.current.currentClip?.id).toBe("2");
     expect(third.result.current.counts).toMatchObject({ selected: 1, reviewed: 1, remaining: 4 });
+  });
+
+  it("ends a partial round without converting unreviewed clips or offering it for resume", async () => {
+    const first = renderHook(() => useReviewSessionController());
+    await act(async () => {
+      await first.result.current.prepare(filters);
+      await first.result.current.startNew(filters);
+      await first.result.current.decide("selected");
+    });
+
+    act(() => {
+      expect(first.result.current.finishEarly()).toBe(true);
+    });
+    expect(first.result.current.phase).toBe("completed");
+    expect(first.result.current.currentClip).toBeNull();
+    expect(first.result.current.session).toMatchObject({
+      currentIndex: 5,
+      status: "completed",
+    });
+    expect(first.result.current.session?.items.filter((item) => item.decision === "unreviewed")).toHaveLength(4);
+    expect(first.result.current.counts).toEqual({
+      total: 5,
+      reviewed: 1,
+      selected: 1,
+      pending: 0,
+      skipped: 0,
+      remaining: 4,
+    });
+    first.unmount();
+
+    const second = renderHook(() => useReviewSessionController());
+    await act(async () => {
+      await second.result.current.prepare(filters);
+    });
+    expect(second.result.current.resumableSession).toBeNull();
   });
 
   it("locks repeated input while a visual exit is still pending", async () => {

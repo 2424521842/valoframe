@@ -207,7 +207,7 @@ export function SettingsWorkspace({
               <WarningCircle aria-hidden="true" />
               <div>
                 <strong>无法保存设置</strong>
-                <span>{preferences.storageError}</span>
+                <span>{preferences.storageError} 更改不会保留到下次启动。</span>
               </div>
             </div>
           ) : null}
@@ -243,6 +243,18 @@ export function SettingsWorkspace({
                       ))}
                     </UiSelectContent>
                   </UiSelect>
+                </SettingRow>
+
+                <SettingRow
+                  description="开启后，下次启动瓦刻会同步所有已加入自动同步的来源；短时间内重新启动不会重复扫描，仍可随时手动同步。"
+                  title="启动时自动扫描"
+                  titleId="scan-on-startup-label"
+                >
+                  <UiSwitch
+                    aria-labelledby="scan-on-startup-label"
+                    checked={values.scanOnStartup}
+                    onCheckedChange={(checked) => preferences.updatePreferences({ scanOnStartup: checked })}
+                  />
                 </SettingRow>
 
                 <SettingRow
@@ -821,7 +833,7 @@ function confirmationDescription(
   criticalTaskMessage: string | null,
 ): string {
   if (confirmation === "reset") {
-    return "启动位置、素材库视图与排序、播放、动态效果和自动更新偏好将恢复默认值。来源、标签、索引、缓存、视频和更新检查记录不会改变。";
+    return "启动位置、启动扫描、素材库视图与排序、播放、动态效果和自动更新偏好将恢复默认值。来源、标签、索引、缓存、视频和更新检查记录不会改变。";
   }
   if (confirmation === "install" && criticalTaskMessage) {
     return `${criticalTaskMessage}。请等待任务结束后再安装更新。`;

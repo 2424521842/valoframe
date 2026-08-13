@@ -6106,15 +6106,71 @@ mod tests {
             insert_page_fixture_clip_for_source(&connection, source.id, "five.mp4", 3_000, 100);
         let six =
             insert_page_fixture_clip_for_source(&connection, source.id, "six.mp4", 4_000, 100);
-        let compilation = insert_page_fixture_clip_for_source(
+        let compilation_four = insert_page_fixture_clip_for_source(
             &connection,
             source.id,
-            "compilation.mp4",
+            "compilation-four.mp4",
             5_000,
+            100,
+        );
+        let compilation_five = insert_page_fixture_clip_for_source(
+            &connection,
+            source.id,
+            "compilation-five.mp4",
+            5_100,
+            100,
+        );
+        let compilation_six = insert_page_fixture_clip_for_source(
+            &connection,
+            source.id,
+            "compilation-six.mp4",
+            5_200,
             100,
         );
         let death =
             insert_page_fixture_clip_for_source(&connection, source.id, "death.mp4", 6_000, 100);
+        let ordinary = insert_page_fixture_clip_for_source(
+            &connection,
+            source.id,
+            "ordinary-highlight.mp4",
+            6_500,
+            100,
+        );
+        let ambiguous = insert_page_fixture_clip_for_source(
+            &connection,
+            source.id,
+            "ambiguous-highlight.mp4",
+            6_600,
+            100,
+        );
+        let ace_substring = insert_page_fixture_clip_for_source(
+            &connection,
+            source.id,
+            "ace-substring.mp4",
+            6_700,
+            100,
+        );
+        let extracted_text_only = insert_page_fixture_clip_for_source(
+            &connection,
+            source.id,
+            "extracted-text-only.mp4",
+            6_800,
+            100,
+        );
+        let kill_substring = insert_page_fixture_clip_for_source(
+            &connection,
+            source.id,
+            "kill-substring.mp4",
+            6_900,
+            100,
+        );
+        let punctuated_six = insert_page_fixture_clip_for_source(
+            &connection,
+            source.id,
+            "punctuated-six.mp4",
+            6_950,
+            100,
+        );
         let custom_tag_only = insert_page_fixture_clip_for_source(
             &connection,
             source.id,
@@ -6128,8 +6184,11 @@ mod tests {
             (quad, 6, Some(4)),
             (five, 10, Some(5)),
             (six, 10, Some(6)),
-            (compilation, 2, None),
+            (compilation_four, 2, Some(4)),
+            (compilation_five, 2, Some(5)),
+            (compilation_six, 2, Some(6)),
             (death, 3, None),
+            (ordinary, 1, Some(4)),
         ] {
             connection
                 .execute(
@@ -6144,18 +6203,96 @@ mod tests {
                 )
                 .expect("video type metadata should update");
         }
+        connection
+            .execute(
+                "
+                UPDATE clip_metadata
+                SET official_video_name = '六杀时刻',
+                    official_video_type = '五杀时刻'
+                WHERE clip_id = ?1
+                ",
+                params![six],
+            )
+            .expect("real-shaped six-kill metadata should update");
+        for compilation in [compilation_four, compilation_five, compilation_six] {
+            connection
+                .execute(
+                    "
+                    UPDATE clip_metadata
+                    SET official_video_name = '击杀集锦',
+                        official_video_type = '击杀集锦'
+                    WHERE clip_id = ?1
+                    ",
+                    params![compilation],
+                )
+                .expect("real-shaped compilation metadata should update");
+        }
+        connection
+            .execute(
+                "
+                UPDATE clip_metadata
+                SET official_video_name = '击杀集锦 / 死亡集锦 / 四杀时刻',
+                    kill_count = 4
+                WHERE clip_id = ?1
+                ",
+                params![ambiguous],
+            )
+            .expect("ambiguous fallback metadata should update");
+        connection
+            .execute(
+                "
+                UPDATE clip_metadata
+                SET official_video_name = 'place setup'
+                WHERE clip_id = ?1
+                ",
+                params![ace_substring],
+            )
+            .expect("ace substring metadata should update");
+        connection
+            .execute(
+                "
+                UPDATE clip_metadata
+                SET extracted_text = '六杀手'
+                WHERE clip_id = ?1
+                ",
+                params![extracted_text_only],
+            )
+            .expect("detail-only text metadata should update");
+        connection
+            .execute(
+                "
+                UPDATE clip_metadata
+                SET official_video_name = '六杀手 / 五杀手 / 6杀虫剂'
+                WHERE clip_id = ?1
+                ",
+                params![kill_substring],
+            )
+            .expect("kill-marker substring metadata should update");
+        connection
+            .execute(
+                "
+                UPDATE clip_metadata
+                SET official_video_name = '六杀）'
+                WHERE clip_id = ?1
+                ",
+                params![punctuated_six],
+            )
+            .expect("punctuated kill-marker metadata should update");
         let misleading_tag =
             create_tag(&connection, "六杀时刻", Some("red")).expect("custom tag should create");
         assign_tag_to_clip(&connection, custom_tag_only, misleading_tag.id)
             .expect("custom tag should assign");
 
         for (filter, expected) in [
-            (HighlightFilter::Triple, triple),
-            (HighlightFilter::Quad, quad),
-            (HighlightFilter::Five, five),
-            (HighlightFilter::Six, six),
-            (HighlightFilter::KillCompilation, compilation),
-            (HighlightFilter::Death, death),
+            (HighlightFilter::Triple, vec![triple]),
+            (HighlightFilter::Quad, vec![quad]),
+            (HighlightFilter::Five, vec![five]),
+            (HighlightFilter::Six, vec![punctuated_six, six]),
+            (
+                HighlightFilter::KillCompilation,
+                vec![compilation_six, compilation_five, compilation_four],
+            ),
+            (HighlightFilter::Death, vec![death]),
         ] {
             assert_eq!(
                 page_ids_for_query(
@@ -6165,8 +6302,8 @@ mod tests {
                         ..ClipListQuery::default()
                     }
                 ),
-                vec![expected],
-                "video type {filter:?} must ignore custom tag text"
+                expected,
+                "video type {filter:?} must be canonical and ignore event totals or custom tags"
             );
         }
 
@@ -6179,9 +6316,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["triple", "quad", "five", "six", "kill-compilation", "death"]
         );
-        for value in ["triple", "quad", "five", "six", "kill-compilation", "death"] {
+        for value in ["triple", "quad", "five", "death"] {
             assert_facet_count(&facets.kill_types, value, 1, 1);
         }
+        assert_facet_count(&facets.kill_types, "six", 2, 2);
+        assert_facet_count(&facets.kill_types, "kill-compilation", 3, 3);
     }
 
     #[test]

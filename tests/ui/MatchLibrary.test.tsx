@@ -251,6 +251,32 @@ describe("MatchLibrary card behavior", () => {
     expect(container.querySelector(".match-clip-source-context")).not.toBeInTheDocument();
   });
 
+  it("keeps semantic titles while exposing the canonical video type on cards", () => {
+    const clip = {
+      ...mockClips[0],
+      officialVideoName: "普通击杀",
+      officialVideoType: "四杀时刻",
+      highlightType: 6,
+      killCount: 4,
+      thumbnailUrl: null,
+    };
+    const { container, rerender } = render(
+      <MatchLibrary {...createLibraryProps(clip, { viewMode: "grid" })} />,
+    );
+
+    expect(screen.getByRole("button", { name: "预览普通击杀" })).toBeInTheDocument();
+    expect(container.querySelector(".match-clip-type")).toHaveTextContent("四杀时刻");
+
+    const matchingTitle = {
+      ...clip,
+      officialVideoName: "四杀时刻",
+    };
+    rerender(
+      <MatchLibrary {...createLibraryProps(matchingTitle, { viewMode: "grid" })} />,
+    );
+    expect(container.querySelector(".match-clip-type")).not.toBeInTheDocument();
+  });
+
   it("omits score placeholders for official non-scoring videos but keeps real scores", () => {
     const baseClip = {
       ...mockClips[0],

@@ -266,6 +266,156 @@ describe("PreviewWorkspace media and note behavior", () => {
       );
   });
 
+  it("enters and exits fullscreen without losing the custom player controls", async () => {
+    getClipMediaMock.mockResolvedValue({
+      clipId: clipA.id,
+      playable: true,
+      mediaUrl: "clip-media://clip-a",
+      message: null,
+    });
+    const onBack = vi.fn();
+    const { container } = render(
+      <PreviewWorkspace {...createPreviewProps({ onBack })} />,
+    );
+    await waitFor(() => expect(container.querySelector("video")).toBeInTheDocument());
+
+    const playerShell = container.querySelector<HTMLElement>(".preview-player-shell")!;
+    let fullscreenElement: Element | null = null;
+    let modal: HTMLElement | null = null;
+    let now = 1_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const requestFullscreen = vi.fn().mockResolvedValue(undefined);
+    const exitFullscreen = vi.fn(async () => {
+      fullscreenElement = null;
+    });
+    Object.defineProperty(playerShell, "requestFullscreen", {
+      configurable: true,
+      value: requestFullscreen,
+    });
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => fullscreenElement,
+    });
+    Object.defineProperty(document, "exitFullscreen", {
+      configurable: true,
+      value: exitFullscreen,
+    });
+
+    try {
+      const enterButton = screen.getByRole("button", { name: "进入全屏" });
+      expect(enterButton).toHaveAttribute("aria-keyshortcuts", "F");
+      expect(enterButton).toHaveAttribute("aria-pressed", "false");
+      expect(playerShell).toContainElement(screen.getByLabelText("视频时间轴"));
+
+      fireEvent.click(enterButton);
+      await waitFor(() => expect(requestFullscreen).toHaveBeenCalledTimes(1));
+      fullscreenElement = playerShell;
+      fireEvent(document, new Event("fullscreenchange"));
+      const exitButton = await screen.findByRole("button", { name: "退出全屏" });
+      expect(exitButton).toHaveAttribute("aria-pressed", "true");
+      expect(playerShell).toHaveClass("preview-player-shell--fullscreen");
+
+      fullscreenElement = null;
+      fireEvent(document, new Event("fullscreenchange"));
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(exitFullscreen).not.toHaveBeenCalled();
+      expect(onBack).not.toHaveBeenCalled();
+      await screen.findByRole("button", { name: "进入全屏" });
+
+      const focusedEnterButton = screen.getByRole("button", { name: "进入全屏" });
+      focusedEnterButton.focus();
+      modal = document.createElement("div");
+      modal.className = "ui-dialog-content";
+      document.body.append(modal);
+      fireEvent.keyDown(focusedEnterButton, { key: "f" });
+      expect(requestFullscreen).toHaveBeenCalledTimes(1);
+      modal.remove();
+
+      fireEvent.keyDown(focusedEnterButton, { key: "f" });
+      await waitFor(() => expect(requestFullscreen).toHaveBeenCalledTimes(2));
+      fullscreenElement = playerShell;
+      fireEvent(document, new Event("fullscreenchange"));
+      expect(screen.getByRole("button", { name: "退出全屏" })).toBeVisible();
+
+      fireEvent.click(screen.getByRole("button", { name: "退出全屏" }));
+      await waitFor(() => expect(exitFullscreen).toHaveBeenCalledTimes(1));
+      fireEvent(document, new Event("fullscreenchange"));
+      now += 400;
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(onBack).toHaveBeenCalledTimes(1);
+    } finally {
+      modal?.remove();
+      nowSpy.mockRestore();
+      delete (playerShell as Partial<HTMLElement>).requestFullscreen;
+      delete (document as Partial<Document>).exitFullscreen;
+      delete (document as Partial<Document>).fullscreenElement;
+    }
+  });
+
+  it("reports a fullscreen request failure without interrupting playback", async () => {
+    getClipMediaMock.mockResolvedValue({
+      clipId: clipA.id,
+      playable: true,
+      mediaUrl: "clip-media://clip-a",
+      message: null,
+    });
+    const { container } = render(<PreviewWorkspace {...createPreviewProps()} />);
+    await waitFor(() => expect(container.querySelector("video")).toBeInTheDocument());
+
+    const playerShell = container.querySelector<HTMLElement>(".preview-player-shell")!;
+    const requestFullscreen = vi.fn().mockRejectedValue(new Error("blocked"));
+    Object.defineProperty(playerShell, "requestFullscreen", {
+      configurable: true,
+      value: requestFullscreen,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "进入全屏" }));
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "当前环境无法进入全屏",
+    );
+    expect(screen.getByRole("button", { name: "播放" })).toBeEnabled();
+  });
+
+  it("leaves fullscreen and disables the entry when embedded decoding fails", async () => {
+    getClipMediaMock.mockResolvedValue({
+      clipId: clipA.id,
+      playable: true,
+      mediaUrl: "clip-media://clip-a",
+      message: null,
+    });
+    const { container } = render(<PreviewWorkspace {...createPreviewProps()} />);
+    const video = await waitFor(() => {
+      const element = container.querySelector<HTMLVideoElement>("video");
+      expect(element).toBeInTheDocument();
+      return element!;
+    });
+    const playerShell = container.querySelector<HTMLElement>(".preview-player-shell")!;
+    let fullscreenElement: Element | null = playerShell;
+    const exitFullscreen = vi.fn(async () => {
+      fullscreenElement = null;
+    });
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => fullscreenElement,
+    });
+    Object.defineProperty(document, "exitFullscreen", {
+      configurable: true,
+      value: exitFullscreen,
+    });
+
+    try {
+      fireEvent(document, new Event("fullscreenchange"));
+      expect(await screen.findByRole("button", { name: "退出全屏" })).toBeEnabled();
+      fireEvent.error(video);
+      await waitFor(() => expect(exitFullscreen).toHaveBeenCalledTimes(1));
+      fireEvent(document, new Event("fullscreenchange"));
+      expect(screen.getByRole("button", { name: "进入全屏" })).toBeDisabled();
+    } finally {
+      delete (document as Partial<Document>).exitFullscreen;
+      delete (document as Partial<Document>).fullscreenElement;
+    }
+  });
+
   it("shows only exact self-kill events for kill compilations and seeks precisely", async () => {
     getClipMediaMock.mockResolvedValue({
       clipId: "kill-compilation",

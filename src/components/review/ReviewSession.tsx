@@ -3,6 +3,8 @@ import {
   ArrowDown,
   ArrowLeft,
   ArrowRight,
+  CornersIn,
+  CornersOut,
   Crosshair,
   Database,
   WarningCircle,
@@ -26,6 +28,7 @@ import {
 } from "react";
 import { commandErrorMessage, getClipMedia } from "../../api/backend";
 import { UiAlertDialog, UiAlertDialogAction, UiAlertDialogCancel, UiAlertDialogContent, UiAlertDialogDescription, UiAlertDialogTitle } from "../ui/alert-dialog";
+import { useElementFullscreen } from "../../hooks/useElementFullscreen";
 import { useReviewShortcuts } from "../../hooks/useReviewShortcuts";
 import type { ReviewSessionController } from "../../hooks/useReviewSessionController";
 import { formatBytes, formatDateTime } from "../../lib/formatters";
@@ -84,6 +87,22 @@ export function ReviewSession({
 
   const activeMedia = media?.clipId === clip?.id ? media : null;
   const isBusy = controller.isDeciding || controller.isUndoing || transitionBusyRef.current || isRemoving;
+  const mediaUnavailable = Boolean(mediaError || activeMedia?.message);
+  const fullscreenEnabled = Boolean(
+    activeMedia?.playable
+    && activeMedia.mediaUrl
+    && !mediaUnavailable
+    && !isBusy,
+  );
+  const {
+    clearFullscreenError,
+    elementRef: mediaShellRef,
+    exitFullscreen,
+    fullscreenError,
+    isFullscreen,
+    shouldIgnoreEscape: shouldIgnoreFullscreenEscape,
+    toggleFullscreen,
+  } = useElementFullscreen<HTMLDivElement>({ enabled: fullscreenEnabled });
   const progress = controller.counts.total === 0
     ? 0
     : Math.min(100, controller.counts.reviewed / controller.counts.total * 100);
@@ -94,6 +113,7 @@ export function ReviewSession({
     setMedia(null);
     setMediaError("");
     setAutoplayBlocked(false);
+    clearFullscreenError();
     setIsMediaLoading(Boolean(clip));
     if (!clip) return undefined;
     void getClipMedia(clip.id)
@@ -231,6 +251,12 @@ export function ReviewSession({
     onExit();
   }, [controller, onExit]);
 
+  const finishEarly = useCallback(() => {
+    if (isBusy || controller.counts.remaining === 0) return;
+    releaseVideo(videoRef.current);
+    controller.finishEarly();
+  }, [controller, isBusy]);
+
   const requestExit = useCallback(() => {
     if (isBusy) return;
     if (controller.counts.reviewed === 0) {
@@ -247,16 +273,19 @@ export function ReviewSession({
     onDecision: (decision) => void runDecision(decision),
     onUndo: runUndo,
     onTogglePlayback: togglePlayback,
+    onToggleFullscreen: () => void toggleFullscreen(),
     onRequestExit: requestExit,
+    shouldIgnoreFullscreenEscape,
   });
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLElement>) => {
-    if (isBusy || (event.target as Element).closest("button, input, a")) return;
+    if (isFullscreen || isBusy || (event.target as Element).closest("button, input, a")) return;
     pointerStartRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLElement>) => {
+    if (isFullscreen) return;
     const start = pointerStartRef.current;
     if (!start || start.pointerId !== event.pointerId) return;
     setDrag({
@@ -271,6 +300,10 @@ export function ReviewSession({
     pointerStartRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (isFullscreen) {
+      setDrag({ x: 0, y: 0 });
+      return;
     }
     const { x, y } = dragRef.current;
     if (y >= SWIPE_DECISION_THRESHOLD && y > Math.abs(x) * 0.75) {
@@ -312,7 +345,6 @@ export function ReviewSession({
 
   const agentArtworkUrl = clip.agentName ? valorantAgentDisplayIconUrl(clip.agentName) : "";
   const mapArtworkUrl = clip.mapName ? valorantMapListViewIconUrl(clip.mapName) : "";
-  const mediaUnavailable = Boolean(mediaError || activeMedia?.message);
   const transform = exitDecision
     ? reviewExitTransform(exitDecision)
     : `translate3d(${drag.x}px, ${drag.y}px, 0) rotate(${drag.x / 52}deg)`;
@@ -353,7 +385,16 @@ export function ReviewSession({
         <div className="review-card-verdict review-card-verdict--skipped">跳过</div>
         <div className="review-card-verdict review-card-verdict--pending">待定</div>
         <div className="review-card-verdict review-card-verdict--selected">入选</div>
-        <div className="review-card-media">
+        <div
+          className={isFullscreen
+            ? "review-card-media review-card-media--fullscreen"
+            : "review-card-media"}
+          ref={mediaShellRef}
+          onDoubleClick={(event) => {
+            if (event.target instanceof Element && event.target.closest("button")) return;
+            void toggleFullscreen();
+          }}
+        >
           {activeMedia?.playable && activeMedia.mediaUrl ? (
             <video
               key={clip.id}
@@ -362,7 +403,10 @@ export function ReviewSession({
               preload="metadata"
               ref={videoRef}
               src={activeMedia.mediaUrl}
-              onError={() => setMediaError("当前系统无法内嵌播放此视频")}
+              onError={() => {
+                setMediaError("当前系统无法内嵌播放此视频");
+                void exitFullscreen();
+              }}
               onVolumeChange={(event) => {
                 if (!isApplyingAudioPreferenceRef.current) {
                   syncAudioPreference(event.currentTarget);
@@ -375,6 +419,11 @@ export function ReviewSession({
             <div className={`review-card-placeholder clip-thumb--${clip.thumbnailTone}`}><Play weight="fill" /></div>
           )}
           {isMediaLoading ? <span className="review-media-state">正在准备预览…</span> : null}
+          {fullscreenError ? (
+            <span className="review-media-state review-media-state--fullscreen" role="status">
+              {fullscreenError}
+            </span>
+          ) : null}
           {activeMedia?.playable && activeMedia.mediaUrl && autoplayBlocked ? (
             <button aria-keyshortcuts="Space" className="review-media-play" type="button" onClick={togglePlayback}>
               <Play weight="fill" />点击播放
@@ -404,6 +453,18 @@ export function ReviewSession({
               </button>
               <button aria-label="播放或暂停预览" aria-keyshortcuts="Space" className="review-media-toggle" type="button" onClick={togglePlayback}>
                 <Play weight="fill" /><Pause weight="fill" />
+              </button>
+              <button
+                aria-keyshortcuts="F"
+                aria-label={isFullscreen ? "退出全屏" : "进入全屏"}
+                aria-pressed={isFullscreen}
+                className="review-media-fullscreen"
+                disabled={!isFullscreen && !fullscreenEnabled}
+                title={isFullscreen ? "退出全屏（F 或 Esc）" : "进入全屏（F 或双击视频）"}
+                type="button"
+                onClick={() => void toggleFullscreen()}
+              >
+                {isFullscreen ? <CornersIn weight="bold" /> : <CornersOut weight="bold" />}
               </button>
             </>
           ) : null}
@@ -454,13 +515,18 @@ export function ReviewSession({
 
       <UiAlertDialog open={exitDialogOpen} onOpenChange={setExitDialogOpen}>
         <UiAlertDialogContent>
-          <UiAlertDialogTitle>退出快速挑片？</UiAlertDialogTitle>
+          <UiAlertDialogTitle>退出或结束本轮挑片？</UiAlertDialogTitle>
           <UiAlertDialogDescription>
-            当前进度：{controller.counts.reviewed} / {controller.counts.total}。已入选 {controller.counts.selected} 条，待定 {controller.counts.pending} 条；进度会自动保存在本机。
+            当前进度：{controller.counts.reviewed} / {controller.counts.total}。保存进度后可稍后继续；提前结束会保留已做决定，剩余 {controller.counts.remaining} 条素材保持未处理，并不再作为可继续进度。
           </UiAlertDialogDescription>
-          <div className="ui-alert-dialog-actions">
+          <div className="ui-alert-dialog-actions review-exit-actions">
             <UiAlertDialogCancel>继续挑片</UiAlertDialogCancel>
-            <UiAlertDialogAction onClick={saveAndExit}>保存进度并退出</UiAlertDialogAction>
+            <UiAlertDialogAction className="review-exit-save" onClick={saveAndExit}>保存进度并退出</UiAlertDialogAction>
+            {controller.counts.remaining > 0 ? (
+              <UiAlertDialogAction className="review-exit-finish" onClick={finishEarly}>
+                提前结束并查看结果
+              </UiAlertDialogAction>
+            ) : null}
           </div>
         </UiAlertDialogContent>
       </UiAlertDialog>

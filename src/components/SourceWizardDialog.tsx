@@ -221,8 +221,8 @@ export function SourceWizardDialog({
               onChange={(event) => setEnabled(event.currentTarget.checked)}
             />
             <span>
-              <strong>应用启动时同步</strong>
-              <small>后台增量检查；关闭后仍可手动“立即同步”</small>
+              <strong>加入自动同步</strong>
+              <small>开启“启动时自动扫描”后会同步此来源；关闭后仍可手动“立即同步”</small>
             </span>
           </label>
 

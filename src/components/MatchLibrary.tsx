@@ -28,7 +28,10 @@ import { formatBytes, formatDateTime } from "../lib/formatters";
 import { motionProfile, type MotionProfile } from "../lib/motionProfile";
 import type { ClipSelectionGesture } from "../lib/clipSelection";
 import { cn } from "../lib/classNames";
-import { expectsOfficialRoundScore } from "../lib/videoTypes";
+import {
+  expectsOfficialRoundScore,
+  resolvedVideoTypeLabel,
+} from "../lib/videoTypes";
 import {
   valorantAgentDisplayIconUrl,
   valorantMapListViewIconUrl,
@@ -420,6 +423,8 @@ const MatchClipCard = memo(function MatchClipCard({
   onRestoreClip,
 }: MatchClipCardProps) {
   const title = highlightTitle(clip);
+  const videoType = resolvedVideoTypeLabel(clip);
+  const showVideoType = videoType !== null && videoType !== title;
   const visibleTags = clip.tags.slice(0, 2);
   const scoreText = formatOfficialVideoScore(clip);
   const cardRef = useRef<HTMLElement | null>(null);
@@ -483,6 +488,7 @@ const MatchClipCard = memo(function MatchClipCard({
               src={clip.thumbnailUrl}
             />
             <span className="match-clip-play"><Play weight="fill" /></span>
+            {showVideoType ? <span className="match-clip-type">{videoType}</span> : null}
             <strong>{title}</strong>
             <em>{formatDuration(clip.durationMs)}</em>
           </div>

@@ -3,6 +3,7 @@ import { commandErrorMessage, listClipPage } from "../api/backend";
 import {
   cloneReviewSession,
   createReviewSession,
+  findLatestResumableReviewSession,
   findResumableReviewSession,
   reviewSessionCounts,
   saveReviewSession,
@@ -60,6 +61,7 @@ export type ReviewSessionController = {
   undo: () => boolean;
   continuePending: () => boolean;
   removeCurrent: () => boolean;
+  finishEarly: () => boolean;
   saveProgress: () => boolean;
   clearError: () => void;
 };
@@ -145,7 +147,9 @@ export function useReviewSessionController(): ReviewSessionController {
       baseCandidatesRef.current = baseCandidates;
       const nextDraftCandidates = applyCandidateScopeAndSort(baseCandidates, filters);
       setDraftCandidates(nextDraftCandidates);
-      setResumableSession(findResumableReviewSession(filters));
+      setResumableSession(
+        findResumableReviewSession(filters) ?? findLatestResumableReviewSession(),
+      );
     } catch (requestError) {
       if (!mountedRef.current || prepareTokenRef.current !== token) return;
       baseCandidatesRef.current = [];
@@ -387,6 +391,25 @@ export function useReviewSessionController(): ReviewSessionController {
     return true;
   }, [candidateClips, replaceCandidates, replaceSession]);
 
+  const finishEarly = useCallback((): boolean => {
+    if (decisionBusyRef.current || loadingRef.current || isUndoing) return false;
+    const currentSession = sessionRef.current;
+    if (!currentSession || currentSession.status !== "active") return false;
+    if (reviewSessionCounts(currentSession).remaining === 0) return false;
+    replaceSession({
+      ...currentSession,
+      currentIndex: currentSession.totalCount,
+      status: "completed",
+      updatedAt: new Date().toISOString(),
+    });
+    queueRef.current = { mode: "all", videoIds: [], cursor: 0 };
+    currentVideoIdRef.current = null;
+    setCurrentVideoId(null);
+    setResumableSession(null);
+    setPhase("completed");
+    return true;
+  }, [isUndoing, replaceSession]);
+
   const saveProgress = useCallback((): boolean => {
     const currentSession = sessionRef.current;
     if (!currentSession) return false;
@@ -427,6 +450,7 @@ export function useReviewSessionController(): ReviewSessionController {
     undo,
     continuePending,
     removeCurrent,
+    finishEarly,
     saveProgress,
     clearError,
   };

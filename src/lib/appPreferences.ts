@@ -21,6 +21,7 @@ export type AppPreferencesV1 = {
   previewMuted: boolean;
   reviewAutoplay: boolean;
   motionMode: MotionMode;
+  scanOnStartup: boolean;
   automaticUpdateCheck: boolean;
 };
 
@@ -35,7 +36,7 @@ export type AppPreferencesStorage = Pick<
 
 export const APP_PREFERENCES_STORAGE_ERRORS = Object.freeze({
   read: "无法读取已保存的设置，已改用默认设置。",
-  write: "无法保存设置；更改仅在本次会话中生效。",
+  write: "无法保存设置；即时设置仍在本次会话中生效。",
   remove: "无法清除已保存的设置；默认设置仅在本次会话中生效。",
 });
 
@@ -48,6 +49,7 @@ export const DEFAULT_APP_PREFERENCES: Readonly<AppPreferencesV1> = Object.freeze
   previewMuted: false,
   reviewAutoplay: true,
   motionMode: "system",
+  scanOnStartup: false,
   automaticUpdateCheck: true,
 });
 
@@ -117,6 +119,9 @@ export function normalizeAppPreferences(value: unknown): AppPreferencesV1 {
     motionMode: isOneOf(value.motionMode, MOTION_MODES)
       ? value.motionMode
       : DEFAULT_APP_PREFERENCES.motionMode,
+    scanOnStartup: isBoolean(value.scanOnStartup)
+      ? value.scanOnStartup
+      : DEFAULT_APP_PREFERENCES.scanOnStartup,
     automaticUpdateCheck: isBoolean(value.automaticUpdateCheck)
       ? value.automaticUpdateCheck
       : DEFAULT_APP_PREFERENCES.automaticUpdateCheck,
@@ -151,6 +156,9 @@ export function applyAppPreferencesPatch(
     motionMode: isOneOf(patch.motionMode, MOTION_MODES)
       ? patch.motionMode
       : current.motionMode,
+    scanOnStartup: isBoolean(patch.scanOnStartup)
+      ? patch.scanOnStartup
+      : current.scanOnStartup,
     automaticUpdateCheck: isBoolean(patch.automaticUpdateCheck)
       ? patch.automaticUpdateCheck
       : current.automaticUpdateCheck,

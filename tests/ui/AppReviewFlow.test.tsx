@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockClips } from "../../src/data/mockData";
@@ -114,29 +114,65 @@ describe("App quick-pick integration", () => {
     expect(screen.getByRole("button", { name: "快速挑片" })).toHaveAttribute("aria-current", "page");
   });
 
-  it("inherits the current library range, never writes a legacy decision, and reuses selected-result batch UI", async () => {
+  it("resets quick-pick conditions on entry and keeps them separate from the material library", async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByRole("heading", { name: /素材库/ });
 
     await user.click(screen.getByRole("combobox", { name: "账号" }));
     await user.click(await screen.findByRole("option", { name: "Winter#0001" }));
-    await waitFor(() => expect(mocks.listClipPage).toHaveBeenLastCalledWith(expect.objectContaining({
+    await user.type(screen.getByLabelText("全局搜索素材"), "library-only");
+    await waitFor(() => expect(latestLibraryQuery()).toEqual(expect.objectContaining({
       accountId: "winter",
+      query: "library-only",
     })));
 
     await user.click(screen.getByRole("button", { name: "快速挑片" }));
     expect(await screen.findByRole("heading", { name: "快速挑片" })).toBeVisible();
-    await waitFor(() => expect(mocks.listClipPage).toHaveBeenLastCalledWith({
-      accountId: "winter",
+    await waitFor(() => expect(latestReviewQuery()).toEqual({
       sortBy: "modified-desc",
       offset: 0,
       limit: 200,
     }));
 
-    await user.click(screen.getByRole("button", { name: /开始挑片/ }));
+    await user.click(screen.getByRole("button", { name: "修改范围" }));
+    expect(screen.getByLabelText("搜索素材")).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "账号" })).toHaveTextContent("全部账号");
+    expect(screen.getByRole("combobox", { name: "英雄" })).toHaveTextContent("全部英雄");
+    expect(screen.getByRole("combobox", { name: "地图" })).toHaveTextContent("全部地图");
+    expect(screen.getByRole("combobox", { name: "模式" })).toHaveTextContent("全部模式");
+    expect(screen.getByRole("combobox", { name: "日期" })).toHaveTextContent("全部日期");
+    expect(screen.getByRole("combobox", { name: "视频类型" })).toHaveTextContent("全部类型");
+    expect(screen.getByRole("combobox", { name: "自定义标签" })).toHaveTextContent("全部自定义标签");
+    expect(screen.getByRole("radio", { name: /最新优先/ })).toBeChecked();
+    expect(screen.getByRole("radio", { name: /全部素材/ })).toBeChecked();
+
+    await chooseReviewScopeOption(user, "账号", "Winter#0001");
+    await user.type(screen.getByLabelText("搜索素材"), "quick-pick-only");
+    await waitFor(() => expect(latestReviewQuery()).toEqual(expect.objectContaining({
+      accountId: "winter",
+      query: "quick-pick-only",
+      sortBy: "modified-desc",
+      offset: 0,
+      limit: 200,
+    })));
+
+    await user.click(screen.getByRole("button", { name: /^全部素材/ }));
+    await screen.findByRole("heading", { name: /素材库/ });
+    expect(screen.getByLabelText("全局搜索素材")).toHaveValue("library-only");
+    expect(screen.getByRole("combobox", { name: "账号" })).toHaveTextContent("Winter#0001");
+  }, 15_000);
+
+  it("keeps quick-pick decisions session-only and reuses selected-result batch UI", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("heading", { name: /素材库/ });
+
+    await user.click(screen.getByRole("button", { name: "快速挑片" }));
+    await screen.findByRole("heading", { name: "快速挑片" });
+    await user.click(screen.getByRole("button", { name: /开始.*挑片/ }));
     await screen.findByRole("article", { name: "当前挑片素材" });
-    fireEvent.keyDown(window, { key: "d" });
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "d" }));
     await screen.findByRole("heading", { name: "本轮挑片完成" });
     expect(mocks.setClipReviewDecision).not.toHaveBeenCalled();
 
@@ -222,6 +258,13 @@ function latestReviewQuery(): ClipListQuery | undefined {
   const requests = mocks.listClipPage.mock.calls
     .map(([request]) => request as ClipListQuery)
     .filter((request) => request.offset === 0 && request.limit === 200);
+  return requests.at(-1);
+}
+
+function latestLibraryQuery(): ClipListQuery | undefined {
+  const requests = mocks.listClipPage.mock.calls
+    .map(([request]) => request as ClipListQuery)
+    .filter((request) => request.offset === 0 && request.limit === 50);
   return requests.at(-1);
 }
 

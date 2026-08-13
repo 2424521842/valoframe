@@ -22,6 +22,7 @@ const VALID_NON_DEFAULT_PREFERENCES: AppPreferencesV1 = {
   previewMuted: true,
   reviewAutoplay: false,
   motionMode: "reduced",
+  scanOnStartup: true,
   automaticUpdateCheck: false,
 };
 
@@ -35,6 +36,7 @@ test("app preferences expose the documented v1 defaults", () => {
     previewMuted: false,
     reviewAutoplay: true,
     motionMode: "system",
+    scanOnStartup: false,
     automaticUpdateCheck: true,
   });
 
@@ -53,6 +55,15 @@ test("valid v1 preferences survive parsing and unknown fields are ignored", () =
   assert.equal("futureField" in parsed, false);
 });
 
+test("older v1 payloads default only the new startup scan field", () => {
+  const { scanOnStartup: _missing, ...olderPayload } = VALID_NON_DEFAULT_PREFERENCES;
+
+  assert.deepEqual(normalizeAppPreferences(olderPayload), {
+    ...VALID_NON_DEFAULT_PREFERENCES,
+    scanOnStartup: false,
+  });
+});
+
 test("each invalid v1 field falls back independently", () => {
   const invalidCases: Array<[keyof AppPreferencesV1, unknown]> = [
     ["startupDestination", "dashboard"],
@@ -64,6 +75,7 @@ test("each invalid v1 field falls back independently", () => {
     ["previewMuted", 1],
     ["reviewAutoplay", "true"],
     ["motionMode", "always"],
+    ["scanOnStartup", "true"],
     ["automaticUpdateCheck", null],
   ];
 

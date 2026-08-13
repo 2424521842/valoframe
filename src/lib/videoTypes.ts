@@ -35,9 +35,19 @@ const OFFICIAL_NON_SCORING_VIDEO_TYPES = new Set([
 ]);
 const KILL_COMPILATION_PATTERN = /击杀合集|击杀集锦|击杀剪辑|kill compilation|kill montage/;
 const DEATH_COMPILATION_PATTERN = /死亡时刻|死亡集锦|death moment|death compilation/;
-const ORDINARY_MULTI_KILL_PATTERN =
-  /三杀|3杀|三连杀|四杀|4杀|四连杀|\bace\b|五杀|5杀|五连杀|六杀|6杀|六连杀/;
-const ORDINARY_MULTI_KILL_COUNTS = new Set([3, 4, 5, 6]);
+const HIGHLIGHT_MARKER_SUFFIXES = [
+  "时刻",
+  "集锦",
+  "高光",
+  "片段",
+  "剪辑",
+  "回放",
+  "合集",
+] as const;
+const HIGHLIGHT_BOUNDARY_PUNCTUATION = new Set([
+  "，", "。", "！", "？", "：", "；", "、", "—", "…", "（", "）", "【", "】",
+  "《", "》", "“", "”", "‘", "’",
+]);
 
 export type TimelineMarkerMode = "kill" | "death";
 
@@ -56,27 +66,60 @@ export function matchesVideoType(
   filter: HighlightFilter | undefined,
 ): boolean {
   if (!filter || filter === "all") return true;
+  return resolveVideoType(clip) === filter;
+}
 
+/**
+ * Resolves one canonical product category for a clip.
+ *
+ * `killCount` is the number of self-kill events inside the whole exported video.
+ * A kill compilation can therefore contain four, five, or six kills without being
+ * an ordinary multi-kill moment. Official numeric types take precedence, and the
+ * weaker count/text fallbacks are used only when no positive numeric type exists.
+ */
+export function resolveVideoType(
+  clip: VideoTypeMetadata,
+): VideoTypeFilter | null {
   const numericType = numericVideoType(clip);
+  if (numericType === 2) return "kill-compilation";
+  if (numericType === 3) return "death";
+  if (numericType === 4) return "triple";
+  if (numericType === 6) return "quad";
+  if (numericType === 10) {
+    if (clip.killCount === 6) return "six";
+    if (clip.killCount === 5) return "five";
+
+    const titleSource = videoTypeText(clip);
+    if (containsHighlightMarker(titleSource, ["六杀", "6杀", "六连杀"])) return "six";
+    if (containsFiveKillMarker(titleSource)) return "five";
+    return null;
+  }
+  if (numericType !== null && numericType > 0) return null;
+
+  const compilation = classifyAbsoluteTimelineCompilation(clip);
+  if (compilation.hasSignal) {
+    return compilation.mode === "kill"
+      ? "kill-compilation"
+      : compilation.mode === "death"
+        ? "death"
+        : null;
+  }
+
   const titleSource = videoTypeText(clip);
+  if (containsHighlightMarker(titleSource, ["六杀", "6杀", "六连杀"])) return "six";
+  if (containsFiveKillMarker(titleSource)) return "five";
+  if (containsHighlightMarker(titleSource, ["四杀", "4杀", "四连杀"])) return "quad";
+  if (containsHighlightMarker(titleSource, ["三杀", "3杀", "三连杀"])) return "triple";
+  if (clip.killCount === 6) return "six";
+  if (clip.killCount === 5) return "five";
+  if (clip.killCount === 4) return "quad";
+  if (clip.killCount === 3) return "triple";
+  return null;
+}
 
-  if (filter === "triple") {
-    return clip.killCount === 3 || numericType === 4 || /三杀|3杀|三连杀/.test(titleSource);
-  }
-  if (filter === "quad") {
-    return clip.killCount === 4 || numericType === 6 || /四杀|4杀|四连杀/.test(titleSource);
-  }
-  if (filter === "five") {
-    return clip.killCount === 5 || /\bace\b|五杀|5杀|五连杀/.test(titleSource);
-  }
-  if (filter === "six") {
-    return clip.killCount === 6 || /六杀|6杀|六连杀/.test(titleSource);
-  }
-  if (filter === "kill-compilation") {
-    return absoluteTimelineCompilationMode(clip) === "kill";
-  }
-
-  return absoluteTimelineCompilationMode(clip) === "death";
+export function resolvedVideoTypeLabel(clip: VideoTypeMetadata): string | null {
+  const videoType = resolveVideoType(clip);
+  return videoType ? videoTypeLabel(videoType) : null;
 }
 
 /**
@@ -101,13 +144,10 @@ export function previewTimelineMarkerMode(
   if (numericType !== null && OFFICIAL_SCORE_HIGHLIGHT_TYPES.has(numericType)) {
     return "kill";
   }
-  if (
-    clip.killCount != null &&
-    ORDINARY_MULTI_KILL_COUNTS.has(clip.killCount)
-  ) {
-    return "kill";
-  }
-  return ORDINARY_MULTI_KILL_PATTERN.test(videoTypeText(clip)) ? "kill" : null;
+  const videoType = resolveVideoType(clip);
+  return videoType && !["kill-compilation", "death"].includes(videoType)
+    ? "kill"
+    : null;
 }
 
 function classifyAbsoluteTimelineCompilation(
@@ -116,6 +156,9 @@ function classifyAbsoluteTimelineCompilation(
   const numericType = numericVideoType(clip);
   if (numericType === 2) return { mode: "kill", hasSignal: true };
   if (numericType === 3) return { mode: "death", hasSignal: true };
+  if (numericType !== null && numericType > 0) {
+    return { mode: null, hasSignal: false };
+  }
 
   const titleSource = videoTypeText(clip);
   const matchesKillCompilation = KILL_COMPILATION_PATTERN.test(titleSource);
@@ -149,8 +192,47 @@ export function expectsOfficialRoundScore(clip: VideoTypeMetadata): boolean {
 
 function parseNumericType(value: string | null | undefined): number | null {
   if (!value?.trim()) return null;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) ? parsed : null;
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) return null;
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function containsFiveKillMarker(text: string): boolean {
+  return /(?:^|\s)ace(?:$|\s)/.test(text)
+    || containsHighlightMarker(text, ["五杀", "5杀", "五连杀"]);
+}
+
+function containsHighlightMarker(text: string, markers: readonly string[]): boolean {
+  return markers.some((marker) => {
+    let searchStart = 0;
+    while (searchStart <= text.length) {
+      const markerIndex = text.indexOf(marker, searchStart);
+      if (markerIndex < 0) return false;
+      if (hasHighlightMarkerBoundary(text.slice(markerIndex + marker.length))) {
+        return true;
+      }
+      searchStart = markerIndex + marker.length;
+    }
+    return false;
+  });
+}
+
+function hasHighlightMarkerBoundary(remainder: string): boolean {
+  if (!remainder) return true;
+  if (HIGHLIGHT_MARKER_SUFFIXES.some((suffix) => remainder.startsWith(suffix))) {
+    return true;
+  }
+  const boundary = remainder[0];
+  const codePoint = boundary.codePointAt(0) ?? 0;
+  const isAsciiPunctuation =
+    (codePoint >= 33 && codePoint <= 47)
+    || (codePoint >= 58 && codePoint <= 64)
+    || (codePoint >= 91 && codePoint <= 96)
+    || (codePoint >= 123 && codePoint <= 126);
+  return /\s/u.test(boundary)
+    || isAsciiPunctuation
+    || HIGHLIGHT_BOUNDARY_PUNCTUATION.has(boundary);
 }
 
 function numericVideoType(clip: VideoTypeMetadata): number | null {
@@ -161,6 +243,5 @@ function videoTypeText(clip: VideoTypeMetadata): string {
   return [
     clip.officialVideoName ?? "",
     clip.officialVideoType ?? "",
-    clip.extractedText ?? "",
   ].join(" ").toLocaleLowerCase("zh-CN");
 }

@@ -146,7 +146,7 @@ pub fn run() {
                 thumbnail_queue,
                 critical_tasks: Arc::new(critical_tasks::CriticalTaskGate::default()),
             };
-            app.manage(app_state.clone());
+            app.manage(app_state);
             app.manage(app_updates::AppUpdateState::default());
 
             let window_config = app
@@ -170,7 +170,6 @@ pub fn run() {
                 .map_err(|_| std::io::Error::other("primary window state lock is poisoned"))? =
                 Some(window.clone());
             window.show()?;
-            commands::start_enabled_source_sync(app.handle().clone(), app_state);
 
             Ok(())
         })
@@ -198,6 +197,7 @@ pub fn run() {
             commands::relocate_scan_source,
             commands::sync_scan_source,
             commands::sync_enabled_sources,
+            commands::request_startup_source_sync,
             commands::list_tags,
             commands::create_tag,
             commands::update_tag,

@@ -22,6 +22,7 @@ import {
   openClipLocation,
   openClipExternally,
   previewScanSourceRelocation,
+  requestStartupSourceSync,
   relocateScanSource,
   registerScanSource,
   setScanSourceEnabled,
@@ -87,7 +88,6 @@ import type {
   RegisterScanSourceInput,
   RegisterScanSourceResult,
   ReviewSession,
-  ReviewSessionFilters,
   ThumbnailProgress,
 } from "./types";
 
@@ -131,6 +131,7 @@ type ReviewResultSelection = {
 
 function App() {
   const didLoadInitialData = useRef(false);
+  const didRequestStartupSourceSync = useRef(false);
   const scanFreshnessDiagnosticsRef = useRef(new Set<string>());
   const preferencesController = useAppPreferences();
   const { preferences } = preferencesController;
@@ -396,6 +397,14 @@ function App() {
     () => mergeTagsWithFacets(tags, libraryFacets?.tags, selectedTagId),
     [libraryFacets, selectedTagId, tags],
   );
+  const reviewScopeOptions = useMemo(() => ({
+    accounts: accountSummariesFromFacets(libraryFacets, "all"),
+    agentNames: selectedFacetValues(libraryFacets?.agents, "all"),
+    mapNames: selectedFacetValues(libraryFacets?.maps, "all"),
+    gameModes: selectedFacetValues(libraryFacets?.gameModes, "all"),
+    tags: mergeTagsWithFacets(tags, libraryFacets?.tags, "all"),
+    videoTypes,
+  }), [libraryFacets, tags, videoTypes]);
   const clearSelectedClip = useCallback((clipIds: ReadonlySet<string>) => {
     setSelectedClipId((current) => clipIds.has(current) ? "" : current);
   }, []);
@@ -544,19 +553,6 @@ function App() {
       ? [...libraryFilterLabels, `本轮入选：${reviewResultSelection.clipIds.length} 条`]
       : libraryFilterLabels
   ), [libraryFilterLabels, reviewResultSelection]);
-
-  const inheritedReviewFilters = useMemo<ReviewSessionFilters>(() => {
-    const { offset: _offset, limit: _limit, reviewDecision: _legacyReviewDecision, ...queryForReview } = productionListQuery;
-    void _offset;
-    void _limit;
-    void _legacyReviewDecision;
-    return {
-      query: queryForReview,
-      labels: libraryFilterLabels,
-      sort: "library",
-      candidateScope: "all",
-    };
-  }, [libraryFilterLabels, productionListQuery]);
 
   const matchGroups = useMemo(
     () => groupClipsByMatch(visibleClips),
@@ -776,6 +772,17 @@ function App() {
     notify: ({ message }) => setActivityMessage(message),
   });
 
+  useEffect(() => {
+    if (didRequestStartupSourceSync.current) return;
+    didRequestStartupSourceSync.current = true;
+    if (!preferences.scanOnStartup || !isTauri()) return;
+
+    void requestStartupSourceSync().catch((error) => {
+      setScanError(`启动自动扫描失败：${commandErrorMessage(error)}`);
+      setActivityMessage("启动自动扫描未能开始，请在扫描目录中手动重试");
+    });
+  }, [preferences.scanOnStartup, setScanError]);
+
   const handleChooseSourceDirectory = async (sourceKind: SourceKind): Promise<string | null> => {
     if (isScanning) {
       return null;
@@ -914,7 +921,7 @@ function App() {
     try {
       await setScanSourceEnabled(source.id, enabled);
       await loadSourceList();
-      setActivityMessage(`${source.displayName} 已${enabled ? "启用" : "停用"}启动同步`);
+      setActivityMessage(`${source.displayName} 已${enabled ? "加入" : "移出"}自动同步`);
     } catch (error) {
       setScanError(`更新来源设置失败：${commandErrorMessage(error)}`);
     }
@@ -1133,45 +1140,10 @@ function App() {
           {activeScreen === "library" ? null : activeScreen === "review" ? (
             <ReviewWorkspace
               autoplay={preferences.reviewAutoplay}
-              inheritedFilters={inheritedReviewFilters}
               initialMuted={preferences.previewMuted}
               initialVolumePercent={preferences.previewVolumePercent}
-              isScopeUpdating={isFilterPending || query !== debouncedQuery}
-              scopeEditor={{
-                query,
-                accounts,
-                accountId: selectedAccountId,
-                agentNames,
-                agentName: selectedAgentName,
-                mapNames,
-                mapName: selectedMapName,
-                gameModes,
-                gameMode: selectedGameMode,
-                tags: libraryTags,
-                tagId: selectedTagId,
-                datePreset: effectiveDatePreset,
-                highlightFilter,
-                videoTypes,
-                onQueryChange: (value) => {
-                  clearReviewResultSelection();
-                  setQuery(value);
-                },
-                onAccountChange: handleAccountChange,
-                onAgentChange: handleAgentChange,
-                onMapChange: handleMapChange,
-                onGameModeChange: handleGameModeChange,
-                onTagChange: handleTagChange,
-                onDatePresetChange: (value) => startFilterTransition(() => {
-                  clearReviewResultSelection();
-                  setLibraryMode("all");
-                  setDatePreset(value);
-                }),
-                onHighlightFilterChange: (value) => startFilterTransition(() => {
-                  clearReviewResultSelection();
-                  setHighlightFilter(value);
-                }),
-                onClearFilters: handleClearAllFilters,
-              }}
+              librarySort={sortBy}
+              scopeOptions={reviewScopeOptions}
               onAudioPreferenceChange={handleAudioPreferenceChange}
               onBack={() => handleScreenChange("library")}
               onFavoriteSelected={(clipIds) => handleSetFavoriteForClips(clipIds, true)}

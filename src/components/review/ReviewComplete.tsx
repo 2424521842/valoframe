@@ -42,6 +42,7 @@ export function ReviewComplete({
     .filter((item) => item.decision === "selected")
     .map((item) => item.videoId);
   const visibleSelectedCount = candidates.filter((clip) => selectedIds.includes(clip.id)).length;
+  const endedEarly = counts.remaining > 0;
 
   const handleFavorite = async () => {
     if (isFavoriting || selectedIds.length === 0) return;
@@ -67,8 +68,12 @@ export function ReviewComplete({
   return (
     <section aria-labelledby="review-complete-title" className="review-workspace review-complete">
       <div className="review-complete-mark"><CheckCircle weight="duotone" /></div>
-      <h1 id="review-complete-title">本轮挑片完成</h1>
-      <p>{counts.total} 条素材已浏览。挑片结果只属于这一轮会话，不会自动修改收藏、标签或回收站。</p>
+      <h1 id="review-complete-title">{endedEarly ? "本轮挑片已提前结束" : "本轮挑片完成"}</h1>
+      <p>
+        {endedEarly
+          ? `已浏览 ${counts.reviewed} / ${counts.total} 条素材，剩余 ${counts.remaining} 条未处理。已做出的挑片决定会保留。`
+          : `${counts.total} 条素材已浏览。挑片结果只属于这一轮会话，不会自动修改收藏、标签或回收站。`}
+      </p>
 
       <dl className="review-complete-stats" aria-label="本轮挑片统计">
         <div><dt>入选</dt><dd>{counts.selected}</dd></div>

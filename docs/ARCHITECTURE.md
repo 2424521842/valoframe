@@ -93,7 +93,7 @@ flowchart LR
 | `screens/LibraryWorkspace.tsx` | 素材库、选择、批量操作和加载更多入口 |
 | `screens/ScanWorkspace.tsx` | 来源队列、逐来源新鲜度/7 天提醒、根重新定位入口、全电脑发现、进度、取消和带新增数量的扫描结果 |
 | `components/SourceRelocationDialog.tsx` | 新根选择、只读预览、可信匹配/冲突展示、二次确认和提交后同步结果 |
-| `components/SourceWizardDialog.tsx` | 四种来源类型、目录授权、显示名、启动同步策略和重叠来源二次确认 |
+| `components/SourceWizardDialog.tsx` | 四种来源类型、目录授权、显示名、自动同步资格和重叠来源二次确认 |
 | `screens/TagManagementWorkspace.tsx` | 标签统计、搜索、创建、修改和删除 |
 | `screens/PreviewWorkspace.tsx` | 按需详情、媒体播放、本人击杀/本人死亡时间轴、标签和备注 |
 | `screens/SettingsWorkspace.tsx` | 常规、素材库、播放、更新、数据与隐私和关于分类；承载完整更新状态机与安全确认 |
@@ -119,7 +119,7 @@ flowchart LR
 
 | 类别 | Commands |
 | --- | --- |
-| 扫描与来源 | `register_scan_source`、`set_scan_source_enabled`、`sync_scan_source`、`sync_enabled_sources`、`preview_scan_source_relocation`、`relocate_scan_source`、`scan_default_aclos_dir`、`scan_roots`、`discover_and_scan_fixed_drives`、`get_scan_status`、`cancel_scan`、`get_scan_summary`（可按 job ID） |
+| 扫描与来源 | `register_scan_source`、`set_scan_source_enabled`、`sync_scan_source`、`sync_enabled_sources`、`request_startup_source_sync`、`preview_scan_source_relocation`、`relocate_scan_source`、`scan_default_aclos_dir`、`scan_roots`、`discover_and_scan_fixed_drives`、`get_scan_status`、`cancel_scan`、`get_scan_summary`（可按 job ID） |
 | 素材读取 | `list_clip_page`、`get_library_facets`、`get_clip_detail`、`list_sources` |
 | 标签 | `list_tags`、`create_tag`、`update_tag`、`delete_tag` |
 | 素材写入 | `set_clip_favorite`、`set_clips_favorite`、`set_clip_trashed`、`set_clips_trashed`、`remove_clip_from_index`、`remove_clips_from_index`、`delete_clips_permanently`、`update_clip_note` |
@@ -161,7 +161,7 @@ flowchart LR
 ### 5.2 持久来源与多根扫描
 
 1. 来源向导把用户授权目录规范化并拒绝重解析点；完全重复路径复用现有来源，父子目录重叠必须显式二次确认。ACLOS 可从一个根发现多个 `wonderfulVideos*` 逻辑来源，NVIDIA、Tracker 和 generic 各自保存一个递归来源。
-2. 启动同步、`sync_enabled_sources` 和 `sync_scan_source` 都复用 `scan_coordinator`、同一个 scan job/run 协议与关键任务互斥；已有任务时返回稳定 `already-running`，不会并发启动第二个扫描。
+2. 全局“启动时自动扫描”偏好默认关闭并存于版本化 `localStorage`；开启后，React 在下次启动同步读取偏好并调用 `request_startup_source_sync`。该命令、`sync_enabled_sources` 和 `sync_scan_source` 都复用 `scan_coordinator`、同一个 scan job/run 协议与关键任务互斥；启动请求保留 10 分钟重启冷却，已有任务时不会并发启动第二个扫描。
 3. `aclos-structured` 只处理来源根直放 MP4 或一层对局目录，并读取 WonderfulDb/导出 JSON/日志/LevelDB；`recursive-mp4` 只读取用户根内大小写不敏感的普通 `.mp4`，不读取第三方插件数据库，也不伪造对局元数据。
 4. 递归适配器采用深度/文件数上限和 128 项短事务批次，跳过符号链接、junction/reparse point、越界 canonical path 和扫描期间大小/mtime 变化的文件；同一规范化文件路径只能归属一个来源。
 5. 每个来源先完整枚举并在连接级 TEMP 表统计候选唯一性，再按“规范化路径 → 来源内双侧唯一稳定身份 → 身份全空旧行的双侧唯一文件名/大小/mtime”处理。复制、硬链接或重复指纹不合并；身份读取失败不阻断索引。

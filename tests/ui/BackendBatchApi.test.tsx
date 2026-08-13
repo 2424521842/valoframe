@@ -29,6 +29,7 @@ import {
   removeTagFromClips,
   retryClipThumbnails,
   registerScanSource,
+  requestStartupSourceSync,
   setScanSourceEnabled,
   setClipsFavorite,
   setClipsTrashed,
@@ -146,6 +147,8 @@ describe("backend batch mutation APIs", () => {
     expect(mocks.invoke).toHaveBeenLastCalledWith("sync_scan_source", { sourceId: 17 });
     await syncEnabledSources();
     expect(mocks.invoke).toHaveBeenLastCalledWith("sync_enabled_sources");
+    await requestStartupSourceSync();
+    expect(mocks.invoke).toHaveBeenLastCalledWith("request_startup_source_sync");
   });
 
   it("previews and commits source relocation with the frozen camelCase contract", async () => {

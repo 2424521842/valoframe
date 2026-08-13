@@ -303,6 +303,11 @@ pub async fn sync_enabled_sources(
     .await
 }
 
+#[tauri::command]
+pub fn request_startup_source_sync(app: AppHandle, state: State<'_, AppState>) {
+    start_enabled_source_sync(app, state.inner().clone());
+}
+
 pub(crate) fn start_enabled_source_sync(app: AppHandle, state: AppState) {
     tauri::async_runtime::spawn(async move {
         let decision = db::open_database_read_only(&state.database_path)

@@ -3,6 +3,8 @@ import {
   ArrowSquareOut,
   Check,
   Copy,
+  CornersIn,
+  CornersOut,
   Crosshair,
   FolderOpen,
   Heart,
@@ -26,6 +28,7 @@ import {
   isPlaybackShortcutFocusProtected,
   usePlaybackShortcuts,
 } from "../hooks/usePlaybackShortcuts";
+import { useElementFullscreen } from "../hooks/useElementFullscreen";
 import { formatBytes, formatDateTime } from "../lib/formatters";
 import { previewTimelineMarkerMode } from "../lib/videoTypes";
 import type { Clip, ClipEvent, ClipMedia, ClipSummary, Tag } from "../types";
@@ -187,6 +190,16 @@ export function PreviewWorkspace({
     videoRef,
     active: shortcutsActive,
   });
+  const fullscreenEligible = shortcutsActive && !embeddedPlaybackFailed;
+  const {
+    clearFullscreenError,
+    elementRef: playerShellRef,
+    exitFullscreen,
+    fullscreenError,
+    isFullscreen,
+    shouldIgnoreEscape: shouldIgnoreFullscreenEscape,
+    toggleFullscreen,
+  } = useElementFullscreen<HTMLDivElement>({ enabled: fullscreenEligible });
 
   useEffect(() => {
     if (!clip) return;
@@ -207,8 +220,19 @@ export function PreviewWorkspace({
 
       if (event.key === "Escape") {
         if (isPreviewEscapeNavigationBlocked(event)) return;
+        if (shouldIgnoreFullscreenEscape()) return;
         event.preventDefault();
         onBack();
+        return;
+      }
+
+      if (
+        event.key.toLocaleLowerCase("en-US") === "f" &&
+        shortcutsActive &&
+        !isFullscreenShortcutFocusProtected(event)
+      ) {
+        event.preventDefault();
+        void toggleFullscreen();
         return;
       }
 
@@ -219,7 +243,7 @@ export function PreviewWorkspace({
 
     window.addEventListener("keydown", handlePreviewNavigation);
     return () => window.removeEventListener("keydown", handlePreviewNavigation);
-  }, [clip, onBack, onSelectClip, relatedClips]);
+  }, [clip, onBack, onSelectClip, relatedClips, shortcutsActive, shouldIgnoreFullscreenEscape, toggleFullscreen]);
 
   useEffect(() => {
     const clipId = clip?.id ?? null;
@@ -231,6 +255,7 @@ export function PreviewWorkspace({
     setCurrentTime(0);
     setMediaDuration(null);
     setEmbeddedPlaybackFailed(false);
+    clearFullscreenError();
 
     if (!clip || !clipId) return;
     setIsMediaLoading(true);
@@ -485,7 +510,19 @@ export function PreviewWorkspace({
           </button>
         </header>
 
-        <div className="preview-video-stage">
+        <div
+          className={isFullscreen
+            ? "preview-player-shell preview-player-shell--fullscreen"
+            : "preview-player-shell"}
+          ref={playerShellRef}
+        >
+        <div
+          className="preview-video-stage"
+          onDoubleClick={(event) => {
+            if (event.target instanceof Element && event.target.closest("button")) return;
+            void toggleFullscreen();
+          }}
+        >
           {activeMedia?.playable && activeMedia.mediaUrl ? (
             <video
               key={clip.id}
@@ -505,7 +542,8 @@ export function PreviewWorkspace({
               onError={() => {
                 setIsPlaying(false);
                 setEmbeddedPlaybackFailed(true);
-                setMediaError("当前系统无法内嵌播放此视频")
+                setMediaError("当前系统无法内嵌播放此视频");
+                void exitFullscreen();
               }}
               onPause={() => setIsPlaying(false)}
               onPlay={() => setIsPlaying(true)}
@@ -534,6 +572,11 @@ export function PreviewWorkspace({
           ) : null}
           {isMediaLoading ? <span className="preview-media-state">正在检查本地视频…</span> : null}
           {activeMediaError ? <span className="preview-media-state preview-media-state--error">{activeMediaError}</span> : null}
+          {fullscreenError ? (
+            <span className="preview-media-state preview-media-state--fullscreen" role="status">
+              {fullscreenError}
+            </span>
+          ) : null}
           {embeddedPlaybackFailed && activeMedia?.playable ? (
             <div className="preview-external-fallback" role="alert">
               <span>视频已安全入库，但当前 WebView2 解码链无法播放。</span>
@@ -584,7 +627,18 @@ export function PreviewWorkspace({
           <span><b>{formatSeconds(activeCurrentTime)}</b> / {formatSeconds(durationSeconds)}</span>
           <i />
           <span className="preview-quality">1080P</span>
-          <Crosshair weight="duotone" />
+          <button
+            aria-keyshortcuts="F"
+            aria-label={isFullscreen ? "退出全屏" : "进入全屏"}
+            aria-pressed={isFullscreen}
+            className="preview-fullscreen-button"
+            disabled={!fullscreenEligible}
+            title={isFullscreen ? "退出全屏（F 或 Esc）" : "进入全屏（F 或双击视频）"}
+            type="button"
+            onClick={() => void toggleFullscreen()}
+          >
+            {isFullscreen ? <CornersIn weight="bold" /> : <CornersOut weight="bold" />}
+          </button>
         </div>
 
         <div className="preview-timeline" aria-label="视频时间轴">
@@ -628,6 +682,7 @@ export function PreviewWorkspace({
             <span className="preview-timeline-legend--kill"><Crosshair aria-hidden="true" weight="bold" />本人击杀</span>
             <span className="preview-timeline-legend--death"><Skull aria-hidden="true" weight="fill" />本人死亡</span>
           </div>
+        </div>
         </div>
       </main>
 
@@ -757,6 +812,19 @@ function isPreviewEscapeNavigationBlocked(event: KeyboardEvent): boolean {
 
   const target = event.target instanceof Element ? event.target : ownerDocument.activeElement;
   return Boolean(target?.closest(PREVIEW_ESCAPE_BLOCKED_CONTROL_SELECTOR));
+}
+
+function isFullscreenShortcutFocusProtected(event: KeyboardEvent): boolean {
+  const ownerDocument = event.view?.document ?? document;
+  if (
+    ownerDocument.querySelector(PREVIEW_ESCAPE_BLOCKED_LAYER_SELECTOR)
+    || ownerDocument.querySelector(PREVIEW_ESCAPE_BLOCKED_CONTROL_SELECTOR)
+  ) {
+    return true;
+  }
+  const target = event.target instanceof Element ? event.target : ownerDocument.activeElement;
+  if (target?.closest(".preview-fullscreen-button")) return false;
+  return isPlaybackShortcutFocusProtected(event);
 }
 
 function formatDuration(durationMs: number | null): string {

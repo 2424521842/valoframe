@@ -100,6 +100,25 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
     expect(screen.queryByText(/其中 1 个尚未完成首次扫描/)).not.toBeInTheDocument();
   });
 
+  it("labels source eligibility separately from the global startup scan setting", async () => {
+    const user = userEvent.setup();
+    const onSetSourceEnabled = vi.fn();
+    renderWorkspace({
+      sourceDirs: [source("archive", null, false)],
+      onSetSourceEnabled,
+    });
+
+    expect(screen.getByText("未加入自动同步")).toBeVisible();
+    const includeSource = screen.getByRole("button", { name: "加入自动同步 archive" });
+    expect(includeSource).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(includeSource);
+    expect(onSetSourceEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "archive" }),
+      true,
+    );
+  });
+
   it("aggregates overdue and first-scan enabled sources", () => {
     renderWorkspace({
       sourceDirs: [

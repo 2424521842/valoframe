@@ -10,7 +10,9 @@ type UseReviewShortcutsOptions = {
   onDecision?: (decision: ReviewShortcutDecision) => void;
   onUndo: () => void;
   onTogglePlayback?: () => void;
+  onToggleFullscreen?: () => void;
   onRequestExit?: () => void;
+  shouldIgnoreFullscreenEscape?: () => boolean;
 };
 
 const REVIEW_FOCUS_PROTECTED_SELECTOR = [
@@ -47,7 +49,9 @@ export function useReviewShortcuts({
   onDecision,
   onUndo,
   onTogglePlayback,
+  onToggleFullscreen,
   onRequestExit,
+  shouldIgnoreFullscreenEscape,
 }: UseReviewShortcutsOptions): void {
   const optionsRef = useRef({
     isBusy,
@@ -55,7 +59,9 @@ export function useReviewShortcuts({
     onDecision,
     onUndo,
     onTogglePlayback,
+    onToggleFullscreen,
     onRequestExit,
+    shouldIgnoreFullscreenEscape,
   });
   optionsRef.current = {
     isBusy,
@@ -63,7 +69,9 @@ export function useReviewShortcuts({
     onDecision,
     onUndo,
     onTogglePlayback,
+    onToggleFullscreen,
     onRequestExit,
+    shouldIgnoreFullscreenEscape,
   };
 
   useEffect(() => {
@@ -79,6 +87,7 @@ export function useReviewShortcuts({
       }
       const options = optionsRef.current;
       if (event.key === "Escape" && options.onRequestExit) {
+        if (options.shouldIgnoreFullscreenEscape?.()) return;
         event.preventDefault();
         options.onRequestExit();
         return;
@@ -99,6 +108,11 @@ export function useReviewShortcuts({
       if (isSpaceKey(event.key) && options.onTogglePlayback) {
         event.preventDefault();
         if (!options.isBusy) options.onTogglePlayback();
+        return;
+      }
+      if (event.key.toLowerCase() === "f" && options.onToggleFullscreen) {
+        event.preventDefault();
+        if (!options.isBusy) options.onToggleFullscreen();
       }
     };
     window.addEventListener("keydown", onKeyDown);

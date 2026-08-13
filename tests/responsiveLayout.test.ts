@@ -8,7 +8,7 @@ const balancedFilterRules = extractBlocks(css, "@media (max-width: 1120px)");
 const mediumRules = extractBlocks(css, "@media (max-width: 1190px)");
 const compactRules = extractBlocks(css, "@media (max-width: 919px)");
 const smallestRules = extractBlocks(css, "@media (max-width: 680px)");
-const fullscreenPreviewRules = extractBlocks(
+const largePreviewRules = extractBlocks(
   css,
   "@media (min-width: 1600px) and (min-height: 900px)",
 );
@@ -105,14 +105,14 @@ test("smallest layout keeps current library controls and cards in one column", (
   assert.match(smallestRules, /\.library-batch-toolbar\s*\{[^}]*left:\s*8px;/s);
 });
 
-test("library filters keep sort aligned across wide, medium, and narrow layouts", () => {
+test("library filters fill the wide toolbar without a phantom source column", () => {
   assert.match(
     css,
     /\.library-filter-row\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+108px;/s,
   );
   assert.match(
     css,
-    /\.library-filter-controls\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*repeat\(8,\s*minmax\(0,\s*1fr\)\);/s,
+    /\.library-filter-controls\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*repeat\(7,\s*minmax\(0,\s*1fr\)\);/s,
   );
   assert.match(
     css,
@@ -164,10 +164,22 @@ test("thumbnail ratio and overlay stacking remain explicit", () => {
   assert.match(compactRules, /\.app-backdrop--sidebar\s*\{[^}]*z-index:\s*40;/s);
 });
 
-test("fullscreen preview expands the video while keeping controls in the viewport", () => {
+test("large preview expands the video without conflicting with the real fullscreen player", () => {
   assert.match(
-    fullscreenPreviewRules,
+    largePreviewRules,
     /\.preview-video-stage\s*\{[^}]*height:\s*auto;[^}]*max-height:\s*calc\(100vh\s*-\s*170px\);[^}]*aspect-ratio:\s*16\s*\/\s*9;/s,
+  );
+  assert.match(
+    css,
+    /\.preview-player-shell:fullscreen\s*\{[^}]*width:\s*100%;[^}]*height:\s*100%;[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\)\s+auto\s+auto;[^}]*overflow:\s*hidden;/s,
+  );
+  assert.match(
+    css,
+    /\.preview-player-shell:fullscreen\s+\.preview-video-stage\s*\{[^}]*height:\s*auto;[^}]*max-height:\s*none;[^}]*aspect-ratio:\s*auto;/s,
+  );
+  assert.match(
+    css,
+    /\.review-card-media:fullscreen\s*\{[^}]*width:\s*100%;[^}]*height:\s*100%;[^}]*aspect-ratio:\s*auto;/s,
   );
 });
 

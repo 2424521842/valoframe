@@ -975,6 +975,11 @@ export async function syncEnabledSources(): Promise<ScanJobResult<ScanSummary>> 
   return invoke<ScanJobResult<ScanSummary>>("sync_enabled_sources");
 }
 
+export async function requestStartupSourceSync(): Promise<void> {
+  if (isBrowserPreviewRuntime()) return;
+  return invoke<void>("request_startup_source_sync");
+}
+
 export async function discoverAndScanFixedDrives(): Promise<ScanJobResult<FullDriveScanResult>> {
   if (isBrowserPreviewRuntime()) {
     const scanSummary = await browserPreviewScanSummary("本机固定磁盘");

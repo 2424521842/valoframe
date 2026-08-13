@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -27,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   listTags: vi.fn(),
   openDirectory: vi.fn(),
   previewScanSourceRelocation: vi.fn(),
+  requestStartupSourceSync: vi.fn(),
   relocateScanSource: vi.fn(),
   scanDefaultAclosDir: vi.fn(),
   scanRoots: vi.fn(),
@@ -82,6 +84,7 @@ vi.mock("../../src/api/backend", async (importOriginal) => {
     listSources: mocks.listSources,
     listTags: mocks.listTags,
     previewScanSourceRelocation: mocks.previewScanSourceRelocation,
+    requestStartupSourceSync: mocks.requestStartupSourceSync,
     relocateScanSource: mocks.relocateScanSource,
     scanDefaultAclosDir: mocks.scanDefaultAclosDir,
     scanRoots: mocks.scanRoots,
@@ -117,6 +120,7 @@ describe("production scan lifecycle", () => {
     mocks.listTags.mockReset();
     mocks.openDirectory.mockReset();
     mocks.previewScanSourceRelocation.mockReset();
+    mocks.requestStartupSourceSync.mockReset();
     mocks.relocateScanSource.mockReset();
     mocks.scanDefaultAclosDir.mockReset();
     mocks.scanRoots.mockReset();
@@ -135,6 +139,7 @@ describe("production scan lifecycle", () => {
     mocks.listTags.mockResolvedValue([]);
     mocks.openDirectory.mockResolvedValue(null);
     mocks.previewScanSourceRelocation.mockResolvedValue(relocationPreview());
+    mocks.requestStartupSourceSync.mockResolvedValue(undefined);
     mocks.relocateScanSource.mockResolvedValue({
       preview: relocationPreview(),
       relocatedClipCount: 1,
@@ -188,6 +193,61 @@ describe("production scan lifecycle", () => {
     render(<App />);
 
     expect(mocks.updaterOptions).toHaveBeenCalledWith({ automaticCheck: false });
+  });
+
+  it("keeps startup scanning off by default", async () => {
+    Reflect.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    Reflect.defineProperty(globalThis, "isTauri", {
+      configurable: true,
+      value: true,
+    });
+    render(<App />);
+
+    await waitFor(() => expect(mocks.listSources).toHaveBeenCalled());
+    expect(mocks.requestStartupSourceSync).not.toHaveBeenCalled();
+  });
+
+  it("saves an enabled startup scan for the next launch without scanning immediately", async () => {
+    Reflect.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    Reflect.defineProperty(globalThis, "isTauri", {
+      configurable: true,
+      value: true,
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await waitFor(() => expect(mocks.listSources).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: /^设置/ }));
+    await user.click(await screen.findByRole("switch", { name: "启动时自动扫描" }));
+
+    expect(mocks.requestStartupSourceSync).not.toHaveBeenCalled();
+    expect(JSON.parse(window.localStorage.getItem(APP_PREFERENCES_STORAGE_KEY) ?? "{}"))
+      .toEqual(expect.objectContaining({ scanOnStartup: true }));
+  });
+
+  it("requests one guarded startup sync when the saved preference is enabled", async () => {
+    Reflect.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    Reflect.defineProperty(globalThis, "isTauri", {
+      configurable: true,
+      value: true,
+    });
+    window.localStorage.setItem(APP_PREFERENCES_STORAGE_KEY, JSON.stringify({
+      ...DEFAULT_APP_PREFERENCES,
+      scanOnStartup: true,
+    }));
+
+    render(<StrictMode><App /></StrictMode>);
+
+    await waitFor(() => expect(mocks.requestStartupSourceSync).toHaveBeenCalledTimes(1));
   });
 
   it("scans multiple roots once, disables duplicate starts, and exposes cancelling state", async () => {

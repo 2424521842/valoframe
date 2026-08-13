@@ -411,10 +411,10 @@ export function ScanWorkspace({
                               <FolderOpen weight="bold" />
                             </button>
                             <button
-                              aria-label={`${directory.source.enabled ? "停用" : "启用"}启动同步 ${directory.name}`}
+                              aria-label={`${directory.source.enabled ? "移出" : "加入"}自动同步 ${directory.name}`}
                               aria-pressed={directory.source.enabled}
                               disabled={isScanning}
-                              title={directory.source.enabled ? "停用启动同步" : "启用启动同步"}
+                              title={directory.source.enabled ? "移出自动同步" : "加入自动同步"}
                               type="button"
                               onClick={() => onSetSourceEnabled(directory.source!, !directory.source!.enabled)}
                             >
@@ -688,7 +688,7 @@ function sourceKindLabel(kind: SourceKind): string {
 }
 
 function sourceStatusLabel(source: SourceDir): string {
-  if (!source.enabled) return "已停用";
+  if (!source.enabled) return "未加入自动同步";
   if (!source.accessibility) return source.status || "不可访问";
   return `${source.clipCount.toLocaleString("zh-CN")} 个片段`;
 }

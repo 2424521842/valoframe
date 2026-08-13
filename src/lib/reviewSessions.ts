@@ -99,11 +99,25 @@ export function findResumableReviewSession(
   filters: Pick<ReviewSessionFilters, "query">,
 ): ReviewSession | null {
   const queryKey = reviewSessionQueryKey(filters.query);
-  const matchingSessions = loadReviewSessions().filter((session) => (
+  return preferredResumableSession(loadReviewSessions().filter((session) => (
     session.status === "active"
     && reviewSessionQueryKey(session.filters.query) === queryKey
-  ));
-  return matchingSessions.sort((left, right) => (
+  )));
+}
+
+/**
+ * Finds progress independently of the setup page's current filters. This lets
+ * quick-pick start each new round from its default scope without hiding a
+ * previously saved, deliberately narrowed round.
+ */
+export function findLatestResumableReviewSession(): ReviewSession | null {
+  return loadReviewSessions()
+    .filter((session) => session.status === "active")
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
+}
+
+function preferredResumableSession(sessions: readonly ReviewSession[]): ReviewSession | null {
+  return [...sessions].sort((left, right) => (
     reviewSessionCounts(right).reviewed - reviewSessionCounts(left).reviewed
     || right.updatedAt.localeCompare(left.updatedAt)
   ))[0] ?? null;

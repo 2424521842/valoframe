@@ -102,6 +102,17 @@ test("library toolbar gives search and filters their requested two-band hierarch
   assert.match(libraryToolbar, /aria-label="清空搜索与所有筛选"/);
 });
 
+test("quick-pick inline filter values stay left aligned while their caret stays on the edge", () => {
+  assert.match(
+    css,
+    /\.review-scope-filter \.ui-select-trigger\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;[^}]*justify-content:\s*space-between;[^}]*text-align:\s*left;/s,
+  );
+  assert.match(
+    css,
+    /\.review-scope-filter \.ui-select-trigger > span:first-child\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/s,
+  );
+});
+
 test("grid clip cards keep the official per-video score visible", () => {
   assert.match(
     css,

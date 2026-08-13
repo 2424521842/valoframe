@@ -39,7 +39,7 @@
 
 ### 3.1 `source_dirs` 与 `clip_groups`
 
-`source_dirs.path` 是来源记录的唯一真实路径；`scan_root_path` 是扫描器的授权边界根。`source_kind` 只接受 `aclos`、`nvidia`、`tracker`、`generic`，`scan_mode` 只接受 `aclos-structured`、`recursive-mp4`。ACLOS 使用结构化扫描器；NVIDIA、Tracker 和 generic 使用只读递归 MP4 适配器。`enabled` 控制启动同步，禁用不删除索引且不参与全局新鲜度提醒。来源 DTO 直接从该表返回，因此零素材、离线和 partial 来源也能出现在前端，不再依赖视频路径反推来源。
+`source_dirs.path` 是来源记录的唯一真实路径；`scan_root_path` 是扫描器的授权边界根。`source_kind` 只接受 `aclos`、`nvidia`、`tracker`、`generic`，`scan_mode` 只接受 `aclos-structured`、`recursive-mp4`。ACLOS 使用结构化扫描器；NVIDIA、Tracker 和 generic 使用只读递归 MP4 适配器。`enabled` 控制来源是否加入自动/批量同步，禁用不删除索引且不参与全局新鲜度提醒。全局“启动时自动扫描”偏好默认关闭并存于前端版本化 `localStorage`，没有写入 SQLite；开启后下次启动只同步 `enabled = true` 的来源，手动同步不受影响。来源 DTO 直接从该表返回，因此零素材、离线和 partial 来源也能出现在前端，不再依赖视频路径反推来源。
 
 `clip_groups` 以来源 + `group_key` 唯一；来源根目录直接 MP4 可以没有 group，`来源/对局/MP4` 使用直接子目录作为 group。
 

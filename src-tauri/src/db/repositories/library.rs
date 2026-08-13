@@ -801,7 +801,12 @@ pub(crate) const CLIP_SUMMARY_SELECT_SQL: &str = "
         match_stats.has_won,
         clip_metadata.official_video_name,
         clip_metadata.official_video_type,
-        CAST(NULLIF(TRIM(clip_metadata.highlight_type), '') AS INTEGER) AS highlight_type,
+        CASE
+            WHEN NULLIF(TRIM(clip_metadata.highlight_type), '') IS NOT NULL
+             AND TRIM(clip_metadata.highlight_type) NOT GLOB '*[^0-9]*'
+                THEN CAST(TRIM(clip_metadata.highlight_type) AS INTEGER)
+            ELSE NULL
+        END AS highlight_type,
         CAST(NULLIF(TRIM(clip_metadata.round_score), '') AS INTEGER) AS round_score,
         clip_metadata.metadata_source,
         matches.map_id AS match_map_id,
@@ -1228,62 +1233,129 @@ fn escaped_like_pattern(value: &str) -> String {
     escaped
 }
 
-fn clip_highlight_condition(filter: HighlightFilter) -> Option<&'static str> {
-    match filter {
-        HighlightFilter::All => None,
-        HighlightFilter::Triple => Some(
-            "(
-                clip_metadata.kill_count = 3
-                OR CAST(NULLIF(TRIM(clip_metadata.highlight_type), '') AS INTEGER) = 4
-                OR COALESCE(clip_metadata.official_video_name, '') LIKE '%三杀%'
-                OR COALESCE(clip_metadata.official_video_type, '') LIKE '%三杀%'
-            )",
-        ),
-        HighlightFilter::Quad => Some(
-            "(
-                clip_metadata.kill_count = 4
-                OR CAST(NULLIF(TRIM(clip_metadata.highlight_type), '') AS INTEGER) = 6
-                OR COALESCE(clip_metadata.official_video_name, '') LIKE '%四杀%'
-                OR COALESCE(clip_metadata.official_video_type, '') LIKE '%四杀%'
-            )",
-        ),
-        HighlightFilter::Five => Some(
-            "(
-                clip_metadata.kill_count = 5
-                OR LOWER(COALESCE(clip_metadata.official_video_name, '')) LIKE '%ace%'
-                OR LOWER(COALESCE(clip_metadata.official_video_type, '')) LIKE '%ace%'
-                OR COALESCE(clip_metadata.official_video_name, '') LIKE '%五杀%'
-                OR COALESCE(clip_metadata.official_video_type, '') LIKE '%五杀%'
-            )",
-        ),
-        HighlightFilter::Six => Some(
-            "(
-                clip_metadata.kill_count = 6
-                OR COALESCE(clip_metadata.official_video_name, '') LIKE '%六杀%'
-                OR COALESCE(clip_metadata.official_video_type, '') LIKE '%六杀%'
-            )",
-        ),
-        HighlightFilter::KillCompilation => Some(
-            "(
-                CAST(NULLIF(TRIM(clip_metadata.highlight_type), '') AS INTEGER) = 2
-                OR clip_metadata.official_video_type = '2'
-                OR COALESCE(clip_metadata.official_video_name, '') LIKE '%击杀合集%'
-                OR COALESCE(clip_metadata.official_video_name, '') LIKE '%击杀集锦%'
-                OR COALESCE(clip_metadata.official_video_type, '') LIKE '%击杀合集%'
-                OR COALESCE(clip_metadata.official_video_type, '') LIKE '%击杀集锦%'
-            )",
-        ),
-        HighlightFilter::Death => Some(
-            "(
-                CAST(NULLIF(TRIM(clip_metadata.highlight_type), '') AS INTEGER) = 3
-                OR clip_metadata.official_video_type = '3'
-                OR COALESCE(clip_metadata.official_video_name, '') LIKE '%死亡时刻%'
-                OR COALESCE(clip_metadata.official_video_name, '') LIKE '%死亡集锦%'
-                OR COALESCE(clip_metadata.official_video_type, '') LIKE '%死亡时刻%'
-                OR COALESCE(clip_metadata.official_video_type, '') LIKE '%死亡集锦%'
-            )",
-        ),
-    }
+fn clip_highlight_condition(filter: HighlightFilter) -> Option<String> {
+    let category = match filter {
+        HighlightFilter::All => return None,
+        HighlightFilter::Triple => "triple",
+        HighlightFilter::Quad => "quad",
+        HighlightFilter::Five => "five",
+        HighlightFilter::Six => "six",
+        HighlightFilter::KillCompilation => "kill-compilation",
+        HighlightFilter::Death => "death",
+    };
+    Some(format!("{} = '{category}'", clip_highlight_category_sql()))
+}
+
+/// Produces exactly one product video type for a clip.
+///
+/// `kill_count` is a clip-scoped event total, so a compilation may legitimately
+/// contain four, five, or six kills. Positive official numeric types therefore
+/// win over event counts and descriptive text. Weaker signals are considered
+/// only when no positive numeric type is available.
+fn clip_highlight_category_sql() -> String {
+    let numeric_type = "(
+        CASE
+            WHEN NULLIF(TRIM(clip_metadata.highlight_type), '') IS NOT NULL
+             AND TRIM(clip_metadata.highlight_type) NOT GLOB '*[^0-9]*'
+                THEN CAST(TRIM(clip_metadata.highlight_type) AS INTEGER)
+            WHEN NULLIF(TRIM(clip_metadata.official_video_type), '') IS NOT NULL
+             AND TRIM(clip_metadata.official_video_type) NOT GLOB '*[^0-9]*'
+                THEN CAST(TRIM(clip_metadata.official_video_type) AS INTEGER)
+            ELSE NULL
+        END
+    )";
+    // The paginated ClipSummary DTO intentionally omits extracted_text. Keep
+    // category inputs aligned so server-side filters and card badges cannot drift.
+    let text = "LOWER(REPLACE(REPLACE(REPLACE(
+        COALESCE(clip_metadata.official_video_name, '') || ' ' ||
+        COALESCE(clip_metadata.official_video_type, ''),
+        CHAR(9), ' '), CHAR(10), ' '), CHAR(13), ' '))";
+    let kill_compilation = format!(
+        "({text} LIKE '%击杀合集%'
+          OR {text} LIKE '%击杀集锦%'
+          OR {text} LIKE '%击杀剪辑%'
+          OR {text} LIKE '%kill compilation%'
+          OR {text} LIKE '%kill montage%')"
+    );
+    let death = format!(
+        "({text} LIKE '%死亡时刻%'
+          OR {text} LIKE '%死亡集锦%'
+          OR {text} LIKE '%death moment%'
+          OR {text} LIKE '%death compilation%')"
+    );
+    let marker = |value: &str| {
+        format!(
+            "({text} LIKE '%{value}'
+              OR {text} LIKE '%{value} %'
+              OR {text} GLOB '*{value}[!\"#$%&''()*+,./:;<=>?@\\^_`{{|}}~，。！？：；、—…（）【】《》“”‘’]*'
+              OR {text} LIKE '%{value}[%'
+              OR {text} LIKE '%{value}]%'
+              OR {text} LIKE '%{value}-%'
+              OR {text} LIKE '%{value}时刻%'
+              OR {text} LIKE '%{value}集锦%'
+              OR {text} LIKE '%{value}高光%'
+              OR {text} LIKE '%{value}片段%'
+              OR {text} LIKE '%{value}剪辑%'
+              OR {text} LIKE '%{value}回放%'
+              OR {text} LIKE '%{value}合集%')"
+        )
+    };
+    let triple = format!(
+        "({} OR {} OR {})",
+        marker("三杀"),
+        marker("3杀"),
+        marker("三连杀")
+    );
+    let quad = format!(
+        "({} OR {} OR {})",
+        marker("四杀"),
+        marker("4杀"),
+        marker("四连杀")
+    );
+    let five = format!(
+        "({text} = 'ace'
+          OR {text} LIKE 'ace %'
+          OR {text} LIKE '% ace'
+          OR {text} LIKE '% ace %'
+          OR {}
+          OR {}
+          OR {})",
+        marker("五杀"),
+        marker("5杀"),
+        marker("五连杀")
+    );
+    let six = format!(
+        "({} OR {} OR {})",
+        marker("六杀"),
+        marker("6杀"),
+        marker("六连杀")
+    );
+
+    format!(
+        "(CASE
+            WHEN {numeric_type} = 2 THEN 'kill-compilation'
+            WHEN {numeric_type} = 3 THEN 'death'
+            WHEN {numeric_type} = 4 THEN 'triple'
+            WHEN {numeric_type} = 6 THEN 'quad'
+            WHEN {numeric_type} = 10 AND clip_metadata.kill_count = 6 THEN 'six'
+            WHEN {numeric_type} = 10 AND clip_metadata.kill_count = 5 THEN 'five'
+            WHEN {numeric_type} = 10 AND {six} THEN 'six'
+            WHEN {numeric_type} = 10 AND {five} THEN 'five'
+            WHEN {numeric_type} IS NOT NULL AND {numeric_type} > 0 THEN NULL
+            WHEN {kill_compilation} AND {death} THEN NULL
+            WHEN {kill_compilation} AND NOT {death} THEN 'kill-compilation'
+            WHEN {death} AND NOT {kill_compilation} THEN 'death'
+            WHEN {six} THEN 'six'
+            WHEN {five} THEN 'five'
+            WHEN {quad} THEN 'quad'
+            WHEN {triple} THEN 'triple'
+            WHEN clip_metadata.kill_count = 6 THEN 'six'
+            WHEN clip_metadata.kill_count = 5 THEN 'five'
+            WHEN clip_metadata.kill_count = 4 THEN 'quad'
+            WHEN clip_metadata.kill_count = 3 THEN 'triple'
+            ELSE NULL
+        END)"
+    )
 }
 
 pub(crate) fn clip_list_order_by(sort: ClipSort) -> String {
@@ -1335,7 +1407,12 @@ pub(in crate::db) const CLIP_SELECT_SQL: &str = "
         match_stats.has_won,
         clip_metadata.official_video_name,
         clip_metadata.official_video_type,
-        CAST(NULLIF(TRIM(clip_metadata.highlight_type), '') AS INTEGER) AS highlight_type,
+        CASE
+            WHEN NULLIF(TRIM(clip_metadata.highlight_type), '') IS NOT NULL
+             AND TRIM(clip_metadata.highlight_type) NOT GLOB '*[^0-9]*'
+                THEN CAST(TRIM(clip_metadata.highlight_type) AS INTEGER)
+            ELSE NULL
+        END AS highlight_type,
         CAST(NULLIF(TRIM(clip_metadata.round_score), '') AS INTEGER) AS round_score,
         clip_metadata.metadata_source,
         0 AS event_count,

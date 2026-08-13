@@ -5,6 +5,7 @@ import {
   expectsOfficialRoundScore,
   matchesVideoType,
   previewTimelineMarkerMode,
+  resolveVideoType,
   videoTypeLabel,
   VIDEO_TYPE_FILTERS,
 } from "../src/lib/videoTypes.ts";
@@ -26,12 +27,78 @@ test("video types use the requested product order and labels", () => {
 
 test("five-kill and six-kill moments are separate video types", () => {
   const five = { highlightType: 10, killCount: 5 };
-  const six = { highlightType: 10, killCount: 6 };
+  const six = {
+    highlightType: 10,
+    killCount: 6,
+    officialVideoName: "六杀时刻",
+    officialVideoType: "五杀时刻",
+  };
 
   assert.equal(matchesVideoType(five, "five"), true);
   assert.equal(matchesVideoType(five, "six"), false);
   assert.equal(matchesVideoType(six, "five"), false);
   assert.equal(matchesVideoType(six, "six"), true);
+  assert.deepEqual(
+    VIDEO_TYPE_FILTERS.filter((filter) => matchesVideoType(six, filter)),
+    ["six"],
+  );
+});
+
+test("kill compilations never become multi-kill moments from their event total", () => {
+  for (const killCount of [3, 4, 5, 6]) {
+    const compilation = {
+      highlightType: 2,
+      officialVideoName: "击杀集锦",
+      officialVideoType: "击杀集锦",
+      killCount,
+    };
+
+    assert.equal(resolveVideoType(compilation), "kill-compilation");
+    assert.deepEqual(
+      VIDEO_TYPE_FILTERS.filter((filter) => matchesVideoType(compilation, filter)),
+      ["kill-compilation"],
+    );
+  }
+});
+
+test("positive official types are authoritative over conflicting fallback signals", () => {
+  const officialQuad = {
+    highlightType: 6,
+    officialVideoName: "普通击杀",
+    officialVideoType: "击杀集锦",
+    killCount: 6,
+  };
+  const ordinaryHighlight = {
+    highlightType: 1,
+    officialVideoName: "普通击杀",
+    killCount: 4,
+  };
+
+  assert.equal(resolveVideoType(officialQuad), "quad");
+  assert.equal(absoluteTimelineCompilationMode(officialQuad), null);
+  assert.equal(resolveVideoType(ordinaryHighlight), null);
+});
+
+test("fallback parsing stays conservative for ambiguous text and non-canonical numbers", () => {
+  assert.equal(
+    resolveVideoType({
+      officialVideoName: "击杀集锦 / 死亡集锦 / 四杀时刻",
+      killCount: 4,
+    }),
+    null,
+  );
+  assert.equal(resolveVideoType({ officialVideoName: "ACE" }), "five");
+  assert.equal(resolveVideoType({ officialVideoName: "place setup" }), null);
+  assert.equal(resolveVideoType({ officialVideoName: "六杀手" }), null);
+  assert.equal(resolveVideoType({ officialVideoName: "五杀手" }), null);
+  assert.equal(resolveVideoType({ officialVideoName: "6杀虫剂" }), null);
+  assert.equal(resolveVideoType({ officialVideoName: "六杀）" }), "six");
+  assert.equal(resolveVideoType({ officialVideoName: "五杀，" }), "five");
+  assert.equal(resolveVideoType({ officialVideoName: "4杀!" }), "quad");
+  assert.equal(
+    resolveVideoType({ officialVideoType: "+2", officialVideoName: "普通击杀" }),
+    null,
+  );
 });
 
 test("custom tag text does not participate in video type classification", () => {
@@ -44,6 +111,7 @@ test("custom tag text does not participate in video type classification", () => 
   };
 
   assert.equal(matchesVideoType(customTagOnly, "triple"), false);
+  assert.equal(resolveVideoType({ extractedText: "六杀手" }), null);
 });
 
 test("compilation and death metadata map to independent video types", () => {
