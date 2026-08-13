@@ -311,9 +311,9 @@ describe("useScanController", () => {
     });
 
     await waitFor(() => expect(result.current.isScanning).toBe(false));
+    await waitFor(() => expect(result.current.errorMessage).toBeNull());
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(result.current.status).toBe("completed");
-    expect(result.current.errorMessage).toBeNull();
   });
 
   it("settles an already-running job from status recovery when no later event arrives", async () => {
