@@ -2082,6 +2082,7 @@ try {
         -ProtectedPaths @($protectedPaths + $environmentRoot) `
         -RequireFresh)
 
+    Write-Host "SMOKE-STAGE: launching application from '$executable'"
     $jobProcess = [VhmReleaseSmoke.JobProcess]::Start(
         $executable,
         [System.IO.Path]::GetDirectoryName($executable),
@@ -2090,6 +2091,7 @@ try {
         $standardErrorPath
     )
     if ($jobProcess.RootHasExited()) {
+        Write-Host "SMOKE-STAGE: application exited immediately (code $($jobProcess.GetRootExitCode()))"
         throw "Application exited immediately after its suspended, job-assigned launch with code $($jobProcess.GetRootExitCode())."
     }
     $activeJobProcessIds = @(Update-ObservedJobProcesses -Job $jobProcess -Observed $observedJobProcessIds)
@@ -2101,6 +2103,7 @@ try {
     $startupReady = $false
     do {
         if ($jobProcess.RootHasExited()) {
+            Write-Host "SMOKE-STAGE: application exited during startup (code $($jobProcess.GetRootExitCode()))"
             throw "Application exited during startup with code $($jobProcess.GetRootExitCode())."
         }
         [void] @(Update-ObservedJobProcesses -Job $jobProcess -Observed $observedJobProcessIds)
@@ -2127,8 +2130,10 @@ try {
     } while ([datetime]::UtcNow -lt $startupDeadline)
 
     if (-not $startupReady) {
+        Write-Host "SMOKE-STAGE: startup readiness timed out (window=$($appWindowHandle -ne [IntPtr]::Zero), db=$(Test-Path -LiteralPath $databasePath), cache=$(Test-Path -LiteralPath $thumbnailCachePath), webview2=$(Test-Path -LiteralPath $webView2Path))"
         throw "Application did not establish its visible main window, database, thumbnail cache, and WebView2 profile within $StartupTimeoutSeconds seconds. Root PID: $($jobProcess.ProcessId). Window inventory: $($startupWindowInventory | ConvertTo-Json -Depth 5 -Compress)"
     }
+    Write-Host "SMOKE-STAGE: main window established (pid $($jobProcess.ProcessId))"
 
     [void] (Assert-IsolationRoot -Root $smokeRoot -Parent $isolationParentCanonical -ProtectedPaths $protectedPaths)
     foreach ($expectedPath in @($databasePath, $thumbnailCachePath, $webView2Path)) {
@@ -2166,6 +2171,7 @@ try {
 
     $secondInstanceStartedAt = [datetime]::UtcNow
     $secondInstanceStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-Host 'SMOKE-STAGE: launching second instance for handoff check'
     $secondInstanceProcess = [VhmReleaseSmoke.JobProcess]::Start(
         $executable,
         [System.IO.Path]::GetDirectoryName($executable),
@@ -2423,6 +2429,7 @@ try {
         -Deadline ([datetime]::UtcNow.AddSeconds($ShutdownTimeoutSeconds))
     $jobAccounting = $jobProcess.GetAccounting()
 
+    Write-Host 'SMOKE-STAGE: verifying real application data/cache trees are unchanged'
     $realDataAfter = Get-TreeFingerprint -Root $realPaths.data -Description 'real application data directory'
     $realCacheAfter = Get-TreeFingerprint -Root $realPaths.cache -Description 'real application cache directory'
     $realStateChecked = $true
@@ -2496,6 +2503,7 @@ try {
 }
 catch {
     $primaryError = $_
+    Write-Host "SMOKE-STAGE: failure captured: $($_.Exception.Message)"
 }
 finally {
     if ($null -ne $secondInstanceProcess) {
