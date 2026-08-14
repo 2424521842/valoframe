@@ -136,3 +136,20 @@ test("documentation describes intent without adding a non-commercial MIT restric
   assert.match(notes, /未知发布者/u);
   assert.match(notes, /Tauri\/Minisign 签名/u);
 });
+
+test("the bound stable decision parameter survives until the channel check", () => {
+  // PowerShell variable names are case-insensitive: an assignment to
+  // $personalCommunityStableDecisionPath before the parameter check erases the
+  // bound -PersonalCommunityStableDecisionPath value and fails every run.
+  const checkIndex = bundleGate.indexOf(
+    "IsNullOrWhiteSpace($PersonalCommunityStableDecisionPath)",
+  );
+  assert.ok(checkIndex > 0, "stable decision parameter check must exist");
+  const assignIndex = bundleGate.indexOf(
+    "$personalCommunityStableDecisionPath =",
+  );
+  assert.ok(
+    assignIndex < 0 || assignIndex > checkIndex,
+    "no assignment to the decision variable may precede the parameter check",
+  );
+});

@@ -1993,7 +1993,10 @@ $communityBetaDecision = $null
 $communityBetaFfmpegArchive = $null
 $communityBetaSourceBundle = $null
 $personalCommunityStableDecision = $null
-$personalCommunityStableDecisionPath = $null
+# Note: no local assignment to $personalCommunityStableDecisionPath here.
+# PowerShell variable names are case-insensitive, so nulling that name would
+# erase the bound -PersonalCommunityStableDecisionPath parameter before the
+# channel check below.
 $personalCommunityStableFfmpegArchive = $null
 $personalCommunityStableSourceBundle = $null
 $personalCommunityStableVersion = $null
