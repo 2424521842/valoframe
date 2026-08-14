@@ -2439,6 +2439,7 @@ try {
     if (-not (Test-FingerprintEqual -Before $realCacheBefore -After $realCacheAfter)) {
         throw "Real application cache changed during isolated startup: '$($realPaths.cache)'. Before: $(Format-FingerprintSummary $realCacheBefore). After: $(Format-FingerprintSummary $realCacheAfter)."
     }
+    Write-Host "SMOKE-STAGE: real trees fingerprinted and unchanged (data exists=$($realDataAfter.exists), cache exists=$($realCacheAfter.exists))"
 
     $report = [ordered]@{
         status = 'passed'
@@ -2675,4 +2676,12 @@ if ($null -ne $cleanupError) {
 $report.runtime['processOutput'] = $processOutputCapture
 $report.runtime.singleInstance['processOutput'] = $secondInstanceProcessOutputCapture
 $report.runtime['cleaned'] = $true
-$report | ConvertTo-Json -Depth 12
+Write-Host 'SMOKE-STAGE: emitting report'
+try {
+    $report | ConvertTo-Json -Depth 12
+    Write-Host 'SMOKE-STAGE: report emitted'
+}
+catch {
+    Write-Host "SMOKE-STAGE: report emission failed: $($_.Exception.Message)"
+    throw
+}

@@ -560,9 +560,11 @@ jobs:
             -FfmpegMode ResourceOverride `
             -IsolationParent $env:RUNNER_TEMP `
             -ExpectedExecutableSha256 $expectedMainHash
+          Write-Host "STABLE-STEP: smoke returned $($smokeJson.Count) output lines (LASTEXITCODE=$LASTEXITCODE)"
           $smokeReportJson = $smokeJson -join "`n"
           $smokeReportJson | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'vhm-stable-startup-smoke.json') -Encoding utf8
           $smoke = $smokeReportJson | ConvertFrom-Json -Depth 30
+          Write-Host "STABLE-STEP: smoke status=$($smoke.status)"
           if ($smoke.status -cne 'passed') { throw 'Packaged stable startup smoke failed.' }
 
           "STABLE_INSTALLER=$($installers[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
