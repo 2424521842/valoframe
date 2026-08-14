@@ -917,6 +917,10 @@ impl ThumbnailQueue {
         let committed_bytes = byte_size;
         let byte_size = i64::try_from(committed_bytes)
             .map_err(|_| "thumbnail byte size exceeds database range".to_string())?;
+        // The row leaves the running state inside complete_thumbnail_job_if_current
+        // or the reconcile fallbacks below. Clear the live processing hint first so
+        // ready_count == total can never be observed together with a processing clip.
+        self.processing_clip_id.store(-1, Ordering::Release);
         let connection = db::open_database(&self.database_path)?;
         let completed = db::complete_thumbnail_job_if_current(
             &connection,
@@ -962,6 +966,10 @@ impl ThumbnailQueue {
         error_code: &'static str,
         retryable: bool,
     ) -> Result<(), String> {
+        // The row leaves the running state inside this call. Clear the live
+        // processing hint first so persisted counts and processing_clip_id can
+        // never be observed inconsistent with each other.
+        self.processing_clip_id.store(-1, Ordering::Release);
         let connection = db::open_database(&self.database_path)?;
         let (status, next_attempt_at) =
             if let Some(modifier) = retry_delay_modifier(job.attempt_count, retryable) {
