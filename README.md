@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/2424521842/valoframe/releases/download/v0.2.1/%E7%93%A6%E5%88%BB_0.2.1_x64-setup.exe"><strong>下载 Windows 安装包</strong></a>
+  <a href="https://github.com/2424521842/valoframe/releases/download/v0.2.1/VALOFRAME-v0.2.1-x64-setup.exe"><strong>下载 Windows 安装包</strong></a>
   ·
   <a href="https://github.com/2424521842/valoframe/releases/tag/v0.2.1">查看 v0.2.1 发布说明</a>
 </p>
@@ -23,7 +23,7 @@
 
 当前版本：[`v0.2.1`](https://github.com/2424521842/valoframe/releases/tag/v0.2.1) · Windows 10/11 x64 · Personal Community Stable
 
-- **GitHub（唯一发布入口）**：[下载 `瓦刻_0.2.1_x64-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.2.1/%E7%93%A6%E5%88%BB_0.2.1_x64-setup.exe)
+- **GitHub（唯一发布入口）**：[下载 `VALOFRAME-v0.2.1-x64-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.2.1/VALOFRAME-v0.2.1-x64-setup.exe)
 - **完整性校验**：在同一 Release 下载 `SHA256SUMS.txt`，核对安装包文件名与 SHA-256。发布流程会在公开前后重新下载并逐文件复核全部资产。
 
 > [!IMPORTANT]
@@ -66,7 +66,7 @@
 ## 安装
 
 1. 从上方 GitHub Release 入口下载 `.exe`，不要把 `Source code`、`.nsis.zip` 或技术附件当作安装程序。
-2. 在 PowerShell 中运行 `Get-FileHash -Algorithm SHA256 -LiteralPath '.\瓦刻_0.2.1_x64-setup.exe'`，确认结果与同一 Release 的 `SHA256SUMS.txt` 完全一致。
+2. 在 PowerShell 中运行 `Get-FileHash -Algorithm SHA256 -LiteralPath '.\VALOFRAME-v0.2.1-x64-setup.exe'`，确认结果与同一 Release 的 `SHA256SUMS.txt` 完全一致。
 3. 双击安装。如果 Windows 显示“Windows 已保护你的电脑”，先确认来源和哈希，再选择“更多信息”→“仍要运行”；无法确认时请取消安装。
 4. v0.2.1 是稳定更新通道的手动安装起点；后续稳定版本可在设置中检查、验签并确认安装。首次扫描前仍建议备份重要数据。
 
