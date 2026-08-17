@@ -27,10 +27,10 @@
 - **完整性校验**：在同一 Release 下载 `SHA256SUMS.txt`，核对安装包文件名与 SHA-256。发布流程会在公开前后重新下载并逐文件复核全部资产。
 
 > [!IMPORTANT]
-> 普通用户只需下载上面列出的 `.exe` 安装包。Release 页中的 `Source code`、FFmpeg 压缩包与对应源码、许可归档、JSON 报告、更新包和校验清单等是源码或技术附件，不是安装包。
+> 普通用户只需下载上面列出的 `.exe` 安装包。Release 页中的 `Source code`、FFmpeg 压缩包与对应源码、许可归档、JSON 报告和校验清单等是源码或技术附件，不是安装包。
 
 > [!WARNING]
-> v0.2.1 安装器当前未使用 Windows Authenticode，Windows 可能显示“未知发布者”或 SmartScreen 警告。只从本项目 GitHub Release 下载并核对 SHA-256。应用内后续更新使用独立的 Tauri/Minisign 签名验证；这不等同于 Windows 发布者签名。
+> v0.2.1 安装器当前未使用 Windows Authenticode，Windows 可能显示“未知发布者”或 SmartScreen 警告。只从本项目 GitHub Release 下载并核对 SHA-256。本版本不含应用内更新，后续版本需从 Releases 页手动下载安装。
 
 > [!NOTE]
 > 这是非官方、免费、个人社区项目，与 Riot Games、腾讯及其关联公司不存在隶属、赞助或认可关系。发布负责人已将清单锁定的 42 张游戏图片批准用于 v0.2.1 个人社区稳定渠道；该项目内部决定不声称第三方批准或独立法律审核已经完成。记录见 [v0.2.1 渠道决定](release/approvals/personal-community-stable-v0.2.1.json)和[原有游戏素材记录](release/approvals/game-content-rights.json)。
@@ -57,18 +57,18 @@
 | --- | --- | --- |
 | 浏览器界面预览 | 可用 | 使用合成 mock 数据体验素材库、扫描、标签和详情；不访问真实本地素材 |
 | 桌面源码运行 | 内部测试 | 可验证真实扫描与本地预览；必须从干净提交构建并记录 commit |
-| 个人社区稳定版 | [v0.2.1 已发布](https://github.com/2424521842/valoframe/releases/tag/v0.2.1) | 免费、非官方 Windows 版；稳定更新包强制验签，安装器可能显示未知发布者 |
+| 个人社区稳定版 | [v0.2.1 已发布](https://github.com/2424521842/valoframe/releases/tag/v0.2.1) | 免费、非官方 Windows 版；手动安装的精简构建（无应用内更新），安装器可能显示未知发布者 |
 | Community Beta | [v0.1.0-beta.1 已发布](https://github.com/2424521842/valoframe/releases/tag/v0.1.0-beta.1) | GitHub Prerelease；未签名、无自动更新，下载后需核对对应 SHA-256 |
 | 未来严格企业式发行 | 可选加固 | Authenticode、可信时间戳、独立法审和完整干净 VM 矩阵不阻止当前个人社区稳定版 |
 
-个人社区稳定版的渠道边界和强制技术门禁见 [Windows 发布说明](docs/RELEASE.md)。FFmpeg 只作为独立命令行程序生成缩略图；同一 Release 必须提供最小二进制、构建证据、许可证材料和精确对应源码。历史 Community Beta 说明仍见 [Community Beta 说明](docs/COMMUNITY_BETA.md)。
+个人社区稳定版的渠道边界和强制技术门禁见 [Windows 发布说明](docs/RELEASE.md)。FFmpeg 只作为独立命令行程序生成缩略图；本次发布随包最小构建的来源、构建证据与许可证信息见 Release 说明，对应源码保留在仓库发布材料中。历史 Community Beta 说明仍见 [Community Beta 说明](docs/COMMUNITY_BETA.md)。
 
 ## 安装
 
 1. 从上方 GitHub Release 入口下载 `.exe`，不要把 `Source code`、`.nsis.zip` 或技术附件当作安装程序。
 2. 在 PowerShell 中运行 `Get-FileHash -Algorithm SHA256 -LiteralPath '.\VALOFRAME-v0.2.1-x64-setup.exe'`，确认结果与同一 Release 的 `SHA256SUMS.txt` 完全一致。
 3. 双击安装。如果 Windows 显示“Windows 已保护你的电脑”，先确认来源和哈希，再选择“更多信息”→“仍要运行”；无法确认时请取消安装。
-4. v0.2.1 是稳定更新通道的手动安装起点；后续稳定版本可在设置中检查、验签并确认安装。首次扫描前仍建议备份重要数据。
+4. v0.2.1 是手动安装起点；本版本不含应用内更新，后续版本需从 Releases 页手动下载安装。首次扫描前仍建议备份重要数据。
 
 ## 快速体验
 

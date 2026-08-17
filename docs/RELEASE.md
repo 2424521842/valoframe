@@ -2,7 +2,7 @@
 
 本文定义 Windows 安装包的发布边界和可复现流程。当前默认产物是 NSIS 安装器；MSI 尚未作为受支持渠道配置或验证。
 
-当前发布路线为：用户手动安装 `v0.2.1`，再用 `v0.2.2` 完成第一次应用内更新。v0.2.0/v0.2.1 的旧版本计划保留为历史工程资料，不再作为个人开发者稳定发布的严格审批门禁。
+当前发布路线为：用户手动安装 `v0.2.1`（发布负责人在本机离线构建的精简包，不含应用内更新）。应用内更新路线（`v0.2.2` 首次 OTA 验收）待后续重新通过个人稳定发布流水线建立；本文档其余门禁继续约束未来发布。v0.2.0/v0.2.1 的早期计划文档保留为历史工程资料。
 
 ## 发布渠道
 
@@ -60,7 +60,7 @@
 - `src-tauri/Cargo.toml` 的 `package.version` 与 `src-tauri/Cargo.lock` 中 `valorant-highlight-manager` package 的版本
 - `src-tauri/tauri.conf.json` 的 `version`
 
-稳定标签必须精确为 `vMAJOR.MINOR.PATCH`。`v0.2.1` 是手动安装起点，`v0.2.2` 是首次 OTA 验收版本。存在对应 `release/notes/vX.Y.Z.md` 时使用该说明，否则 workflow 生成默认说明；不得只修改某一个 manifest，也不得改写第三方依赖中碰巧相同的版本。
+稳定标签必须精确为 `vMAJOR.MINOR.PATCH`。`v0.2.1` 已作为手动安装起点发布（本机精简构建，不含应用内更新）；`v0.2.2` 的首次 OTA 验收待后续流水线发布时启用。存在对应 `release/notes/vX.Y.Z.md` 时使用该说明，否则 workflow 生成默认说明；不得只修改某一个 manifest，也不得改写第三方依赖中碰巧相同的版本。
 
 个人社区首发仍会冻结产品名称和应用 identifier，避免破坏升级路径。合法 publisher、Authenticode 主体与完整干净 VM 矩阵属于未来严格发行加固；若以后启用或更改 identifier、安装范围、publisher 或安装器渠道，应通过干净虚拟机验证。
 
