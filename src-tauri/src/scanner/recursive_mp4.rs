@@ -17,7 +17,7 @@ use super::{
     path_to_string, push_source_error, ScanProgressState, ScanRuntime, ScanSummary,
     SourceScanOutcome, SourceScanStep,
 };
-use crate::db::{self, ClipInput, ClipSaveOutcome, DbResult, SourceDir};
+use crate::db::{self, ClipInput, ClipSaveOutcome, DbResult, SourceDir, SourceKind};
 
 const DATABASE_BATCH_SIZE: usize = 128;
 const MAX_RECURSIVE_DEPTH: usize = 64;
@@ -60,6 +60,7 @@ pub(super) fn scan_recursive_source(
 
     let _reconnect_plan_cleanup = ScanReconnectPlanGuard::begin(connection, source.id)?;
     let mut seen_paths = HashSet::new();
+    let mut seen_pending_paths = HashSet::new();
     let mut seen_directories = HashSet::new();
     let mut visited_directories = HashSet::new();
     let mut stack = vec![(canonical_root.clone(), 0usize)];
@@ -222,6 +223,7 @@ pub(super) fn scan_recursive_source(
         connection,
         &source,
         &mut seen_directories,
+        &mut seen_pending_paths,
         summary,
         progress,
         runtime,
@@ -232,6 +234,12 @@ pub(super) fn scan_recursive_source(
     db::clear_scan_reconnect_plan(connection)?;
     if !completed {
         return Ok(cancelled_step(source, seen_paths, progress));
+    }
+
+    // Only a fully enumerable scan may drop pending rows whose files disappeared; the same
+    // policy protects historical clip state from offline/partial enumerations.
+    if complete_for_missing {
+        db::delete_missing_pending_manual_clips(connection, source.id, &seen_pending_paths)?;
     }
 
     if source_errors.is_empty() {
@@ -260,6 +268,7 @@ fn process_staged_candidates(
     connection: &Connection,
     source: &SourceDir,
     seen_directories: &mut HashSet<String>,
+    seen_pending_paths: &mut HashSet<String>,
     summary: &mut ScanSummary,
     progress: &mut ScanProgressState<'_>,
     runtime: ScanRuntime<'_>,
@@ -288,6 +297,7 @@ fn process_staged_candidates(
             .unchecked_transaction()
             .map_err(|error| format!("Database starting recursive MP4 batch failed: {error}"))?;
         let mut saved_clips = Vec::with_capacity(staged.len());
+        let mut pending_progress: Vec<(PathBuf, String, String)> = Vec::new();
         for staged_candidate in staged {
             if runtime.is_cancelled() {
                 return Ok(false);
@@ -335,9 +345,12 @@ fn process_staged_candidates(
 
             let mut reconnect = None;
             let mut skip_candidate = false;
+            let mut queue_pending = false;
             match decision {
-                db::ScanReconnectDecision::ExistingPath { .. }
-                | db::ScanReconnectDecision::New(_) => {}
+                db::ScanReconnectDecision::ExistingPath { .. } => {}
+                db::ScanReconnectDecision::New(_) => {
+                    queue_pending = source.source_kind == SourceKind::Nvidia;
+                }
                 db::ScanReconnectDecision::NewWithWarning { warning, .. } => {
                     skip_candidate = matches!(
                         warning.kind,
@@ -345,6 +358,7 @@ fn process_staged_candidates(
                             | db::ScanReconnectWarningKind::NormalizedPathConflict
                     );
                     record_reconnect_warning(summary, source_errors, complete_for_missing, warning);
+                    queue_pending = !skip_candidate && source.source_kind == SourceKind::Nvidia;
                 }
                 db::ScanReconnectDecision::Reconnect(planned) => {
                     if current.file_identity != planned.candidate.file_identity {
@@ -357,6 +371,39 @@ fn process_staged_candidates(
                 }
             }
             if skip_candidate {
+                if source.source_kind == SourceKind::Nvidia
+                    && db::find_pending_manual_clip_source_id_by_normalized_path(
+                        &transaction,
+                        &current.normalized_path,
+                    )? == Some(source.id)
+                {
+                    // A pre-existing pending row remains visible even if a legacy indexed clip
+                    // now conflicts with it. Complete scans must not silently clean it up.
+                    seen_pending_paths.insert(current.normalized_path.clone());
+                }
+                continue;
+            }
+
+            // NVIDIA recordings have no reliable metadata: new discoveries are never auto-imported.
+            // They enter the pending manual-classification queue instead, while clips that were
+            // indexed before this policy still reconnect/update normally.
+            if queue_pending {
+                let relative_directory = relative_directory_for(source, &current.path);
+                if db::upsert_pending_manual_clip(
+                    &transaction,
+                    db::PendingManualClipInput {
+                        source_dir_id: source.id,
+                        video_path: &current.file_path,
+                        file_name: &current.file_name,
+                        file_size: current.size_bytes,
+                        modified_at: Some(&current.modified_at),
+                        source_relative_dir: &relative_directory,
+                    },
+                )? {
+                    summary.pending_clip_count += 1;
+                }
+                seen_pending_paths.insert(current.normalized_path.clone());
+                pending_progress.push((current.path, relative_directory, current.file_name));
                 continue;
             }
 
@@ -441,11 +488,17 @@ fn process_staged_candidates(
                 ClipSaveOutcome::Unchanged => {}
             }
             summary.cover_missing_count += 1;
-            let relative_directory = path
-                .parent()
-                .and_then(|parent| parent.strip_prefix(Path::new(&source.scan_root_path)).ok())
-                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
+            let relative_directory = relative_directory_for(source, &path);
+            if seen_directories.insert(relative_directory.clone()) {
+                progress.group_scanned(if relative_directory.is_empty() {
+                    "根目录"
+                } else {
+                    &relative_directory
+                });
+            }
+            progress.clip_scanned(&file_name);
+        }
+        for (_, relative_directory, file_name) in pending_progress {
             if seen_directories.insert(relative_directory.clone()) {
                 progress.group_scanned(if relative_directory.is_empty() {
                     "根目录"
@@ -458,6 +511,13 @@ fn process_staged_candidates(
     }
 }
 
+fn relative_directory_for(source: &SourceDir, path: &Path) -> String {
+    path.parent()
+        .and_then(|parent| parent.strip_prefix(Path::new(&source.scan_root_path)).ok())
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default()
+}
+
 fn save_candidate_normally(
     connection: &Connection,
     source: &SourceDir,
@@ -465,6 +525,11 @@ fn save_candidate_normally(
     file_identity: Option<db::StableFileIdentity>,
 ) -> DbResult<Option<db::SavedClip>> {
     let normalized_path = db::normalize_path(input.video_path);
+    if db::find_pending_manual_clip_source_id_by_normalized_path(connection, &normalized_path)?
+        .is_some()
+    {
+        return Ok(None);
+    }
     if let Some(owner_id) =
         db::find_clip_source_id_by_normalized_path(connection, &normalized_path)?
     {
@@ -645,6 +710,28 @@ mod tests {
         .expect("source should register")
     }
 
+    fn register_nvidia_source(database_path: &Path, root: &Path) -> SourceDir {
+        let connection = db::open_database(database_path).expect("database should open");
+        let canonical_root = root
+            .canonicalize()
+            .expect("recording root should canonicalize")
+            .display()
+            .to_string();
+        db::register_source_dir(
+            &connection,
+            db::SourceDirInput {
+                path: &canonical_root,
+                name: "NVIDIA recordings",
+            },
+            db::SourceProfileInput {
+                source_kind: db::SourceKind::Nvidia,
+                scan_mode: db::ScanMode::RecursiveMp4,
+                scan_root_path: &canonical_root,
+            },
+            true,
+        )
+        .expect("source should register")
+    }
     fn directory_inventory(root: &Path) -> Vec<(String, Vec<u8>)> {
         let mut inventory = Vec::new();
         let mut stack = vec![root.to_path_buf()];
@@ -715,6 +802,7 @@ mod tests {
             .expect("fixture should change");
 
         let mut seen_directories = HashSet::new();
+        let mut seen_pending_paths = HashSet::new();
         let mut summary = ScanSummary::empty(path_to_string(&root));
         let mut progress = ScanProgressState::new(path_to_string(&root), None);
         let mut source_errors = Vec::new();
@@ -723,6 +811,7 @@ mod tests {
             &connection,
             &source,
             &mut seen_directories,
+            &mut seen_pending_paths,
             &mut summary,
             &mut progress,
             ScanRuntime::default(),
@@ -1164,6 +1253,81 @@ mod tests {
         fs::remove_dir_all(&fixture).expect("fixture should be removed");
     }
 
+    #[test]
+    fn overlapping_generic_source_cannot_import_a_nvidia_pending_file() {
+        let (fixture, data, root) = temp_fixture("pending-ownership");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("nested root should be created");
+        fs::write(nested.join("pending.mp4"), b"pending").expect("fixture should be written");
+        let database_path = db::initialize_database_in(&data).expect("database should initialize");
+        let nvidia_source = register_nvidia_source(&database_path, &root);
+        let generic_source = register_generic_source(&database_path, &nested);
+        let connection = db::open_database(&database_path).expect("database should open");
+
+        let nvidia_summary = super::super::sync_scan_sources(&connection, &[nvidia_source.id])
+            .expect("NVIDIA synchronization should queue the recording");
+        assert_eq!(nvidia_summary.pending_clip_count, 1);
+        assert!(db::list_clips(&connection).unwrap().is_empty());
+
+        let generic_summary = super::super::sync_scan_sources(&connection, &[generic_source.id])
+            .expect("overlapping generic synchronization should remain bounded");
+        assert_eq!(generic_summary.new_clip_count, 0);
+        assert!(db::list_clips(&connection).unwrap().is_empty());
+        let pending = db::list_pending_manual_clips(&connection, false).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].source_dir_id, nvidia_source.id);
+
+        drop(connection);
+        fs::remove_dir_all(&fixture).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn reconnect_cannot_move_a_generic_clip_onto_a_nvidia_pending_path() {
+        let (fixture, data, root) = temp_fixture("pending-reconnect-ownership");
+        let old_directory = root.join("old");
+        let nvidia_root = root.join("nvidia");
+        fs::create_dir_all(&old_directory).expect("old directory should be created");
+        fs::create_dir_all(&nvidia_root).expect("NVIDIA root should be created");
+        let old_path = old_directory.join("moved.mp4");
+        let new_path = nvidia_root.join("moved.mp4");
+        fs::write(&old_path, b"same physical recording").expect("fixture should be written");
+        let database_path = db::initialize_database_in(&data).expect("database should initialize");
+        let generic_source = register_generic_source(&database_path, &root);
+        let nvidia_source = register_nvidia_source(&database_path, &nvidia_root);
+        let connection = db::open_database(&database_path).expect("database should open");
+
+        let first = super::super::sync_scan_sources(&connection, &[generic_source.id])
+            .expect("generic synchronization should index the original path");
+        assert_eq!(first.new_clip_count, 1);
+        let original_clip = db::list_clips(&connection).unwrap()[0].clone();
+
+        fs::rename(&old_path, &new_path).expect("fixture should move into the NVIDIA root");
+        let nvidia_summary = super::super::sync_scan_sources(&connection, &[nvidia_source.id])
+            .expect("NVIDIA synchronization should queue the moved recording");
+        assert_eq!(nvidia_summary.pending_clip_count, 1);
+
+        let reconnect = super::super::sync_scan_sources(&connection, &[generic_source.id])
+            .expect("generic reconnect attempt should fail closed");
+        let indexed = db::find_clip_by_id(&connection, original_clip.id)
+            .expect("the original generic clip should remain indexed");
+        assert_eq!(indexed.source_dir_id, generic_source.id);
+        assert_eq!(indexed.normalized_path, original_clip.normalized_path);
+        assert_ne!(
+            indexed.normalized_path,
+            db::normalize_path(&new_path.display().to_string())
+        );
+        let pending = db::list_pending_manual_clips(&connection, false).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].source_dir_id, nvidia_source.id);
+        assert!(reconnect
+            .errors
+            .iter()
+            .any(|error| error.contains("pending manual import")));
+
+        drop(connection);
+        fs::remove_dir_all(&fixture).expect("fixture should be removed");
+    }
+
     #[cfg(windows)]
     #[test]
     fn recursive_source_skips_file_and_directory_reparse_points() {
@@ -1207,6 +1371,163 @@ mod tests {
         fs::remove_dir_all(&fixture).expect("fixture should be removed");
     }
 
+    #[test]
+    fn nvidia_sources_queue_new_recordings_instead_of_auto_importing() {
+        let (fixture, data, root) = temp_fixture("nvidia-pending");
+        let nested = root.join("Valorant");
+        fs::create_dir_all(&nested).expect("nested directory should be created");
+        fs::write(root.join("first.mp4"), b"first").expect("first recording should be written");
+        fs::write(nested.join("second.mp4"), b"second")
+            .expect("second recording should be written");
+        let database_path = db::initialize_database_in(&data).expect("database should initialize");
+        let source = register_nvidia_source(&database_path, &root);
+        let connection = db::open_database(&database_path).expect("database should open");
+
+        let summary = super::super::sync_scan_sources(&connection, &[source.id])
+            .expect("nvidia synchronization should complete");
+        assert_eq!(
+            summary.new_clip_count, 0,
+            "NVIDIA files must not auto-import"
+        );
+        assert_eq!(summary.pending_clip_count, 2);
+        assert!(db::list_clips(&connection).unwrap().is_empty());
+        let pending = db::list_pending_manual_clips(&connection, false).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].source_dir_name, "NVIDIA recordings");
+        assert!(!pending.iter().any(|clip| clip.ignored));
+
+        // Re-scanning is idempotent and never resets user decisions.
+        let second = super::super::sync_scan_sources(&connection, &[source.id])
+            .expect("second synchronization should complete");
+        assert_eq!(second.pending_clip_count, 0);
+        assert_eq!(
+            db::list_pending_manual_clips(&connection, false)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // A complete scan removes pending rows whose files disappeared.
+        fs::remove_file(root.join("first.mp4")).expect("first recording should disappear");
+        let third = super::super::sync_scan_sources(&connection, &[source.id])
+            .expect("cleanup synchronization should complete");
+        assert_eq!(third.missing_clip_count, 0);
+        assert_eq!(
+            db::list_pending_manual_clips(&connection, false)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        drop(connection);
+        fs::remove_dir_all(&fixture).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn enabled_sync_discovers_nvidia_without_importing_it() {
+        let (fixture, data, root) = temp_fixture("nvidia-enabled-sync");
+        fs::write(root.join("clip.mp4"), b"recording").expect("recording should be written");
+        let database_path = db::initialize_database_in(&data).expect("database should initialize");
+        register_nvidia_source(&database_path, &root);
+        let connection = db::open_database(&database_path).expect("database should open");
+        let cancellation = AtomicBool::new(false);
+
+        let execution = super::super::sync_enabled_scan_sources_with_progress_and_cancel(
+            &connection,
+            "nvidia-enabled-sync-job",
+            &cancellation,
+            |_| {},
+        )
+        .expect("enabled NVIDIA synchronization should complete");
+
+        assert_eq!(execution.summary.pending_clip_count, 1);
+        assert_eq!(execution.summary.new_clip_count, 0);
+        assert_eq!(
+            db::list_pending_manual_clips(&connection, false)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(db::list_clips(&connection).unwrap().is_empty());
+
+        drop(connection);
+        fs::remove_dir_all(&fixture).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn general_root_scan_routes_registered_nvidia_to_its_recursive_adapter() {
+        let (fixture, data, root) = temp_fixture("nvidia-general-scan");
+        fs::write(root.join("clip.mp4"), b"recording").expect("recording should be written");
+        let database_path = db::initialize_database_in(&data).expect("database should initialize");
+        let source = register_nvidia_source(&database_path, &root);
+        let connection = db::open_database(&database_path).expect("database should open");
+
+        let summary = super::super::scan_roots(&connection, std::slice::from_ref(&root))
+            .expect("general root scan should preserve the registered adapter");
+
+        assert_eq!(summary.pending_clip_count, 1);
+        assert_eq!(summary.new_clip_count, 0);
+        assert!(db::list_clips(&connection).unwrap().is_empty());
+        let persisted = db::find_source_dir_by_id(&connection, source.id).unwrap();
+        assert_eq!(persisted.source_kind, db::SourceKind::Nvidia);
+        assert_eq!(persisted.scan_mode, db::ScanMode::RecursiveMp4);
+
+        drop(connection);
+        fs::remove_dir_all(&fixture).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn imported_nvidia_pending_clip_is_indexed_and_not_requeued() {
+        let (fixture, data, root) = temp_fixture("nvidia-import");
+        fs::write(root.join("clip.mp4"), b"recording").expect("recording should be written");
+        let database_path = db::initialize_database_in(&data).expect("database should initialize");
+        let source = register_nvidia_source(&database_path, &root);
+        let connection = db::open_database(&database_path).expect("database should open");
+        super::super::sync_scan_sources(&connection, &[source.id])
+            .expect("nvidia synchronization should complete");
+        let pending_id = db::list_pending_manual_clips(&connection, false).unwrap()[0].id;
+
+        let clip_id = db::import_pending_manual_clip(
+            &connection,
+            pending_id,
+            &db::ManualClipImportInput {
+                account_key: None,
+                account_name: "Tester#123".to_string(),
+                player_name: None,
+                agent_name: "捷风".to_string(),
+                map_name: Some("霓虹町".to_string()),
+                game_mode: Some("竞技模式".to_string()),
+                note: Some("手动录入".to_string()),
+            },
+        )
+        .expect("pending clip should import");
+
+        assert!(db::list_pending_manual_clips(&connection, false)
+            .unwrap()
+            .is_empty());
+        let clip = db::find_clip_by_id(&connection, clip_id).expect("imported clip should load");
+        assert_eq!(clip.account_display_name, "Tester#123");
+        assert!(clip
+            .account_identity_key
+            .starts_with("match-account-manual-"));
+        assert_eq!(clip.agent_name.as_deref(), Some("捷风"));
+        assert_eq!(clip.map_name.as_deref(), Some("霓虹町"));
+        assert_eq!(clip.metadata_status, "manual");
+        assert_eq!(clip.note.as_deref(), Some("手动录入"));
+
+        // The indexed clip is now an existing path; rescanning must not requeue it.
+        let rescan = super::super::sync_scan_sources(&connection, &[source.id])
+            .expect("rescan should complete");
+        assert_eq!(rescan.pending_clip_count, 0);
+        assert_eq!(rescan.new_clip_count, 0);
+        assert_eq!(db::list_clips(&connection).unwrap().len(), 1);
+        assert!(db::list_pending_manual_clips(&connection, false)
+            .unwrap()
+            .is_empty());
+
+        drop(connection);
+        fs::remove_dir_all(&fixture).expect("fixture should be removed");
+    }
     #[test]
     #[ignore = "M2 10k-file performance gate; run explicitly before release candidates"]
     fn ten_thousand_file_gate_uses_bounded_batches() {

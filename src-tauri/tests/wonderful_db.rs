@@ -121,6 +121,34 @@ fn parses_recoverable_match_fields_from_current_wonderful_schema() {
 }
 
 #[test]
+fn parses_account_name_from_match_envelope_without_event_player_names() {
+    let fixture = r#"
+    {
+      "key_wonderful_list_1001": [{
+        "matches_id": "match-account-envelope",
+        "user_name": "FixtureCharlie",
+        "user_nick_id": "0004",
+        "videos": [{
+          "video_id": "clip-without-player-event",
+          "round_clips": [{
+            "clip_events": [{"event_id": "event-without-player"}]
+          }]
+        }]
+      }]
+    }
+    "#;
+
+    let matches = parse_wonderful_db_text("1001", fixture)
+        .expect("match-envelope account identity should parse");
+
+    assert_eq!(
+        matches[0].account_name.as_deref(),
+        Some("FixtureCharlie#0004")
+    );
+    assert_eq!(matches[0].videos[0].segments[0].events[0].player_name, None);
+}
+
+#[test]
 fn empty_career_scoreline_falls_back_to_round_stats() {
     let fixture = r#"
     {

@@ -1,5 +1,8 @@
 use serde::Serialize;
-use std::{collections::HashSet, path::Path, process::Command};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 use tauri::State;
 
 use super::media_protocol::{get_clip_media_for_database, FILE_NOT_FOUND_MESSAGE};
@@ -335,15 +338,10 @@ pub(crate) fn open_clip_location_for_database<F>(
 where
     F: FnOnce(&Path) -> Result<(), String>,
 {
-    let connection = db::open_database_read_only(database_path)?;
-    let clip = db::find_clip_media_paths_by_id(&connection, clip_id)?;
-    let clip_path = Path::new(&clip.video_path);
-
-    if !clip_path.is_file() {
-        return Err(FILE_NOT_FOUND_MESSAGE.to_string());
-    }
-
-    reveal(clip_path)
+    let target = load_clip_file_target(database_path, clip_id)?;
+    ensure_indexed_mp4(&target)?;
+    let shell_path = resolve_safe_clip_shell_path(&target)?;
+    reveal(&shell_path)
 }
 
 pub(crate) fn copy_clip_path_for_database(
@@ -364,28 +362,54 @@ pub(crate) fn open_clip_externally_for_database<F>(
 where
     F: FnOnce(&Path) -> Result<(), String>,
 {
-    let connection = db::open_database_read_only(database_path)?;
-    let target = db::find_clip_file_target_by_id(&connection, clip_id)?
-        .ok_or_else(|| format!("素材不存在：{clip_id}"))?;
+    let target = load_clip_file_target(database_path, clip_id)?;
     if target.file_status != "available" {
         return Err("只有可用素材才能交给系统播放器".to_string());
     }
-    if !target.extension.eq_ignore_ascii_case("mp4")
-        || !Path::new(&target.video_path)
+    ensure_indexed_mp4(&target)?;
+    let shell_path = resolve_safe_clip_shell_path(&target)?;
+    open(&shell_path)
+}
+
+fn load_clip_file_target(
+    database_path: impl AsRef<Path>,
+    clip_id: i64,
+) -> Result<db::ClipFileTarget, String> {
+    let connection = db::open_database_read_only(database_path)?;
+    db::find_clip_file_target_by_id(&connection, clip_id)?
+        .ok_or_else(|| format!("素材不存在：{clip_id}"))
+}
+
+fn ensure_indexed_mp4(target: &db::ClipFileTarget) -> Result<(), String> {
+    if target.extension.eq_ignore_ascii_case("mp4")
+        && Path::new(&target.video_path)
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
     {
-        return Err("系统播放器回退仅允许已索引的 MP4 文件".to_string());
+        return Ok(());
     }
 
+    Err("文件操作仅允许已索引的 MP4 文件".to_string())
+}
+
+fn resolve_safe_clip_shell_path(target: &db::ClipFileTarget) -> Result<PathBuf, String> {
     let source_root = Path::new(&target.source_dir_path);
+    let clip_path = Path::new(&target.video_path);
+
+    if source_root
+        .components()
+        .chain(clip_path.components())
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("视频路径包含不允许的父目录跳转".to_string());
+    }
+
     let source_metadata = std::fs::symlink_metadata(source_root)
         .map_err(|error| format!("来源目录不可用：{error}"))?;
     if !source_metadata.is_dir() || metadata_is_reparse_point(&source_metadata) {
         return Err("来源目录不可用或已变为 reparse point".to_string());
     }
-    let clip_path = Path::new(&target.video_path);
     let clip_metadata =
         std::fs::symlink_metadata(clip_path).map_err(|_| FILE_NOT_FOUND_MESSAGE.to_string())?;
     if !clip_metadata.is_file() || metadata_is_reparse_point(&clip_metadata) {
@@ -400,8 +424,11 @@ where
     if canonical_clip == canonical_root || !canonical_clip.starts_with(&canonical_root) {
         return Err("视频路径已越出已授权来源目录".to_string());
     }
-    ensure_non_reparse_path_chain(&canonical_clip, &canonical_root)?;
-    open(&canonical_clip)
+    // Inspect the stored spelling rather than only the canonical result: canonicalization resolves
+    // ancestor junctions/symlinks and would otherwise hide the reparse point from this walk.
+    ensure_non_reparse_path_chain(clip_path, source_root)?;
+
+    Ok(shell_compatible_path(&canonical_clip))
 }
 
 pub(crate) fn list_tags_for_database(
@@ -676,11 +703,38 @@ fn single_clip_from_batch(
 fn reveal_clip_in_explorer(clip_path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("explorer.exe")
-            .arg(format!("/select,{}", clip_path.display()))
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("打开文件位置失败: {error}"))
+        use std::ptr;
+        use windows_sys::Win32::UI::Shell::{
+            Common::ITEMIDLIST, SHOpenFolderAndSelectItems, SHParseDisplayName,
+        };
+
+        let _com = ComInitialization::initialize()?;
+        let display_name = wide_null_terminated(clip_path.as_os_str());
+        let mut raw_pidl: *mut ITEMIDLIST = ptr::null_mut();
+        let parse_result = unsafe {
+            SHParseDisplayName(
+                display_name.as_ptr(),
+                ptr::null_mut(),
+                &mut raw_pidl,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        let pidl = OwnedPidl(raw_pidl);
+        if parse_result < 0 {
+            return Err(hresult_error("无法解析视频文件位置", parse_result));
+        }
+        if pidl.0.is_null() {
+            return Err("无法解析视频文件位置：Shell 未返回项目标识".to_string());
+        }
+
+        // With cidl == 0, the fully-qualified PIDL names the single item to reveal. The Shell
+        // opens its parent folder and selects that item, returning an HRESULT we can report.
+        let reveal_result = unsafe { SHOpenFolderAndSelectItems(pidl.0, 0, ptr::null(), 0) };
+        if reveal_result < 0 {
+            return Err(hresult_error("文件资源管理器定位失败", reveal_result));
+        }
+        Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -698,12 +752,142 @@ fn ensure_non_reparse_path_chain(path: &Path, root: &Path) -> Result<(), String>
         if metadata_is_reparse_point(&metadata) {
             return Err("视频路径链包含符号链接或 reparse point".to_string());
         }
-        if current == root {
+        if paths_refer_to_same_spelling(current, root) {
             return Ok(());
         }
         cursor = current.parent();
     }
     Err("视频路径不属于已授权来源目录".to_string())
+}
+
+fn paths_refer_to_same_spelling(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        db::normalize_path(left.to_string_lossy().as_ref())
+            == db::normalize_path(right.to_string_lossy().as_ref())
+    }
+
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn shell_compatible_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::{
+            ffi::OsString,
+            os::windows::ffi::{OsStrExt, OsStringExt},
+        };
+
+        let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        let is_verbatim =
+            wide.starts_with(&[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16]);
+        if !is_verbatim {
+            return path.to_path_buf();
+        }
+
+        let is_verbatim_unc = wide.len() >= 8
+            && matches!(wide[4], value if value == b'U' as u16 || value == b'u' as u16)
+            && matches!(wide[5], value if value == b'N' as u16 || value == b'n' as u16)
+            && matches!(wide[6], value if value == b'C' as u16 || value == b'c' as u16)
+            && matches!(wide[7], value if value == b'\\' as u16 || value == b'/' as u16);
+        let ordinary = if is_verbatim_unc {
+            let mut ordinary = Vec::with_capacity(wide.len().saturating_sub(6));
+            ordinary.extend([b'\\' as u16, b'\\' as u16]);
+            ordinary.extend_from_slice(&wide[8..]);
+            ordinary
+        } else {
+            let is_verbatim_drive = wide.len() >= 7
+                && wide[4] <= u16::from(u8::MAX)
+                && (wide[4] as u8).is_ascii_alphabetic()
+                && wide[5] == b':' as u16
+                && matches!(wide[6], value if value == b'\\' as u16 || value == b'/' as u16);
+            if !is_verbatim_drive {
+                return path.to_path_buf();
+            }
+            wide[4..].to_vec()
+        };
+
+        PathBuf::from(OsString::from_wide(&ordinary))
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
+
+#[cfg(windows)]
+fn wide_null_terminated(value: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn hresult_error(action: &str, result: windows_sys::core::HRESULT) -> String {
+    format!("{action}（HRESULT=0x{:08X}）", result as u32)
+}
+
+#[cfg(windows)]
+struct OwnedPidl(*mut windows_sys::Win32::UI::Shell::Common::ITEMIDLIST);
+
+#[cfg(windows)]
+impl Drop for OwnedPidl {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                windows_sys::Win32::System::Com::CoTaskMemFree(self.0.cast());
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct ComInitialization {
+    should_uninitialize: bool,
+}
+
+#[cfg(windows)]
+impl ComInitialization {
+    fn initialize() -> Result<Self, String> {
+        use std::ptr;
+        use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+
+        const RPC_E_CHANGED_MODE: windows_sys::core::HRESULT = 0x80010106_u32 as i32;
+        let result = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+        if result >= 0 {
+            return Ok(Self {
+                should_uninitialize: true,
+            });
+        }
+        if result == RPC_E_CHANGED_MODE {
+            // COM is already initialized on this thread with another concurrency model. It remains
+            // valid for Shell calls, but this function must not balance an initialization it did
+            // not perform.
+            return Ok(Self {
+                should_uninitialize: false,
+            });
+        }
+        Err(hresult_error("初始化 Windows Shell 失败", result))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ComInitialization {
+    fn drop(&mut self) {
+        if self.should_uninitialize {
+            unsafe {
+                windows_sys::Win32::System::Com::CoUninitialize();
+            }
+        }
+    }
 }
 
 fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
@@ -760,5 +944,42 @@ fn open_with_default_player(path: &Path) -> Result<(), String> {
     {
         let _ = path;
         Err("系统默认播放器回退当前仅支持 Windows".to_string())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_shell_tests {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::Path};
+
+    use super::{shell_compatible_path, wide_null_terminated};
+
+    #[test]
+    fn shell_path_conversion_preserves_unicode_and_removes_only_supported_verbatim_prefixes() {
+        assert_eq!(
+            shell_compatible_path(Path::new(r"\\?\D:\录像 空格.mp4")),
+            Path::new(r"D:\录像 空格.mp4")
+        );
+        assert_eq!(
+            shell_compatible_path(Path::new(r"\\?\UNC\服务器\共享\录像 空格.mp4")),
+            Path::new(r"\\服务器\共享\录像 空格.mp4")
+        );
+        assert_eq!(
+            shell_compatible_path(Path::new(
+                r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\录像 空格.mp4"
+            )),
+            Path::new(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\录像 空格.mp4")
+        );
+    }
+
+    #[test]
+    fn shell_display_name_is_null_terminated_without_losing_unicode_or_spaces() {
+        let path = Path::new(r"D:\素材 库\录像 空格.mp4");
+        let encoded = wide_null_terminated(path.as_os_str());
+
+        assert_eq!(encoded.last(), Some(&0));
+        assert_eq!(
+            OsString::from_wide(&encoded[..encoded.len() - 1]),
+            path.as_os_str()
+        );
     }
 }

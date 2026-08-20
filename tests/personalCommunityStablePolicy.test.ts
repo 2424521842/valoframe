@@ -12,7 +12,7 @@ const read = (path: string) => readFileSync(resolve(root, path), "utf8");
 const readJson = (path: string): JsonObject => JSON.parse(read(path));
 
 const decision = readJson(
-  "release/approvals/personal-community-stable-v0.2.1.json",
+  "release/approvals/personal-community-stable-v0.2.2.json",
 );
 const policy = readJson("release/personal-community-stable-policy.json");
 const ffmpegContract = readJson(
@@ -20,12 +20,12 @@ const ffmpegContract = readJson(
 );
 const generator = read("scripts/release/generate-compliance-evidence.mjs");
 const licensing = read("docs/LICENSING.md");
-const notes = read("release/notes/v0.2.1.md");
+const notes = read("release/notes/v0.2.2.md");
 const bundleGate = read("scripts/release/check-bundle.ps1");
 
-test("v0.2.1 has a narrowly scoped repository-owner community decision", () => {
-  assert.equal(decision.version, "0.2.1");
-  assert.equal(decision.tag, "v0.2.1");
+test("v0.2.2 has a narrowly scoped repository-owner community decision", () => {
+  assert.equal(decision.version, "0.2.2");
+  assert.equal(decision.tag, "v0.2.2");
   assert.equal(decision.channel, "personal-community-stable");
   assert.equal(decision.decision, "approved-by-repository-release-owner");
   assert.equal(decision.distributionPurpose, "free-personal-community");

@@ -110,6 +110,12 @@ impl FfmpegThumbnailGenerator {
         }
     }
 
+    /// Absolute ffmpeg executable resolved from app resources or the VHM_FFMPEG_PATH override,
+    /// if any. Used by feedback sample-frame extraction outside the thumbnail queue.
+    pub(crate) fn executable(&self) -> Option<&Path> {
+        self.executable.as_deref()
+    }
+
     fn run_attempt(
         &self,
         source_path: &Path,

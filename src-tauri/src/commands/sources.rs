@@ -346,6 +346,8 @@ pub(crate) fn start_enabled_source_sync(app: AppHandle, state: AppState) {
 fn startup_source_sync_decision(
     connection: &Connection,
 ) -> db::DbResult<StartupSourceSyncDecision> {
+    // NVIDIA is an ordinary enabled source for scheduling purposes. Its scanner adapter controls
+    // the stricter ingest policy by sending discoveries to the pending queue instead of `clips`.
     if db::list_enabled_source_dirs(connection)?.is_empty() {
         return Ok(StartupSourceSyncDecision::SkipNoEnabledSources);
     }
@@ -505,20 +507,36 @@ fn registration_source_paths(kind: SourceKind, root: &Path) -> Result<Vec<PathBu
     if kind != SourceKind::Aclos || is_aclos_source_directory(root) {
         return Ok(vec![root.to_path_buf()]);
     }
-    let mut paths = fs::read_dir(root)
-        .map_err(|error| format!("无法读取 ACLOS 根目录 {}：{error}", root.display()))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| is_aclos_source_directory(path))
-        .filter_map(|path| {
-            let metadata = fs::symlink_metadata(&path).ok()?;
-            if metadata.is_dir() && !metadata_is_reparse_point(&metadata) {
-                path.canonicalize().ok()
-            } else {
-                None
+    let mut source_parents = vec![root.to_path_buf()];
+    let standard_library = root.join("aclos-highlight");
+    if let Ok(metadata) = fs::symlink_metadata(&standard_library) {
+        if metadata.is_dir() && !metadata_is_reparse_point(&metadata) {
+            source_parents.push(standard_library);
+        }
+    }
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for parent in source_parents {
+        let entries = fs::read_dir(&parent)
+            .map_err(|error| format!("无法读取 ACLOS 根目录 {}：{error}", parent.display()))?;
+        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            if !is_aclos_source_directory(&path) {
+                continue;
             }
-        })
-        .collect::<Vec<_>>();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.is_dir() && !metadata_is_reparse_point(&metadata) {
+                if let Ok(path) = path.canonicalize() {
+                    if !paths
+                        .iter()
+                        .any(|existing| path_key(existing) == path_key(&path))
+                    {
+                        paths.push(path);
+                    }
+                }
+            }
+        }
+    }
     paths.sort_by_key(|path| normalized_path_key(&path.display().to_string()));
     if paths.is_empty() {
         paths.push(root.to_path_buf());
@@ -602,6 +620,35 @@ mod tests {
     }
 
     #[test]
+    fn aclos_registration_discovers_sources_below_the_standard_library_folder() {
+        let fixture = temp_directory("nested-aclos-library");
+        let aclos_root = fixture.join("ACLOS");
+        let library = aclos_root.join("aclos-highlight");
+        let source_a = library.join("wonderfulVideos1001");
+        let source_b = library.join("wonderfulVideos2002");
+        fs::create_dir_all(&source_a).expect("first source should be created");
+        fs::create_dir_all(&source_b).expect("second source should be created");
+
+        let paths = registration_source_paths(SourceKind::Aclos, &aclos_root)
+            .expect("standard ACLOS root should be inspected");
+        let canonical_source_a = source_a
+            .canonicalize()
+            .expect("first source should resolve");
+        let canonical_source_b = source_b
+            .canonicalize()
+            .expect("second source should resolve");
+
+        assert_eq!(paths.len(), 2);
+        assert!(paths
+            .iter()
+            .any(|path| path_key(path) == path_key(&canonical_source_a)));
+        assert!(paths
+            .iter()
+            .any(|path| path_key(path) == path_key(&canonical_source_b)));
+        fs::remove_dir_all(&fixture).expect("fixture should be removed");
+    }
+
+    #[test]
     fn duplicate_registration_reuses_source_and_overlap_requires_confirmation() {
         let fixture = temp_directory("overlap");
         let data = fixture.join("data");
@@ -675,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_sync_skips_only_recent_enabled_source_scan() {
+    fn startup_sync_includes_enabled_nvidia_and_skips_only_recent_scans() {
         let fixture = temp_directory("startup-cooldown");
         let data = fixture.join("data");
         let root = fixture.join("recordings");
@@ -693,9 +740,9 @@ mod tests {
         register_scan_source_for_database(
             &database_path,
             RegisterScanSourceInput {
-                source_kind: SourceKind::Generic,
+                source_kind: SourceKind::Nvidia,
                 scan_root_path: root.display().to_string(),
-                display_name: "Recordings".to_string(),
+                display_name: "NVIDIA recordings".to_string(),
                 enabled: true,
                 allow_overlap: false,
             },

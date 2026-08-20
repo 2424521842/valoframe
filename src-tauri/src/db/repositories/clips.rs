@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::super::{
     attach_clip_events, bool_to_integer, ensure_row_changed, list_tags_for_clip, map_clip,
     normalize_optional, readable_error, BatchClipMutationResult, Clip, ClipDetail, ClipFileTarget,
-    ClipMediaPaths, DbResult, CLIP_SELECT_SQL,
+    ClipMediaPaths, DbResult, FeedbackClipSnapshot, FeedbackSiblingClip, CLIP_SELECT_SQL,
 };
 
 pub fn find_clip_by_id(connection: &Connection, clip_id: i64) -> DbResult<Clip> {
@@ -133,6 +133,190 @@ pub(crate) fn find_clip_file_target_by_id(
         )
         .optional()
         .map_err(|error| readable_error("reading clip file target", error))
+}
+
+/// Loads the sanitized snapshot used in user-submitted feedback packages. The query never
+/// selects OpenID/materialized identity keys, personal notes, tags, extracted text, or absolute
+/// local paths; the transport-only video_path and clip_group_id are stripped at serialization.
+pub(crate) fn find_feedback_clip_snapshot_by_id(
+    connection: &Connection,
+    clip_id: i64,
+) -> DbResult<Option<FeedbackClipSnapshot>> {
+    connection
+        .query_row(
+            "
+            SELECT
+                clips.id,
+                clips.clip_group_id,
+                clip_groups.display_name AS clip_group_name,
+                clips.file_path,
+                clips.file_name,
+                clips.extension,
+                clips.size_bytes,
+                clips.modified_at,
+                clips.duration_ms,
+                clips.recorded_at,
+                clips.cover_source,
+                clips.file_status,
+                clip_metadata.account_name,
+                clip_metadata.player_name,
+                clip_metadata.agent_name,
+                clip_metadata.map_name,
+                clip_metadata.game_mode,
+                COALESCE(clip_metadata.metadata_status, 'not_found') AS metadata_status,
+                clip_metadata.match_id,
+                clip_metadata.scoreline,
+                clip_metadata.kda,
+                matches.agent_avatar_url,
+                clip_metadata.round_label,
+                clip_metadata.weapon_name,
+                clip_metadata.kill_count,
+                matches.started_at AS match_started_at,
+                match_stats.combat_score,
+                match_stats.has_won,
+                clip_metadata.official_video_name,
+                clip_metadata.official_video_type,
+                CASE
+                    WHEN NULLIF(TRIM(clip_metadata.highlight_type), '') IS NOT NULL
+                     AND TRIM(clip_metadata.highlight_type) NOT GLOB '*[^0-9]*'
+                        THEN CAST(TRIM(clip_metadata.highlight_type) AS INTEGER)
+                    ELSE NULL
+                END AS highlight_type,
+                clip_metadata.metadata_source,
+                clip_thumbnails.status AS thumbnail_status,
+                source_dirs.name AS source_dir_display_name,
+                source_dirs.source_kind,
+                source_dirs.scan_mode,
+                clips.source_relative_dir
+            FROM clips
+            JOIN source_dirs
+                ON source_dirs.id = clips.source_dir_id
+            LEFT JOIN clip_groups
+                ON clip_groups.id = clips.clip_group_id
+            LEFT JOIN clip_metadata
+                ON clip_metadata.clip_id = clips.id
+            LEFT JOIN matches
+                ON matches.game_id = clip_metadata.match_id
+            LEFT JOIN match_stats
+                ON match_stats.match_id = matches.id
+            LEFT JOIN clip_thumbnails
+                ON clip_thumbnails.clip_id = clips.id
+            WHERE clips.id = ?1
+            ",
+            params![clip_id],
+            |row| {
+                let account_name: Option<String> = row.get(12)?;
+                let player_name: Option<String> = row.get(13)?;
+                let source_dir_display_name: String = row.get(33)?;
+                let account_display_name = normalize_optional(account_name.as_deref())
+                    .or_else(|| normalize_optional(player_name.as_deref()))
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| source_dir_display_name.clone());
+                let has_won = row.get::<_, Option<i64>>(27)?.map(|value| value != 0);
+
+                Ok(FeedbackClipSnapshot {
+                    id: row.get(0)?,
+                    clip_group_id: row.get(1)?,
+                    video_path: row.get(3)?,
+                    clip_group_name: row.get(2)?,
+                    file_name: row.get(4)?,
+                    extension: row.get(5)?,
+                    file_size: row.get(6)?,
+                    modified_at: row.get(7)?,
+                    duration_ms: row.get(8)?,
+                    recorded_at: row.get(9)?,
+                    cover_source: row.get(10)?,
+                    thumbnail_status: row.get(32)?,
+                    file_status: row.get(11)?,
+                    account_display_name,
+                    account_name,
+                    player_name,
+                    agent_name: row.get(14)?,
+                    map_name: row.get(15)?,
+                    game_mode: row.get(16)?,
+                    metadata_status: row.get(17)?,
+                    match_id: row.get(18)?,
+                    scoreline: row.get(19)?,
+                    kda: row.get(20)?,
+                    agent_avatar_url: row.get(21)?,
+                    round_label: row.get(22)?,
+                    weapon_name: row.get(23)?,
+                    kill_count: row.get(24)?,
+                    match_started_at: row.get(25)?,
+                    combat_score: row.get(26)?,
+                    has_won,
+                    official_video_name: row.get(28)?,
+                    official_video_type: row.get(29)?,
+                    highlight_type: row.get(30)?,
+                    metadata_source: row.get(31)?,
+                    source_dir_display_name,
+                    source_kind: row.get(34)?,
+                    scan_mode: row.get(35)?,
+                    source_relative_dir: row.get(36)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| readable_error("reading feedback clip snapshot", error))
+}
+
+/// Sibling clips of the same match (same clip group, or the same match id) for the feedback
+/// package. Bounded so the operator sees enough context without shipping the whole library.
+pub(crate) fn list_feedback_sibling_clips(
+    connection: &Connection,
+    clip_id: i64,
+    clip_group_id: Option<i64>,
+    match_id: Option<&str>,
+) -> DbResult<Vec<FeedbackSiblingClip>> {
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT
+                clips.id,
+                clips.file_name,
+                clips.size_bytes,
+                clips.duration_ms,
+                clips.recorded_at,
+                clips.modified_at,
+                clip_metadata.official_video_name,
+                clip_metadata.kill_count,
+                clip_metadata.scoreline,
+                clip_metadata.agent_name,
+                clip_metadata.map_name
+            FROM clips
+            LEFT JOIN clip_metadata
+                ON clip_metadata.clip_id = clips.id
+            WHERE clips.id <> ?1
+              AND (
+                  (?2 IS NOT NULL AND clips.clip_group_id = ?2)
+                  OR (?3 IS NOT NULL AND clip_metadata.match_id = ?3)
+              )
+            ORDER BY COALESCE(clips.recorded_at, clips.modified_at) ASC, clips.id ASC
+            LIMIT 20
+            ",
+        )
+        .map_err(|error| readable_error("preparing feedback sibling clip query", error))?;
+
+    let rows = statement
+        .query_map(params![clip_id, clip_group_id, match_id], |row| {
+            Ok(FeedbackSiblingClip {
+                id: row.get(0)?,
+                file_name: row.get(1)?,
+                file_size: row.get(2)?,
+                duration_ms: row.get(3)?,
+                recorded_at: row.get(4)?,
+                modified_at: row.get(5)?,
+                official_video_name: row.get(6)?,
+                kill_count: row.get(7)?,
+                scoreline: row.get(8)?,
+                agent_name: row.get(9)?,
+                map_name: row.get(10)?,
+            })
+        })
+        .map_err(|error| readable_error("querying feedback sibling clips", error))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| readable_error("reading feedback sibling clips", error))
 }
 
 pub fn list_active_clip_paths_for_source(

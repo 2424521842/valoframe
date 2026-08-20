@@ -1,6 +1,6 @@
 # Data Model
 
-当前 SQLite schema 版本为 v16，数据库文件名为 `highlight-index.sqlite3`，位于 Tauri app data 目录。本文只描述当前落地表，不再保留早期 `sources/assets/asset_metadata` 草案。
+当前 SQLite schema 版本为 v17，数据库文件名为 `highlight-index.sqlite3`，位于 Tauri app data 目录。本文只描述当前落地表，不再保留早期 `sources/assets/asset_metadata` 草案。
 
 ## 1. 生命周期与连接
 
@@ -31,15 +31,25 @@
 | `clip_events` | 单个视频的相对事件时间线 |
 | `tags` | 用户创建的标签名称和颜色 |
 | `clip_tags` | clip 与 tag 的多对多绑定 |
-| `scan_runs` | job、终态、批次统计、错误摘要和起止时间 |
+| `pending_manual_clips` | NVIDIA 目录扫描发现但尚未手动分类的 MP4；`(normalized_path)` 唯一，逐来源登记、完整扫描后清理 |
+| `scan_runs` | job、终态、批次统计（含 NVIDIA 新增待录入数）、错误摘要和起止时间 |
 
 当前没有 `app_settings` 表。`clips.cover_path` 仍只引用素材目录中已有的 `cover-*.jpeg`；自动生成文件由 `clip_thumbnails` 独立引用，避免扫描覆盖生成状态或把应用缓存误当成源文件。
 
 ## 3. 核心表
 
+### 3.0 `pending_manual_clips`（NVIDIA 待录入队列）
+
+`source_kind = nvidia` 的来源在递归扫描时不把新发现 MP4 写入 `clips`，而是按 `normalized_path` 幂等登记到本表；历史已入库的 NVIDIA clip 仍按普通路径/稳定身份更新与重连。行记录来源、文件路径与规范路径、文件名、大小、修改时间、来源相对目录、`ignored` 标志（用户忽略后重扫不会恢复，也不会重复入库）与发现/最近可见时间。
+
+- 重扫已见文件只刷新 `last_seen_at`，不重置 `ignored`；同一规范化路径只允许归属一个来源，repository 写入口、重连原子条件与数据库双向触发器共同保证 `pending_manual_clips` 和 `clips` 严格互斥，即使重叠来源或并发连接竞争也不能绕过。
+- 只有来源完整枚举且未取消时，扫描才会删除本轮未见的待录入行，与 clip 的 missing 判定同策略。
+- 用户提交分类后，`import_pending_manual_clip` 在同一事务内：校验文件仍存在 → 生成账户/对局标识 → 删除 pending 行以原子认领该路径 → 写入合成 `matches`、`clips` 与 `clip_metadata`（`metadata_status = 'manual'`、`metadata_source = 'manual'`、`match_id = game_id`）。任一步失败都会回滚，待录入行保持原状。
+- 账户身份沿用既有派生：`match-account-<id>` 键直接复用 `matches.account_id`；新账户生成 `manual-<随机>` 的 `account_id`，并按展示名复用已存在的同名 manual 账户；`source-<id>` 兜底账户没有可携带身份，按新 manual 账户处理。
+
 ### 3.1 `source_dirs` 与 `clip_groups`
 
-`source_dirs.path` 是来源记录的唯一真实路径；`scan_root_path` 是扫描器的授权边界根。`source_kind` 只接受 `aclos`、`nvidia`、`tracker`、`generic`，`scan_mode` 只接受 `aclos-structured`、`recursive-mp4`。ACLOS 使用结构化扫描器；NVIDIA、Tracker 和 generic 使用只读递归 MP4 适配器。`enabled` 控制来源是否加入自动/批量同步，禁用不删除索引且不参与全局新鲜度提醒。全局“启动时自动扫描”偏好默认关闭并存于前端版本化 `localStorage`，没有写入 SQLite；开启后下次启动只同步 `enabled = true` 的来源，手动同步不受影响。来源 DTO 直接从该表返回，因此零素材、离线和 partial 来源也能出现在前端，不再依赖视频路径反推来源。
+`source_dirs.path` 是来源记录的唯一真实路径；`scan_root_path` 是扫描器的授权边界根。`source_kind` 只接受 `aclos`、`nvidia`、`tracker`、`generic`，`scan_mode` 只接受 `aclos-structured`、`recursive-mp4`。ACLOS 使用结构化扫描器；NVIDIA、Tracker 和 generic 使用只读递归 MP4 适配器。`enabled` 控制所有类型来源（包括 NVIDIA）是否加入自动/批量同步，禁用不删除索引且不参与全局新鲜度提醒。全局“启动时自动扫描”偏好默认关闭并存于前端版本化 `localStorage`，没有写入 SQLite；开启后下次启动只同步 `enabled = true` 的来源，手动同步不受影响。来源 DTO 直接从该表返回，因此零素材、离线和 partial 来源也能出现在前端，不再依赖视频路径反推来源。
 
 `clip_groups` 以来源 + `group_key` 唯一；来源根目录直接 MP4 可以没有 group，`来源/对局/MP4` 使用直接子目录作为 group。
 
@@ -65,7 +75,7 @@
 
 v13 升级到 v14 的历史步骤会把现有来源回填为 `aclos + aclos-structured`，`scan_root_path = path`；相对目录优先由文件父目录与来源根做大小写无关的词法计算，无法计算时退回已有 group key。已有收藏回填为 `liked`，`reviewed_at` 使用该 clip 的 `updated_at`；非收藏保持 `unreviewed`。
 
-v14→v15 只增加稳定身份、事件本人死亡和扫描摘要可用性字段/索引，不在迁移中遍历磁盘；既有 clip 的三个文件身份字段保持 `NULL`，由后续扫描惰性填充。v16 随后统一普通与 Win32 verbatim 路径键，并只合并同来源、完整身份相同、去前缀路径等价且授权状态无歧义的双行配对。升级在同一事务中最终一次写入 `user_version = 16`，并保留文件状态、普通路径 clip ID、收藏、评审、备注、标签、元数据、时间轴、最佳缩略图、回收快照、删除 intent 和原始 JSON。
+v14→v15 只增加稳定身份、事件本人死亡和扫描摘要可用性字段/索引，不在迁移中遍历磁盘；既有 clip 的三个文件身份字段保持 `NULL`，由后续扫描惰性填充。v16 随后统一普通与 Win32 verbatim 路径键，并只合并同来源、完整身份相同、去前缀路径等价且授权状态无歧义的双行配对。v17 新增 `pending_manual_clips` 待录入队列（幂等建表，已有库升级时由启动迁移自动创建），用于暂存 NVIDIA 目录中发现、但尚未手动分类的 MP4；同时为 `scan_runs` 增加 `pending_clip_count`，保证后台/启动扫描的终态摘要恢复后仍能提示待录入数量。v18 在同一迁移事务内按可靠时间戳传播 WonderfulDb 的最新账号名称，并清除旧版按文件排序猜测出的 ACLOS 封面绑定、同步转入视频缩略图生成队列；升级前仍创建经校验的数据库备份，任一数据修复失败都会连同 `user_version` 更新一起回滚。升级保留文件状态、普通路径 clip ID、收藏、评审、备注、标签、元数据、时间轴、可确认的精确封面、回收快照、删除 intent 和原始 JSON。
 
 `trashed` 本身只是应用数据库状态，不会移动或删除视频。`remove_clip_from_index` / `remove_clips_from_index` 只允许普通库中 missing 或来源不可用、且没有删除 intent 的记录；它删除索引行及级联的标签/备注等应用状态，不触碰原视频，批量操作逐项报告结果。用户在回收站明确二次确认 `delete_clips_permanently` 后，应用先持久化 `clip_delete_intents`，再触碰本地文件，最后在一个短事务内同时移除 intent 与 clip；非 `trashed` 记录会被后端拒绝。
 
@@ -160,6 +170,7 @@ clip_segments + clip_events        = 单个视频的组装区间和归一化事�
 | `partial` | 仅提取到部分字段 |
 | `failed` | 元数据存在但解析失败 |
 | `enriched` | 已关联 WonderfulDb 或结构化对局数据 |
+| `manual` | 用户手动录入的 NVIDIA 分类（`metadata_source = 'manual'`，字段由待录入导入流程写入） |
 
 ### 5.3 缩略图状态
 

@@ -58,6 +58,8 @@ pub struct ScanSummary {
     pub new_clip_count: i64,
     pub updated_clip_count: i64,
     pub missing_clip_count: i64,
+    /// NVIDIA videos discovered but held back for manual classification; never auto-imported.
+    pub pending_clip_count: i64,
     pub cover_missing_count: i64,
     pub metadata_match_count: i64,
     pub metadata_enriched_clip_count: i64,
@@ -247,6 +249,7 @@ impl ScanSummary {
             new_clip_count: 0,
             updated_clip_count: 0,
             missing_clip_count: 0,
+            pending_clip_count: 0,
             cover_missing_count: 0,
             metadata_match_count: 0,
             metadata_enriched_clip_count: 0,
@@ -278,10 +281,10 @@ impl ScanSummary {
 }
 
 struct MetadataScanConfig {
-    anchor: Option<PathBuf>,
+    anchors: Vec<PathBuf>,
     allow_external_fallback: bool,
-    account_hint_scope: Option<PathBuf>,
-    use_local_account_hint_scope: bool,
+    account_hint_scopes: Vec<PathBuf>,
+    use_local_account_hint_scopes: bool,
 }
 
 struct ScanBatchInput {
@@ -479,15 +482,27 @@ fn run_scan_batch(
             return finish_cancelled_scan(scan_run, &progress, summary);
         }
         let scan_root_path = scan_root_for_source(&requested_roots, &source_path);
-        let step = scan_one_source(
-            connection,
-            source_path,
-            scan_root_path,
-            None,
-            &mut summary,
-            &mut progress,
-            runtime,
-        )?;
+        let registered_source = registered_recursive_source_for_path(connection, &source_path)?;
+        let step = match registered_source {
+            Some(source) if source.scan_mode == db::ScanMode::RecursiveMp4 => {
+                recursive_mp4::scan_recursive_source(
+                    connection,
+                    source,
+                    &mut summary,
+                    &mut progress,
+                    runtime,
+                )?
+            }
+            _ => scan_one_source(
+                connection,
+                source_path,
+                scan_root_path,
+                None,
+                &mut summary,
+                &mut progress,
+                runtime,
+            )?,
+        };
         outcomes.push(step.outcome);
         if step.cancelled {
             return finish_cancelled_scan(scan_run, &progress, summary);
@@ -536,31 +551,71 @@ fn run_scan_batch(
             return finish_cancelled_scan(scan_run, &progress, summary);
         }
         progress.emit(ScanProgressPhase::Metadata, "正在导入对局元数据");
-        let mut effective_account_hint_scope = metadata_config.account_hint_scope.clone();
-        let metadata_anchor = metadata_config.anchor.clone().or_else(|| {
-            accessible_sources
-                .first()
-                .map(|source| metadata_scan_root_for_source(source))
-        });
-        if let Some(metadata_anchor) = metadata_anchor {
-            let snapshot = collect_metadata_snapshot(
-                &metadata_anchor,
-                metadata_config.allow_external_fallback,
-            );
+        let mut effective_account_hint_scopes = normalize_unique_scan_paths(
+            metadata_config
+                .account_hint_scopes
+                .iter()
+                .map(PathBuf::as_path),
+        );
+        let metadata_anchors =
+            normalize_metadata_scan_anchors(if metadata_config.anchors.is_empty() {
+                normalize_unique_scan_paths(
+                    accessible_sources
+                        .iter()
+                        .map(|source| metadata_scan_root_for_source(source))
+                        .collect::<Vec<_>>()
+                        .iter()
+                        .map(PathBuf::as_path),
+                )
+            } else {
+                normalize_unique_scan_paths(metadata_config.anchors.iter().map(PathBuf::as_path))
+            });
+        let allow_metadata_fallback =
+            metadata_config.allow_external_fallback && metadata_anchors.len() <= 1;
+        let mut wonderful_accounts = Vec::new();
+        let mut wonderful_snapshot_accounts = Vec::new();
+        for metadata_anchor in metadata_anchors {
+            if !metadata_anchor_has_sources(&metadata_anchor, allow_metadata_fallback) {
+                continue;
+            }
+            let snapshot = collect_metadata_snapshot(&metadata_anchor, allow_metadata_fallback);
             if runtime.is_cancelled() {
                 return finish_cancelled_scan(scan_run, &progress, summary);
             }
-            if metadata_config.use_local_account_hint_scope
-                && effective_account_hint_scope.is_none()
-            {
-                effective_account_hint_scope = snapshot.local_account_hint_scope.clone();
+            let local_account_hint_scope = metadata_config
+                .use_local_account_hint_scopes
+                .then(|| snapshot.local_account_hint_scope.clone())
+                .flatten();
+            if let Some(scope) = local_account_hint_scope.as_ref() {
+                push_unique_scan_root(&mut effective_account_hint_scopes, scope.clone());
             }
+            let account_hint_scope = local_account_hint_scope.or_else(|| {
+                effective_account_hint_scopes
+                    .iter()
+                    .filter(|scope| {
+                        path_is_within(&metadata_anchor, scope)
+                            || path_is_within(scope, &metadata_anchor)
+                    })
+                    .max_by_key(|scope| scan_path_key(scope).len())
+                    .cloned()
+            });
             run_metadata_ingest(
                 connection,
                 &mut summary,
                 &snapshot,
-                effective_account_hint_scope.as_deref(),
+                account_hint_scope.as_deref(),
             );
+            wonderful_accounts.extend(snapshot.wonderful_result.accounts.iter().cloned());
+            wonderful_snapshot_accounts
+                .extend(snapshot.wonderful_result.snapshot_accounts.iter().cloned());
+        }
+        if let Err(error) = crate::wonderful_ingest::propagate_latest_wonderful_account_names(
+            connection,
+            &wonderful_accounts,
+            &wonderful_snapshot_accounts,
+        ) {
+            summary.metadata_warning_count += 1;
+            summary.push_error(error);
         }
 
         if runtime.is_cancelled() {
@@ -569,7 +624,7 @@ fn run_scan_batch(
         finalize_scanned_metadata(
             connection,
             &accessible_sources,
-            effective_account_hint_scope.as_deref(),
+            &effective_account_hint_scopes,
             &mut summary,
         )?;
         if runtime.is_cancelled() {
@@ -602,6 +657,30 @@ fn run_scan_batch(
         db::mark_source_dirs_scan_completed(connection, &completed_source_ids)?;
     }
     finish_scan_execution(scan_run, &progress, status, summary)
+}
+
+fn registered_recursive_source_for_path(
+    connection: &Connection,
+    source_path: &Path,
+) -> DbResult<Option<db::SourceDir>> {
+    let source_key = scan_path_key(source_path);
+    let matches = db::list_source_dirs(connection)?
+        .into_iter()
+        .filter(|source| source.scan_mode == db::ScanMode::RecursiveMp4)
+        .filter(|source| {
+            scan_path_key(Path::new(&source.path)) == source_key
+                || scan_path_key(Path::new(&source.scan_root_path)) == source_key
+        })
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [] => Ok(None),
+        [source] => Ok(Some(source.clone())),
+        _ => Err(format!(
+            "Multiple recursive sources resolve to the same scan root: {}",
+            source_path.display()
+        )),
+    }
 }
 
 fn completed_status(summary: &ScanSummary) -> ScanExecutionStatus {
@@ -973,7 +1052,7 @@ fn scan_one_source(
         };
         let clip_count = staged_clips.len();
 
-        for (clip_index, (clip_path, candidate_id)) in staged_clips.iter().enumerate() {
+        for (clip_path, candidate_id) in &staged_clips {
             if runtime.is_cancelled() {
                 return Ok(cancelled_source_step(
                     progress,
@@ -1015,7 +1094,7 @@ fn scan_one_source(
             let modified_at_unix = current.modified_at.parse::<i64>().ok();
             let file_name = current.file_name.clone();
             let selected_metadata = select_video_export_metadata(&parsed_configs, modified_at_unix);
-            let cover_path = select_cover_for_clip(clip_path, &cover_paths, clip_index, clip_count);
+            let cover_path = select_cover_for_clip(clip_path, &cover_paths, clip_count);
             let cover_path_string = cover_path.map(path_to_string);
             let cover_source = if cover_path_string.is_some() {
                 "file"
@@ -1344,13 +1423,16 @@ fn collect_metadata_snapshot(
 fn finalize_scanned_metadata(
     connection: &Connection,
     source_paths: &[PathBuf],
-    account_hint_scope: Option<&Path>,
+    account_hint_scopes: &[PathBuf],
     summary: &mut ScanSummary,
 ) -> DbResult<()> {
     db::clear_invalid_display_metadata(connection)?;
     db::clear_mismatched_match_metadata(connection)?;
     for source_path in source_paths {
-        if account_hint_scope.is_none_or(|scope| !path_is_within(source_path, scope)) {
+        if !account_hint_scopes
+            .iter()
+            .any(|scope| path_is_within(source_path, scope))
+        {
             db::clear_weak_account_name_hints_for_source_root(connection, source_path)?;
         }
     }
@@ -1371,7 +1453,7 @@ fn finalize_scanned_metadata(
         &all_hints,
         EDIT_AGENT_ASSET_WINDOW_SECONDS,
     )?;
-    if let Some(scope) = account_hint_scope {
+    for scope in account_hint_scopes {
         db::propagate_known_account_names(connection, Some(scope))?;
     }
     Ok(())
@@ -1471,6 +1553,27 @@ fn metadata_scan_root_for_source(source_path: &Path) -> PathBuf {
         .to_path_buf()
 }
 
+fn normalize_metadata_scan_anchors(anchors: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut normalized = Vec::new();
+    for anchor in anchors {
+        let (aclos_root, is_structural_anchor) = metadata_aclos_root_for_scan_anchor(&anchor);
+        push_unique_scan_root(
+            &mut normalized,
+            if is_structural_anchor {
+                aclos_root
+            } else {
+                anchor
+            },
+        );
+    }
+    normalized
+}
+
+fn metadata_anchor_has_sources(scan_root: &Path, allow_external_fallback: bool) -> bool {
+    let paths = metadata_source_paths(scan_root, allow_external_fallback);
+    paths.leveldb_dir.is_dir() || paths.logs_dir.is_dir() || paths.wonderful_dir.is_dir()
+}
+
 fn run_metadata_ingest(
     connection: &Connection,
     summary: &mut ScanSummary,
@@ -1497,9 +1600,9 @@ fn run_metadata_ingest(
         },
     ) {
         Ok(ingest_summary) => {
-            summary.metadata_match_count = ingest_summary.matches_upserted as i64;
-            summary.metadata_enriched_clip_count = ingest_summary.enriched_clip_count as i64;
-            summary.metadata_event_count = ingest_summary.events_inserted as i64;
+            summary.metadata_match_count += ingest_summary.matches_upserted as i64;
+            summary.metadata_enriched_clip_count += ingest_summary.enriched_clip_count as i64;
+            summary.metadata_event_count += ingest_summary.events_inserted as i64;
         }
         Err(error) => {
             summary.metadata_warning_count += 1;
@@ -1545,6 +1648,15 @@ fn run_metadata_ingest(
         );
         summary.push_error(warning);
     }
+    // Snapshot nickname fields cover exports whose video events omit PlayerName. Both stores are
+    // ingested before the account-wide resolver below selects the newest timestamped Riot ID.
+    if let Err(error) = crate::wonderful_ingest::ingest_wonderful_snapshots(
+        connection,
+        &wonderful_result.snapshot_accounts,
+    ) {
+        summary.metadata_warning_count += 1;
+        summary.push_error(error);
+    }
     match crate::wonderful_ingest::ingest_wonderful_metadata_with_round_scores(
         connection,
         &wonderful_result.accounts,
@@ -1565,13 +1677,6 @@ fn run_metadata_ingest(
             summary.metadata_warning_count += 1;
             summary.push_error(error);
         }
-    }
-    if let Err(error) = crate::wonderful_ingest::ingest_wonderful_snapshots(
-        connection,
-        &wonderful_result.snapshot_accounts,
-    ) {
-        summary.metadata_warning_count += 1;
-        summary.push_error(error);
     }
 }
 
@@ -1693,40 +1798,33 @@ fn metadata_source_paths(
     scan_root: &Path,
     allow_external_metadata_fallback: bool,
 ) -> MetadataSourcePaths {
-    let is_default_shape = scan_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("aclos-highlight"));
+    let (candidate_aclos_root, is_structural_aclos_anchor) =
+        metadata_aclos_root_for_scan_anchor(scan_root);
 
-    let (fallback_aclos_root, wonderful_aclos_root, account_hint_scope) = if is_default_shape
-        || allow_external_metadata_fallback
-    {
-        let candidate_aclos_root = if is_default_shape {
-            scan_root.parent().map(Path::to_path_buf)
+    let (fallback_aclos_root, wonderful_aclos_root, account_hint_scope) =
+        if is_structural_aclos_anchor || allow_external_metadata_fallback {
+            let default_aclos_root = default_aclos_app_data_dir();
+            let fallback_aclos_root = select_metadata_aclos_root(
+                Some(candidate_aclos_root.clone()),
+                default_aclos_root.clone(),
+            );
+            let account_hint_scope = (scan_path_key(&candidate_aclos_root)
+                == scan_path_key(&fallback_aclos_root))
+            .then(|| scan_root.to_path_buf());
+            let wonderful_aclos_root =
+                select_wonderful_aclos_root(Some(candidate_aclos_root), default_aclos_root);
+            (
+                fallback_aclos_root,
+                wonderful_aclos_root,
+                account_hint_scope,
+            )
         } else {
-            Some(scan_root.to_path_buf())
+            (
+                scan_root.to_path_buf(),
+                scan_root.to_path_buf(),
+                Some(scan_root.to_path_buf()),
+            )
         };
-        let default_aclos_root = default_aclos_app_data_dir();
-        let fallback_aclos_root =
-            select_metadata_aclos_root(candidate_aclos_root.clone(), default_aclos_root.clone());
-        let account_hint_scope = candidate_aclos_root
-            .as_ref()
-            .filter(|candidate| scan_path_key(candidate) == scan_path_key(&fallback_aclos_root))
-            .map(|_| scan_root.to_path_buf());
-        let wonderful_aclos_root =
-            select_wonderful_aclos_root(candidate_aclos_root, default_aclos_root);
-        (
-            fallback_aclos_root,
-            wonderful_aclos_root,
-            account_hint_scope,
-        )
-    } else {
-        (
-            scan_root.to_path_buf(),
-            scan_root.to_path_buf(),
-            Some(scan_root.to_path_buf()),
-        )
-    };
 
     MetadataSourcePaths {
         leveldb_dir: fallback_aclos_root.join("Local Storage").join("leveldb"),
@@ -1734,6 +1832,37 @@ fn metadata_source_paths(
         wonderful_dir: wonderful_aclos_root.join("WonderfulDb"),
         account_hint_scope,
     }
+}
+
+/// Resolves any supported scan entry point back to the ACLOS application-data root that owns
+/// `WonderfulDb`, `logs`, and `Local Storage`. In particular, the source wizard permits selecting
+/// a `wonderfulVideos<openid>` directory directly; treating that directory as the application
+/// root silently falls back to the current machine's database instead of the imported one.
+fn metadata_aclos_root_for_scan_anchor(scan_root: &Path) -> (PathBuf, bool) {
+    let leaf = scan_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+
+    if leaf.eq_ignore_ascii_case("aclos-highlight") {
+        return (scan_root.parent().unwrap_or(scan_root).to_path_buf(), true);
+    }
+    if leaf.to_ascii_lowercase().starts_with("wonderfulvideos") {
+        let Some(parent) = scan_root.parent() else {
+            return (scan_root.to_path_buf(), true);
+        };
+        return if parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("aclos-highlight"))
+        {
+            (parent.parent().unwrap_or(parent).to_path_buf(), true)
+        } else {
+            (parent.to_path_buf(), true)
+        };
+    }
+
+    (scan_root.to_path_buf(), false)
 }
 
 fn select_metadata_aclos_root(
@@ -1886,22 +2015,19 @@ fn find_cover_jpegs(
 fn select_cover_for_clip<'a>(
     clip_path: &Path,
     cover_paths: &'a [PathBuf],
-    clip_index: usize,
     clip_count: usize,
 ) -> Option<&'a Path> {
     let clip_stem = path_file_stem_lower(clip_path)?;
 
     for cover_path in cover_paths {
-        let cover_stem = path_file_stem_lower(cover_path)?;
+        let Some(cover_stem) = path_file_stem_lower(cover_path) else {
+            continue;
+        };
         let cover_key = cover_stem.strip_prefix("cover-").unwrap_or(&cover_stem);
 
         if cover_key == clip_stem {
             return Some(cover_path.as_path());
         }
-    }
-
-    if cover_paths.len() == clip_count {
-        return cover_paths.get(clip_index).map(PathBuf::as_path);
     }
 
     if cover_paths.len() == 1 && clip_count == 1 {
@@ -2069,6 +2195,80 @@ mod tests {
                 && clip.cover_source == "missing"
                 && clip.cover_path.is_none()
                 && clip.status == "available"
+        }));
+    }
+
+    #[test]
+    fn scan_directory_does_not_guess_cover_order_for_multi_video_groups() {
+        let fixture = TestFixture::new("ambiguous-covers");
+        let root = fixture.path();
+        let group = root
+            .join("wonderfulVideos1001")
+            .join("11111111-1111-1111-1111-111111111111");
+        fs::create_dir_all(&group).expect("group should be created");
+        for file_name in [
+            "8f2b9e4c63a747fda66c48df2a61d001.mp4",
+            "b12d72e0fba24ee4ad42c80ac37d1002.mp4",
+            "cover-4-0001.jpeg",
+            "cover-4-0002.jpeg",
+        ] {
+            fs::write(group.join(file_name), file_name.as_bytes())
+                .expect("fixture media should be written");
+        }
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        let summary = crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(summary.new_clip_count, 2);
+        assert_eq!(summary.cover_missing_count, 2);
+        assert_eq!(clips.len(), 2);
+        assert!(clips
+            .iter()
+            .all(|clip| clip.cover_source == "missing" && clip.cover_path.is_none()));
+    }
+
+    #[test]
+    fn scan_directory_preserves_unicode_casefolded_exact_covers_in_multi_video_groups() {
+        let fixture = TestFixture::new("unicode-exact-covers");
+        let root = fixture.path();
+        let group = root
+            .join("wonderfulVideos1001")
+            .join("22222222-2222-2222-2222-222222222222");
+        fs::create_dir_all(&group).expect("group should be created");
+        for file_name in [
+            "ÄCE.mp4",
+            "普通击杀.mp4",
+            "cover-äce.jpeg",
+            "cover-普通击杀.jpeg",
+        ] {
+            fs::write(group.join(file_name), file_name.as_bytes())
+                .expect("fixture media should be written");
+        }
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        let summary = crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(summary.new_clip_count, 2);
+        assert_eq!(summary.cover_missing_count, 0);
+        assert_eq!(clips.len(), 2);
+        assert!(clips.iter().all(|clip| clip.cover_source == "file"));
+        assert!(clips.iter().any(|clip| {
+            clip.file_name == "ÄCE.mp4"
+                && clip
+                    .cover_path
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with("cover-äce.jpeg"))
+        }));
+        assert!(clips.iter().any(|clip| {
+            clip.file_name == "普通击杀.mp4"
+                && clip
+                    .cover_path
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with("cover-普通击杀.jpeg"))
         }));
     }
 
@@ -2654,6 +2854,102 @@ mod tests {
         assert!(clips
             .iter()
             .all(|clip| clip.player_name.as_deref() == Some("PlayerOne#0000")));
+    }
+
+    #[test]
+    fn scan_roots_import_metadata_from_each_external_aclos_root() {
+        let fixture = ScanBatchFixture::new("multiple-external-metadata");
+        let archive_a = fixture.path().join("FriendA");
+        let archive_b = fixture.path().join("FriendB");
+        prepare_empty_metadata_root(&archive_a);
+        prepare_empty_metadata_root(&archive_b);
+        let fixtures = [
+            (&archive_a, "1001", "match-friend-a", "friend-a.mp4"),
+            (&archive_b, "2002", "match-friend-b", "friend-b.mp4"),
+        ];
+        let mut sources = Vec::new();
+        for (archive, openid, match_id, file_name) in fixtures {
+            let source = archive.join(format!("wonderfulVideos{openid}"));
+            let group = source.join(match_id);
+            fs::create_dir_all(&group).expect("external match group should be created");
+            fs::write(group.join(file_name), b"video").expect("external clip should be written");
+            let payload = format!(
+                r#"[{{"battleId":"battle-{openid}","matchId":"{match_id}","kills":12,"deaths":8,"assists":4,"date":"2026-07-01T10:00:00Z"}}]"#
+            );
+            fs::write(
+                archive
+                    .join("Local Storage")
+                    .join("leveldb")
+                    .join("000003.ldb"),
+                leveldb_blob(openid, &payload),
+            )
+            .expect("external LevelDB fixture should be written");
+            sources.push(source);
+        }
+        let connection = fixture.open();
+
+        let summary = crate::scanner::scan_roots(&connection, &sources)
+            .expect("multi-root metadata scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(summary.metadata_match_count, 2);
+        assert_eq!(summary.metadata_enriched_clip_count, 2);
+        assert_eq!(clips.len(), 2);
+        assert!(clips.iter().all(|clip| clip.match_id.is_some()));
+    }
+
+    #[test]
+    fn scan_roots_resolves_same_openid_globally_by_newest_wonderful_timestamp() {
+        let fixture = ScanBatchFixture::new("multiple-roots-same-openid");
+        let openid = "90000000000000000006";
+        let cases = [
+            (
+                "A-New",
+                "match-new",
+                "new-video",
+                "2026-07-04T12:00:00Z",
+                "NewestGlobalName",
+                "2002",
+            ),
+            (
+                "Z-Old",
+                "match-old",
+                "old-video",
+                "2026-07-01T12:00:00Z",
+                "OlderRootName",
+                "1001",
+            ),
+        ];
+        let mut sources = Vec::new();
+        for (archive_name, match_id, video_id, match_time, name, tag) in cases {
+            let archive = fixture.path().join(archive_name);
+            prepare_empty_metadata_root(&archive);
+            let source = archive.join(format!("wonderfulVideos{openid}"));
+            let group = source.join(match_id);
+            fs::create_dir_all(&group).expect("external match group should be created");
+            fs::write(group.join(format!("{video_id}.mp4")), b"video")
+                .expect("external clip should be written");
+            let plaintext = format!(
+                r#"{{"key_wonderful_list_{openid}":[{{"matches_id":"{match_id}","match_startTime":"{match_time}","user_name":"{name}","user_nick_id":"{tag}","videos":[{{"video_id":"{video_id}","video_name":"击杀集锦","video_type":"2","round_clips":[]}}]}}]}}"#,
+            );
+            fs::write(
+                archive.join("WonderfulDb").join(openid),
+                encrypt_wonderful_db_text(openid, &plaintext),
+            )
+            .expect("WonderfulDb account fixture should be written");
+            sources.push(source);
+        }
+        let connection = fixture.open();
+
+        crate::scanner::scan_roots(&connection, &sources)
+            .expect("multi-root WonderfulDb scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert_eq!(clips.len(), 2);
+        assert!(clips.iter().all(|clip| {
+            clip.account_name.as_deref() == Some("NewestGlobalName#2002")
+                && clip.player_name.as_deref() == Some("NewestGlobalName#2002")
+        }));
     }
 
     #[test]
@@ -3333,6 +3629,32 @@ mod tests {
     }
 
     #[test]
+    fn metadata_source_paths_resolve_a_direct_wonderful_videos_selection() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let fixture = TestFixture::new("direct-wonderful-videos-path");
+        let original_appdata = std::env::var_os("APPDATA");
+        let imported_aclos_root = fixture.path().join("Friend Export").join("ACLOS");
+        let direct_source = imported_aclos_root
+            .join("aclos-highlight")
+            .join("wonderfulVideos90000000000000000006");
+        let local_appdata = fixture.path().join("Local AppData");
+        fs::create_dir_all(&direct_source).expect("direct source should be created");
+        fs::create_dir_all(imported_aclos_root.join("WonderfulDb"))
+            .expect("imported WonderfulDb should be created");
+        fs::create_dir_all(local_appdata.join("ACLOS").join("WonderfulDb"))
+            .expect("local WonderfulDb should be created");
+        std::env::set_var("APPDATA", &local_appdata);
+
+        let paths = super::metadata_source_paths(&direct_source, true);
+
+        match original_appdata {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+        assert_eq!(paths.wonderful_dir, imported_aclos_root.join("WonderfulDb"));
+    }
+
+    #[test]
     fn metadata_source_paths_fall_back_to_appdata_for_custom_roots_without_metadata() {
         let _env_guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
         let fixture = TestFixture::new("metadata-paths-custom-root");
@@ -3648,14 +3970,14 @@ mod tests {
     fn wonderful_timeline_warnings_make_the_scan_partial_and_block_freshness() {
         let connection = Connection::open_in_memory().expect("database should open");
         db::initialize_schema(&connection).expect("schema should initialize");
-        let openid = "warning-account";
+        let openid = "90000000000000000009";
         let match_id = "warning-match";
-        let video_path = "D:\\wonderfulVideoswarning-account\\warning-match\\clip.mp4";
+        let video_path = "D:\\wonderfulVideos90000000000000000009\\warning-match\\clip.mp4";
         let source = db::upsert_source_dir(
             &connection,
             db::SourceDirInput {
-                path: "D:\\wonderfulVideoswarning-account",
-                name: "wonderfulVideoswarning-account",
+                path: "D:\\wonderfulVideos90000000000000000009",
+                name: "wonderfulVideos90000000000000000009",
             },
         )
         .expect("source should seed");

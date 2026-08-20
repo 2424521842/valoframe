@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   getLibraryFacets: vi.fn(),
   listClipPage: vi.fn(),
   listClips: vi.fn(),
+  listPendingManualClips: vi.fn(),
   listSources: vi.fn(),
   listTags: vi.fn(),
   setClipFavorite: vi.fn(),
@@ -36,6 +37,7 @@ vi.mock("../../src/api/backend", async (importOriginal) => {
     getLibraryFacets: mocks.getLibraryFacets,
     listClipPage: mocks.listClipPage,
     listClips: mocks.listClips,
+    listPendingManualClips: mocks.listPendingManualClips,
     listSources: mocks.listSources,
     listTags: mocks.listTags,
     setClipFavorite: mocks.setClipFavorite,
@@ -71,6 +73,7 @@ describe("production paginated list and on-demand detail flow", () => {
     });
     mocks.listSources.mockResolvedValue([]);
     mocks.listTags.mockResolvedValue([]);
+    mocks.listPendingManualClips.mockResolvedValue([]);
     mocks.getLibraryFacets.mockResolvedValue(libraryFacets({ activeCount: 2, totalCount: 2 }));
     mocks.listClipPage.mockResolvedValue(page([clipA, clipB], 2));
     mocks.getClipDetail.mockImplementation(async (clipId: string) =>

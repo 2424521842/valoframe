@@ -12,6 +12,7 @@ use std::{
 
 use rusqlite::{backup::Backup, params, Connection, OpenFlags};
 use tauri::{AppHandle, Manager};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime, PrimitiveDateTime};
 
 pub use crate::file_identity::StableFileIdentity;
 pub use migrations::initialize_schema;
@@ -22,12 +23,15 @@ pub use models::{
     ClipDetail, ClipEvent, ClipEventInput, ClipGroup, ClipGroupInput, ClipInput, ClipListQuery,
     ClipMetadataInput, ClipPage, ClipReviewMutationResult, ClipReviewState, ClipSaveOutcome,
     ClipSegmentInput, ClipSort, ClipSummary, FavoriteFilter, HighlightFilter, LibraryAccountFacet,
-    LibraryFacetValue, LibraryFacets, LibrarySourceFacet, LibraryTagFacet, ReviewClipPage,
-    ReviewDecision, ReviewQueueQuery, SavedClip, ScanMode, Source, SourceDir, SourceDirInput,
-    SourceKind, SourceProfileInput, Tag, ThumbnailCacheRef, ThumbnailEnsureResult, ThumbnailJob,
-    ThumbnailQueueStatus, ThumbnailReconcileResult, ThumbnailStatus,
+    LibraryFacetValue, LibraryFacets, LibrarySourceFacet, LibraryTagFacet, ManualClipImportInput,
+    PendingManualClip, ReviewClipPage, ReviewDecision, ReviewQueueQuery, SavedClip, ScanMode,
+    Source, SourceDir, SourceDirInput, SourceKind, SourceProfileInput, Tag, ThumbnailCacheRef,
+    ThumbnailEnsureResult, ThumbnailJob, ThumbnailQueueStatus, ThumbnailReconcileResult,
+    ThumbnailStatus,
 };
-pub(crate) use models::{ClipFileTarget, ClipMediaPaths};
+pub(crate) use models::{
+    ClipFileTarget, ClipMediaPaths, FeedbackClipSnapshot, FeedbackSiblingClip,
+};
 #[cfg(test)]
 use repositories::clips::empty_batch_clip_mutation_result;
 pub use repositories::clips::{
@@ -37,7 +41,10 @@ pub use repositories::clips::{
     set_clips_trashed, update_clip_favorite, update_clip_note, update_clip_trashed,
 };
 use repositories::clips::{find_clip_by_normalized_path, find_optional_clip_by_normalized_path};
-pub(crate) use repositories::clips::{find_clip_file_target_by_id, find_clip_media_paths_by_id};
+pub(crate) use repositories::clips::{
+    find_clip_file_target_by_id, find_clip_media_paths_by_id, find_feedback_clip_snapshot_by_id,
+    list_feedback_sibling_clips,
+};
 pub(crate) use repositories::deletions::{
     delete_clip_from_index_guarded, delete_clip_permanently, recover_pending_clip_deletions,
     set_clips_trashed_guarded, ClipDeleteItemOutcome, ClipIndexRemovalOutcome,
@@ -45,6 +52,11 @@ pub(crate) use repositories::deletions::{
 pub(in crate::db) use repositories::library::{attach_clip_events, map_clip, CLIP_SELECT_SQL};
 pub use repositories::library::{
     get_library_facets, list_clip_events_for_clip, list_clip_page, list_clips,
+};
+pub use repositories::pending::{
+    delete_missing_pending_manual_clips, find_pending_manual_clip_source_id_by_normalized_path,
+    import_pending_manual_clip, list_pending_manual_clips, set_pending_manual_clip_ignored,
+    upsert_pending_manual_clip, PendingManualClipInput,
 };
 pub(crate) use repositories::reconnect::{
     apply_planned_scan_reconnect, begin_scan_reconnect_plan, clear_scan_reconnect_plan,
@@ -445,6 +457,14 @@ fn upsert_scanned_clip_with_identity_policy(
     let file_name = require_non_empty(input.file_name, "clip file name")?;
     let cover_source = require_non_empty(input.cover_source, "cover source")?;
     let normalized_path = normalize_path(&video_path);
+    if let Some(owner_source_id) =
+        find_pending_manual_clip_source_id_by_normalized_path(connection, &normalized_path)?
+    {
+        return Err(format!(
+            "Skipped MP4 reserved for manual NVIDIA import by source {owner_source_id}: {}",
+            input.video_path
+        ));
+    }
     let source_relative_dir = source_relative_directory_for_clip(connection, &input, &video_path)?;
     let extension = extension_from_file_name(file_name);
     let normalized_cover_path = normalize_optional(input.cover_path).map(stable_path_for_storage);
@@ -922,10 +942,229 @@ pub fn clear_invalid_display_metadata(connection: &Connection) -> DbResult<usize
     Ok(clip_changes + untagged_clip_changes + match_changes + untagged_match_changes)
 }
 
+#[derive(Debug, Clone)]
+struct PersistedAccountNameCandidate {
+    account_name: String,
+    observed_at: Option<String>,
+    source_priority: u8,
+    row_order: i64,
+}
+
+/// Repairs existing libraries at controlled startup without requiring the user to rescan every
+/// imported source. Older builds persisted Wonderful snapshot Riot IDs but did not propagate them
+/// account-wide; a snapshot only wins when it is newer than the latest named match record.
+#[cfg(test)]
+fn repair_persisted_wonderful_account_names(connection: &Connection) -> DbResult<usize> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| readable_error("starting persisted account-name repair", error))?;
+    let changed = repair_persisted_wonderful_account_names_in_transaction(&transaction)?;
+    transaction
+        .commit()
+        .map_err(|error| readable_error("finishing persisted account-name repair", error))?;
+    Ok(changed)
+}
+
+pub(in crate::db) fn repair_persisted_wonderful_account_names_in_transaction(
+    connection: &Connection,
+) -> DbResult<usize> {
+    let latest_snapshots = persisted_account_name_candidates(
+        connection,
+        "
+        SELECT
+            match_snapshots.account_id,
+            match_snapshots.account_name,
+            COALESCE(NULLIF(TRIM(match_snapshots.captured_at), ''), matches.started_at),
+            match_snapshots.id
+        FROM match_snapshots
+        LEFT JOIN matches ON matches.id = match_snapshots.match_id
+        WHERE NULLIF(TRIM(match_snapshots.account_name), '') IS NOT NULL
+        ",
+        3,
+        "snapshot account names",
+    )?;
+    let mut latest_by_account = persisted_account_name_candidates(
+        connection,
+        "
+        SELECT account_id, player_name, started_at, id
+        FROM matches
+        WHERE NULLIF(TRIM(account_id), '') IS NOT NULL
+          AND NULLIF(TRIM(player_name), '') IS NOT NULL
+        ",
+        2,
+        "match account names",
+    )?;
+    for (account_id, snapshot) in latest_snapshots {
+        if latest_by_account.get(&account_id).is_none_or(|current| {
+            persisted_account_name_candidate_ordering(&snapshot, current).is_gt()
+        }) {
+            latest_by_account.insert(account_id, snapshot);
+        }
+    }
+
+    let mut hints = latest_by_account
+        .into_iter()
+        .map(|(account_id, candidate)| AccountNameHint {
+            account_id,
+            account_name: candidate.account_name,
+        })
+        .collect::<Vec<_>>();
+    hints.sort_by(|left, right| left.account_id.cmp(&right.account_id));
+    propagate_authoritative_account_name_hints(connection, &hints, None)
+}
+
+fn persisted_account_name_candidates(
+    connection: &Connection,
+    sql: &str,
+    source_priority: u8,
+    label: &str,
+) -> DbResult<HashMap<String, PersistedAccountNameCandidate>> {
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| readable_error(&format!("preparing {label}"), error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|error| readable_error(&format!("querying {label}"), error))?;
+    let mut latest = HashMap::new();
+    for row in rows {
+        let (account_id, account_name, observed_at, row_order) =
+            row.map_err(|error| readable_error(&format!("reading {label}"), error))?;
+        let account_id = account_id.trim();
+        let Some(account_name) = valid_tagged_account_name(&account_name) else {
+            continue;
+        };
+        if !looks_like_source_account_id(account_id) {
+            continue;
+        }
+        let candidate = PersistedAccountNameCandidate {
+            account_name: account_name.to_string(),
+            observed_at: observed_at.and_then(|value| {
+                let value = value.trim().to_string();
+                (!value.is_empty()).then_some(value)
+            }),
+            source_priority,
+            row_order,
+        };
+        if latest.get(account_id).is_none_or(|current| {
+            persisted_account_name_candidate_ordering(&candidate, current).is_gt()
+        }) {
+            latest.insert(account_id.to_string(), candidate);
+        }
+    }
+    Ok(latest)
+}
+
+fn persisted_account_name_candidate_ordering(
+    left: &PersistedAccountNameCandidate,
+    right: &PersistedAccountNameCandidate,
+) -> Ordering {
+    compare_account_name_observed_at(left.observed_at.as_deref(), right.observed_at.as_deref())
+        .then_with(|| left.source_priority.cmp(&right.source_priority))
+        .then_with(|| left.row_order.cmp(&right.row_order))
+}
+
+pub(crate) fn compare_account_name_observed_at(
+    left: Option<&str>,
+    right: Option<&str>,
+) -> Ordering {
+    parsed_account_name_observed_at(left).cmp(&parsed_account_name_observed_at(right))
+}
+
+fn parsed_account_name_observed_at(value: Option<&str>) -> Option<i128> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Ok(timestamp) = value.parse::<i128>() {
+        let absolute = timestamp.unsigned_abs();
+        let multiplier = if absolute >= 100_000_000_000_000_000 {
+            1
+        } else if absolute >= 100_000_000_000_000 {
+            1_000
+        } else if absolute >= 100_000_000_000 {
+            1_000_000
+        } else {
+            1_000_000_000
+        };
+        return timestamp.checked_mul(multiplier);
+    }
+
+    if let Ok(timestamp) = OffsetDateTime::parse(value, &Rfc3339) {
+        return Some(timestamp.unix_timestamp_nanos());
+    }
+
+    const NAIVE_FORMATS: [&str; 4] = [
+        "[year]-[month]-[day] [hour]:[minute]:[second]",
+        "[year]-[month]-[day]T[hour]:[minute]:[second]",
+        "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond]",
+        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond]",
+    ];
+    NAIVE_FORMATS.iter().find_map(|description| {
+        let format = time::format_description::parse_borrowed::<3>(description).ok()?;
+        PrimitiveDateTime::parse(value, &format)
+            .ok()
+            .map(|timestamp| timestamp.assume_utc().unix_timestamp_nanos())
+    })
+}
+
 pub fn clear_mismatched_match_metadata(connection: &Connection) -> DbResult<usize> {
-    connection
-        .execute(
-            "
+    let mismatched_clip_ids = {
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT
+                    clip_metadata.clip_id,
+                    source_dirs.name,
+                    source_dirs.path,
+                    matches.account_id
+                FROM clip_metadata
+                JOIN clips ON clips.id = clip_metadata.clip_id
+                JOIN source_dirs ON source_dirs.id = clips.source_dir_id
+                JOIN matches ON matches.game_id = clip_metadata.match_id
+                WHERE clip_metadata.metadata_status = 'enriched'
+                    AND COALESCE(clip_metadata.metadata_source, '') <> 'wonderful_db'
+                ",
+            )
+            .map_err(|error| readable_error("preparing mismatched match metadata", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(|error| readable_error("querying mismatched match metadata", error))?;
+        let mut clip_ids = Vec::new();
+        for row in rows {
+            let (clip_id, source_name, source_path, match_account_id) =
+                row.map_err(|error| readable_error("reading mismatched match metadata", error))?;
+            let source_account_id = source_openid(&source_name, &source_path);
+            let matches_source = match_account_id
+                .as_deref()
+                .and_then(|value| normalize_optional(Some(value)))
+                .is_some_and(|account_id| source_account_id.as_deref() == Some(account_id));
+            if !matches_source {
+                clip_ids.push(clip_id);
+            }
+        }
+        clip_ids
+    };
+
+    let mut changed = 0usize;
+    for clip_id in mismatched_clip_ids {
+        changed += connection
+            .execute(
+                "
             UPDATE clip_metadata
             SET metadata_status = 'not_found',
                 account_name = NULL,
@@ -940,29 +1179,13 @@ pub fn clear_mismatched_match_metadata(connection: &Connection) -> DbResult<usiz
                 weapon_name = NULL,
                 kill_count = NULL,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE metadata_status = 'enriched'
-                AND COALESCE(metadata_source, '') <> 'wonderful_db'
-                AND EXISTS (
-                    SELECT 1
-                    FROM clips
-                    JOIN source_dirs
-                        ON source_dirs.id = clips.source_dir_id
-                    JOIN matches
-                        ON matches.game_id = clip_metadata.match_id
-                    WHERE clips.id = clip_metadata.clip_id
-                        AND (
-                            matches.account_id IS NULL
-                            OR TRIM(matches.account_id) = ''
-                            OR matches.account_id <> SUBSTR(
-                                source_dirs.name,
-                                LENGTH('wonderfulVideos') + 1
-                            )
-                        )
-                )
+            WHERE clip_id = ?1
             ",
-            [],
-        )
-        .map_err(|error| readable_error("clearing mismatched match metadata", error))
+                params![clip_id],
+            )
+            .map_err(|error| readable_error("clearing mismatched match metadata", error))?;
+    }
+    Ok(changed)
 }
 
 pub fn clear_weak_account_name_hints_for_source_root(
@@ -1128,110 +1351,58 @@ pub fn propagate_known_account_names(
     connection: &Connection,
     source_root: Option<&Path>,
 ) -> DbResult<usize> {
-    let root_patterns = source_root_match_patterns(source_root);
-    let root_filter = if root_patterns.is_some() {
-        "
-                AND EXISTS (
-                    SELECT 1
-                    FROM clips
-                    JOIN source_dirs
-                        ON source_dirs.id = clips.source_dir_id
-                    WHERE clips.id = clip_metadata.clip_id
-                        AND (
-                            LOWER(REPLACE(source_dirs.path, '\\', '/')) = ?1
-                            OR LOWER(REPLACE(source_dirs.path, '\\', '/')) LIKE ?2 ESCAPE '!'
-                        )
-                )
-        "
-    } else {
-        ""
+    let known_accounts = {
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT account_id, MIN(player_name)
+                FROM matches
+                WHERE account_id IS NOT NULL
+                    AND TRIM(account_id) <> ''
+                    AND player_name LIKE '%#%'
+                GROUP BY account_id
+                HAVING COUNT(DISTINCT player_name) = 1
+                ORDER BY account_id
+                ",
+            )
+            .map_err(|error| readable_error("preparing known account names", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| readable_error("querying known account names", error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| readable_error("reading known account names", error))?
     };
-    let sql = format!(
-        "
-            UPDATE clip_metadata
-            SET account_name = (
-                    SELECT known_accounts.account_name
-                    FROM clips
-                    JOIN source_dirs
-                        ON source_dirs.id = clips.source_dir_id
-                    JOIN (
-                        SELECT account_id, MIN(player_name) AS account_name
-                        FROM matches
-                        WHERE account_id IS NOT NULL
-                            AND TRIM(account_id) <> ''
-                            AND player_name LIKE '%#%'
-                        GROUP BY account_id
-                        HAVING COUNT(DISTINCT player_name) = 1
-                    ) AS known_accounts
-                        ON known_accounts.account_id = SUBSTR(
-                            source_dirs.name,
-                            LENGTH('wonderfulVideos') + 1
-                        )
-                    WHERE clips.id = clip_metadata.clip_id
-                    LIMIT 1
-                ),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE EXISTS (
-                    SELECT 1
-                    FROM clips
-                    JOIN source_dirs
-                        ON source_dirs.id = clips.source_dir_id
-                    JOIN (
-                        SELECT account_id, MIN(player_name) AS account_name
-                        FROM matches
-                        WHERE account_id IS NOT NULL
-                            AND TRIM(account_id) <> ''
-                            AND player_name LIKE '%#%'
-                        GROUP BY account_id
-                        HAVING COUNT(DISTINCT player_name) = 1
-                    ) AS known_accounts
-                        ON known_accounts.account_id = SUBSTR(
-                            source_dirs.name,
-                            LENGTH('wonderfulVideos') + 1
-                        )
-                    WHERE clips.id = clip_metadata.clip_id
-                )
-                {root_filter}
-                AND (
-                    COALESCE(metadata_source, '') <> 'wonderful_db'
-                    OR account_name IS NULL
-                    OR TRIM(account_name) = ''
-                )
-                AND (
-                    account_name IS NULL
-                    OR account_name <> (
-                        SELECT known_accounts.account_name
-                        FROM clips
-                        JOIN source_dirs
-                            ON source_dirs.id = clips.source_dir_id
-                        JOIN (
-                            SELECT account_id, MIN(player_name) AS account_name
-                            FROM matches
-                            WHERE account_id IS NOT NULL
-                                AND TRIM(account_id) <> ''
-                                AND player_name LIKE '%#%'
-                            GROUP BY account_id
-                            HAVING COUNT(DISTINCT player_name) = 1
-                        ) AS known_accounts
-                            ON known_accounts.account_id = SUBSTR(
-                                source_dirs.name,
-                                LENGTH('wonderfulVideos') + 1
-                            )
-                        WHERE clips.id = clip_metadata.clip_id
-                        LIMIT 1
-                    )
-                )
-            "
-    );
 
-    match root_patterns {
-        Some((root_exact, root_children)) => connection
-            .execute(&sql, params![root_exact, root_children])
-            .map_err(|error| readable_error("propagating known account names", error)),
-        None => connection
-            .execute(&sql, [])
-            .map_err(|error| readable_error("propagating known account names", error)),
+    let mut changed = 0usize;
+    for (account_id, account_name) in known_accounts {
+        for source_dir_id in source_dir_ids_for_account(connection, &account_id, source_root)? {
+            changed += connection
+                .execute(
+                    "
+                    UPDATE clip_metadata
+                    SET account_name = ?2,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE clip_id IN (
+                            SELECT clips.id
+                            FROM clips
+                            WHERE clips.source_dir_id = ?1
+                        )
+                        AND (
+                            COALESCE(metadata_source, '') <> 'wonderful_db'
+                            OR account_name IS NULL
+                            OR TRIM(account_name) = ''
+                        )
+                        AND account_name IS NOT ?2
+                    ",
+                    params![source_dir_id, account_name],
+                )
+                .map_err(|error| readable_error("propagating known account names", error))?;
+        }
     }
+
+    Ok(changed)
 }
 
 pub fn propagate_account_name_hints(
@@ -1259,8 +1430,10 @@ fn propagate_account_name_hints_with_authority(
     let mut names_by_account = HashMap::new();
     for hint in hints {
         let account_id = hint.account_id.trim();
-        let account_name = hint.account_name.trim();
-        if !looks_like_source_account_id(account_id) || !account_name.contains('#') {
+        let Some(account_name) = valid_tagged_account_name(&hint.account_name) else {
+            continue;
+        };
+        if !looks_like_source_account_id(account_id) {
             continue;
         }
 
@@ -1270,9 +1443,7 @@ fn propagate_account_name_hints_with_authority(
     }
 
     let mut changed = 0usize;
-    let root_patterns = source_root_match_patterns(source_root);
     for (account_id, account_name) in names_by_account {
-        let source_dir_name = format!("wonderfulVideos{account_id}");
         changed += connection
             .execute(
                 "
@@ -1292,31 +1463,8 @@ fn propagate_account_name_hints_with_authority(
             )
             .map_err(|error| readable_error("repairing match account names from hints", error))?;
 
-        let update_count = if let Some((root_exact, root_children)) = root_patterns.as_ref() {
-            connection
-                .execute(
-                    "
-                    UPDATE clip_metadata
-                    SET account_name = ?2,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE (account_name IS NULL OR account_name <> ?2)
-                        AND clip_id IN (
-                            SELECT clips.id
-                            FROM clips
-                            JOIN source_dirs
-                                ON source_dirs.id = clips.source_dir_id
-                            WHERE source_dirs.name = ?1
-                                AND (
-                                    LOWER(REPLACE(source_dirs.path, '\\', '/')) = ?3
-                                    OR LOWER(REPLACE(source_dirs.path, '\\', '/')) LIKE ?4 ESCAPE '!'
-                                )
-                        )
-                    ",
-                    params![source_dir_name, account_name, root_exact, root_children],
-                )
-                .map_err(|error| readable_error("propagating account name hints", error))?
-        } else {
-            connection
+        for source_dir_id in source_dir_ids_for_account(connection, &account_id, source_root)? {
+            changed += connection
                 .execute(
                     "
                 UPDATE clip_metadata
@@ -1326,20 +1474,13 @@ fn propagate_account_name_hints_with_authority(
                     AND clip_id IN (
                         SELECT clips.id
                         FROM clips
-                        JOIN source_dirs
-                            ON source_dirs.id = clips.source_dir_id
-                        WHERE source_dirs.name = ?1
+                        WHERE clips.source_dir_id = ?1
                     )
                 ",
-                    params![source_dir_name, account_name],
+                    params![source_dir_id, account_name],
                 )
-                .map_err(|error| readable_error("propagating account name hints", error))?
-        };
-        changed += update_count;
-
-        let player_update_count = if let Some((root_exact, root_children)) = root_patterns.as_ref()
-        {
-            connection
+                .map_err(|error| readable_error("propagating account name hints", error))?;
+            changed += connection
                 .execute(
                     "
                     UPDATE clip_metadata
@@ -1347,7 +1488,7 @@ fn propagate_account_name_hints_with_authority(
                         updated_at = CURRENT_TIMESTAMP
                     WHERE player_name IS NOT ?2
                         AND (
-                            ?5 = 1
+                            ?3 = 1
                             OR player_name IS NULL
                             OR TRIM(player_name) = ''
                             OR player_name LIKE '%#%'
@@ -1355,54 +1496,58 @@ fn propagate_account_name_hints_with_authority(
                         AND clip_id IN (
                             SELECT clips.id
                             FROM clips
-                            JOIN source_dirs
-                                ON source_dirs.id = clips.source_dir_id
-                            WHERE source_dirs.name = ?1
-                                AND (
-                                    LOWER(REPLACE(source_dirs.path, '\\', '/')) = ?3
-                                    OR LOWER(REPLACE(source_dirs.path, '\\', '/')) LIKE ?4 ESCAPE '!'
-                                )
+                            WHERE clips.source_dir_id = ?1
                         )
                     ",
-                    params![
-                        source_dir_name,
-                        account_name,
-                        root_exact,
-                        root_children,
-                        i64::from(authoritative)
-                    ],
+                    params![source_dir_id, account_name, i64::from(authoritative)],
                 )
-                .map_err(|error| readable_error("repairing clip player names from hints", error))?
-        } else {
-            connection
-                .execute(
-                    "
-                UPDATE clip_metadata
-                SET player_name = ?2,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE player_name IS NOT ?2
-                    AND (
-                        ?3 = 1
-                        OR player_name IS NULL
-                        OR TRIM(player_name) = ''
-                        OR player_name LIKE '%#%'
-                        )
-                    AND clip_id IN (
-                            SELECT clips.id
-                            FROM clips
-                            JOIN source_dirs
-                                ON source_dirs.id = clips.source_dir_id
-                            WHERE source_dirs.name = ?1
-                        )
-                    ",
-                    params![source_dir_name, account_name, i64::from(authoritative)],
-                )
-                .map_err(|error| readable_error("repairing clip player names from hints", error))?
-        };
-        changed += player_update_count;
+                .map_err(|error| readable_error("repairing clip player names from hints", error))?;
+        }
     }
 
     Ok(changed)
+}
+
+fn source_dir_ids_for_account(
+    connection: &Connection,
+    account_id: &str,
+    source_root: Option<&Path>,
+) -> DbResult<Vec<i64>> {
+    let mut statement = connection
+        .prepare("SELECT id, name, path FROM source_dirs ORDER BY id")
+        .map_err(|error| readable_error("preparing account source lookup", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| readable_error("querying account sources", error))?;
+    let normalized_root = source_root.map(|root| {
+        normalize_path(root.to_string_lossy().as_ref())
+            .trim_end_matches('/')
+            .to_string()
+    });
+    let mut source_ids = Vec::new();
+    for row in rows {
+        let (source_id, source_name, source_path) =
+            row.map_err(|error| readable_error("reading account source", error))?;
+        if source_openid(&source_name, &source_path).as_deref() != Some(account_id) {
+            continue;
+        }
+        if let Some(root) = normalized_root.as_deref() {
+            let path = normalize_path(&source_path)
+                .trim_end_matches('/')
+                .to_string();
+            if path != root && !path.starts_with(&format!("{root}/")) {
+                continue;
+            }
+        }
+        source_ids.push(source_id);
+    }
+    Ok(source_ids)
 }
 
 fn scanned_clip_changed(
@@ -1461,6 +1606,73 @@ fn looks_like_source_account_id(value: &str) -> bool {
     let trimmed = value.trim();
     (10..=24).contains(&trimmed.len())
         && trimmed.chars().all(|character| character.is_ascii_digit())
+}
+
+/// Accepts only displayable Riot IDs and rejects values that WonderfulDb can place in nickname
+/// fields even though they are paths, asset identifiers, OpenIDs, or serialization sentinels.
+pub(crate) fn valid_tagged_account_name(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    let normalized = trimmed.to_ascii_lowercase();
+    if trimmed.is_empty()
+        || matches!(normalized.as_str(), "undefined" | "null")
+        || normalized.starts_with("wonderfulvideos")
+        || normalized.starts_with("http://")
+        || normalized.starts_with("https://")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+    {
+        return None;
+    }
+
+    let mut parts = trimmed.split('#');
+    let name = parts.next()?.trim();
+    let tag = parts.next()?.trim();
+    let normalized_name = name.to_ascii_lowercase();
+    if name.is_empty()
+        || tag.is_empty()
+        || parts.next().is_some()
+        || matches!(normalized_name.as_str(), "undefined" | "null")
+        || normalized_name.starts_with("wonderfulvideos")
+        || (name.len() >= 10 && name.bytes().all(|byte| byte.is_ascii_digit()))
+        || normalized_name.contains("playercards")
+        || [".png", ".jpg", ".jpeg", ".webp", ".svg"]
+            .iter()
+            .any(|extension| normalized_name.ends_with(extension))
+    {
+        return None;
+    }
+
+    Some(trimmed)
+}
+
+/// Extracts the stable ACLOS OpenID from the structural source directory leaf.
+///
+/// `source_dirs.name` is user-facing and may be renamed (for example to "排位素材"), so identity
+/// code must prefer the persisted path instead of assuming the display label is still named
+/// `wonderfulVideos<openid>`. The label remains a legacy fallback for pre-profile databases.
+pub(crate) fn source_openid(source_name: &str, source_path: &str) -> Option<String> {
+    openid_from_source_label(source_path).or_else(|| openid_from_source_label(source_name))
+}
+
+fn openid_from_source_label(value: &str) -> Option<String> {
+    const PREFIX: &str = "wonderfulVideos";
+
+    let leaf = value
+        .trim()
+        .trim_end_matches(['\\', '/'])
+        .rsplit(['\\', '/'])
+        .next()?;
+    let prefix = leaf.get(..PREFIX.len())?;
+    let openid = leaf.get(PREFIX.len()..)?;
+
+    if prefix.eq_ignore_ascii_case(PREFIX)
+        && !openid.is_empty()
+        && openid.chars().all(|character| character.is_ascii_digit())
+    {
+        Some(openid.to_string())
+    } else {
+        None
+    }
 }
 
 pub fn normalize_path(path: &str) -> String {
@@ -1708,6 +1920,145 @@ mod tests {
     }
 
     #[test]
+    fn v18_name_repair_is_backed_up_and_runs_only_once() {
+        let root = unique_database_temp_dir();
+        fs::create_dir_all(&root).expect("database fixture root should be created");
+        let database_path = root.join("v17-account-names.sqlite3");
+        let connection = Connection::open(&database_path).expect("fixture database should open");
+        initialize_schema(&connection).expect("current schema fixture should initialize");
+        let clip_id = seed_v17_account_name_repair_fixture(&connection, "90000000000000000008");
+        connection
+            .pragma_update(None, "user_version", 17)
+            .expect("fixture should emulate schema v17");
+        drop(connection);
+
+        migrate_database(&database_path).expect("v17 name repair should migrate");
+
+        let connection = open_database(&database_path).expect("migrated database should open");
+        let repaired_names: (Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT account_name, player_name FROM clip_metadata WHERE clip_id = ?1",
+                params![clip_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("repaired clip names should load");
+        assert_eq!(schema_user_version(&connection), 18);
+        assert_eq!(
+            repaired_names,
+            (
+                Some("MigratedSnapshot#2002".to_string()),
+                Some("MigratedSnapshot#2002".to_string()),
+            ),
+        );
+        connection
+            .execute(
+                "UPDATE clip_metadata SET account_name = 'ManualAfterMigration#9999', player_name = 'ManualAfterMigration#9999' WHERE clip_id = ?1",
+                params![clip_id],
+            )
+            .expect("post-migration edit should seed");
+        drop(connection);
+
+        migrate_database(&database_path).expect("v18 reopen should be idempotent");
+        let connection = open_database_read_only(&database_path)
+            .expect("idempotently reopened database should be readable");
+        let reopened_name: Option<String> = connection
+            .query_row(
+                "SELECT account_name FROM clip_metadata WHERE clip_id = ?1",
+                params![clip_id],
+                |row| row.get(0),
+            )
+            .expect("post-migration name should load");
+        assert_eq!(
+            reopened_name.as_deref(),
+            Some("ManualAfterMigration#9999"),
+            "the v18 data repair must not rerun on every startup",
+        );
+
+        let backups = fs::read_dir(root.join("backups"))
+            .expect("v17 backup directory should exist")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1, "v18 reopen must not add another backup");
+        assert!(backups[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains("pre-v17-to-v18")));
+        let backup = open_database_read_only(&backups[0]).expect("v17 backup should be readable");
+        assert_eq!(schema_user_version(&backup), 17);
+        let backed_up_name: Option<String> = backup
+            .query_row(
+                "SELECT account_name FROM clip_metadata WHERE clip_id = ?1",
+                params![clip_id],
+                |row| row.get(0),
+            )
+            .expect("backed-up clip name should load");
+        assert_eq!(backed_up_name.as_deref(), Some("StaleBeforeMigration#0001"));
+
+        drop(backup);
+        drop(connection);
+        fs::remove_dir_all(root).expect("database fixture should be removed");
+    }
+
+    #[test]
+    fn failed_v18_name_repair_rolls_back_the_repair_and_schema_version() {
+        let root = unique_database_temp_dir();
+        fs::create_dir_all(&root).expect("database fixture root should be created");
+        let database_path = root.join("v17-account-name-failure.sqlite3");
+        let connection = Connection::open(&database_path).expect("fixture database should open");
+        initialize_schema(&connection).expect("current schema fixture should initialize");
+        let clip_id = seed_v17_account_name_repair_fixture(&connection, "90000000000000000009");
+        connection
+            .execute_batch(
+                "
+                CREATE TRIGGER fail_v18_account_name_repair
+                BEFORE UPDATE OF account_name ON clip_metadata
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced v18 account repair failure');
+                END;
+                PRAGMA user_version = 17;
+                ",
+            )
+            .expect("failure fixture should seed");
+        drop(connection);
+
+        let error = migrate_database(&database_path)
+            .expect_err("a failed account repair must fail the migration");
+        assert!(error.contains("forced v18 account repair failure"));
+
+        let connection = open_database_read_only(&database_path)
+            .expect("rolled-back database should remain readable");
+        assert_eq!(schema_user_version(&connection), 17);
+        let names: (Option<String>, Option<String>, Option<String>) = connection
+            .query_row(
+                "
+                SELECT
+                    clip_metadata.account_name,
+                    clip_metadata.player_name,
+                    matches.player_name
+                FROM clip_metadata
+                JOIN matches ON matches.game_id = 'migration-match'
+                WHERE clip_metadata.clip_id = ?1
+                ",
+                params![clip_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("rolled-back names should load");
+        assert_eq!(
+            names,
+            (
+                Some("StaleBeforeMigration#0001".to_string()),
+                Some("StaleBeforeMigration#0001".to_string()),
+                Some("OlderMatch#1001".to_string()),
+            ),
+            "repair writes before the failure must roll back with user_version",
+        );
+
+        drop(connection);
+        fs::remove_dir_all(root).expect("database fixture should be removed");
+    }
+
+    #[test]
     fn migrate_database_upgrades_an_existing_file_without_losing_user_state() {
         let root = unique_database_temp_dir();
         fs::create_dir_all(&root).expect("database fixture root should be created");
@@ -1747,6 +2098,73 @@ mod tests {
             .query_row("SELECT note FROM clips WHERE id = 42", [], |row| row.get(0))
             .expect("user state should be present in the pre-migration backup");
         assert_eq!(backup_note, "keep this note");
+
+        drop(backup);
+        drop(connection);
+        fs::remove_dir_all(root).expect("database fixture should be removed");
+    }
+
+    #[test]
+    fn migrate_database_upgrades_v16_with_nvidia_pending_contract_and_backup() {
+        let root = unique_database_temp_dir();
+        fs::create_dir_all(&root).expect("database fixture root should be created");
+        let database_path = root.join("v16.sqlite3");
+        let connection = Connection::open(&database_path).expect("v16 database should open");
+        initialize_schema(&connection).expect("current schema fixture should initialize");
+        connection
+            .execute_batch(
+                "
+                DROP TRIGGER prevent_clip_pending_path_on_insert;
+                DROP TRIGGER prevent_clip_pending_path_on_update;
+                DROP TRIGGER prevent_pending_indexed_path_on_insert;
+                DROP TRIGGER prevent_pending_indexed_path_on_update;
+                DROP TABLE pending_manual_clips;
+                ALTER TABLE scan_runs DROP COLUMN pending_clip_count;
+                PRAGMA user_version = 16;
+                ",
+            )
+            .expect("fixture should emulate schema v16");
+        drop(connection);
+
+        migrate_database(&database_path).expect("v16 database should migrate");
+
+        let connection = open_database_read_only(&database_path)
+            .expect("migrated v18 database should open read-only");
+        assert_eq!(schema_user_version(&connection), SCHEMA_VERSION);
+        assert_table_exists(&connection, "pending_manual_clips");
+        assert_index_exists(&connection, "idx_pending_manual_clips_source");
+        for trigger in [
+            "prevent_clip_pending_path_on_insert",
+            "prevent_clip_pending_path_on_update",
+            "prevent_pending_indexed_path_on_insert",
+            "prevent_pending_indexed_path_on_update",
+        ] {
+            assert_trigger_exists(&connection, trigger);
+        }
+        assert!(table_columns(&connection, "scan_runs")
+            .iter()
+            .any(|column| column == "pending_clip_count"));
+
+        let backups = fs::read_dir(root.join("backups"))
+            .expect("v16 backup directory should exist")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1, "v16 migration should create one backup");
+        let backup =
+            open_database_read_only(&backups[0]).expect("v16 migration backup should be readable");
+        assert_eq!(schema_user_version(&backup), 16);
+        let backup_pending_table_count: i64 = backup
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'pending_manual_clips'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("backup schema should be inspectable");
+        assert_eq!(backup_pending_table_count, 0);
+        assert!(!table_columns(&backup, "scan_runs")
+            .iter()
+            .any(|column| column == "pending_clip_count"));
 
         drop(backup);
         drop(connection);
@@ -1982,6 +2400,9 @@ mod tests {
         assert!(table_columns(&connection, "scan_runs")
             .iter()
             .any(|column| column == "summary_available"));
+        assert!(table_columns(&connection, "scan_runs")
+            .iter()
+            .any(|column| column == "pending_clip_count"));
         let source_profile: (String, String, String) = connection
             .query_row(
                 "SELECT source_kind, scan_mode, scan_root_path FROM source_dirs WHERE id = ?1",
@@ -2093,7 +2514,7 @@ mod tests {
         assert!(backup_path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.contains("pre-v13-to-v16")));
+            .is_some_and(|name| name.contains("pre-v13-to-v18")));
         assert_eq!(schema_user_version(&backup), 13);
         assert!(!table_columns(&backup, "clips")
             .iter()
@@ -2105,7 +2526,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_database_upgrades_real_v14_to_v16_with_backup_and_user_state() {
+    fn migrate_database_upgrades_real_v14_to_v18_with_backup_and_user_state() {
         let root = unique_database_temp_dir();
         fs::create_dir_all(&root).expect("database fixture root should be created");
         let database_path = root.join("v14.sqlite3");
@@ -2492,12 +2913,12 @@ mod tests {
         assert_eq!(
             backups.len(),
             1,
-            "idempotent v16 open must not add a backup"
+            "idempotent v18 open must not add a backup"
         );
         assert!(backups[0]
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.contains("pre-v14-to-v16")));
+            .is_some_and(|name| name.contains("pre-v14-to-v18")));
         let backup = open_database_read_only(&backups[0]).expect("v14 backup should be readable");
         assert_eq!(schema_user_version(&backup), 14);
         assert!(!table_columns(&backup, "clips")
@@ -2963,6 +3384,7 @@ mod tests {
                     'match_events',
                     'tags',
                     'clip_tags',
+                    'pending_manual_clips',
                     'scan_runs'
                   )
                 ORDER BY name
@@ -2990,6 +3412,7 @@ mod tests {
                 "match_snapshots",
                 "match_stats",
                 "matches",
+                "pending_manual_clips",
                 "scan_runs",
                 "source_dirs",
                 "tags"
@@ -3000,7 +3423,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v16_creates_source_review_identity_event_and_summary_contracts() {
+    fn current_schema_creates_source_review_identity_event_and_summary_contracts() {
         let connection = Connection::open_in_memory().expect("in-memory db should open");
         initialize_schema(&connection).expect("schema should initialize");
 
@@ -3689,9 +4112,9 @@ mod tests {
         connection
             .pragma_update(None, "user_version", 15)
             .expect("fixture should become schema v15");
-        initialize_schema(&connection).expect("schema v16 migration should succeed");
+        initialize_schema(&connection).expect("schema v18 migration should succeed");
 
-        assert_eq!(schema_user_version(&connection), 16);
+        assert_eq!(schema_user_version(&connection), SCHEMA_VERSION);
         let keeper: (String, String, String, i64, Option<String>, String) = connection
             .query_row(
                 "
@@ -4729,7 +5152,7 @@ mod tests {
             &connection,
             SourceDirInput {
                 path: "D:\\ACLOS\\wonderfulVideos1001",
-                name: "wonderfulVideos1001",
+                name: "朋友素材",
             },
         )
         .expect("source dir should upsert");
@@ -5332,6 +5755,283 @@ mod tests {
         assert_eq!(official_metadata.1.as_deref(), Some("shared-match"));
         assert_eq!(official_metadata.2.as_deref(), Some("六杀时刻"));
         assert_eq!(official_metadata.3, Some(6));
+    }
+
+    #[test]
+    fn clear_mismatched_match_metadata_keeps_path_matched_custom_named_sources() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: "D:\\Imported ACLOS\\wonderfulVideos1001",
+                name: "朋友的素材库",
+            },
+        )
+        .expect("source should upsert");
+        let group = upsert_clip_group(
+            &connection,
+            ClipGroupInput {
+                source_dir_id: source.id,
+                group_key: "matching-account",
+                display_name: "matching-account",
+            },
+        )
+        .expect("group should upsert");
+        let clip = upsert_clip(
+            &connection,
+            ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: Some(group.id),
+                video_path: "D:\\Imported ACLOS\\wonderfulVideos1001\\matching-account\\ace.mp4",
+                file_name: "ace.mp4",
+                file_size: 42,
+                modified_at: Some("1782634272"),
+                duration_ms: None,
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+        )
+        .expect("clip should upsert");
+        upsert_clip_metadata(
+            &connection,
+            ClipMetadataInput {
+                clip_id: clip.id,
+                metadata_status: "enriched",
+                json_path: None,
+                account_name: Some("Correct#1001"),
+                player_name: Some("Correct#1001"),
+                agent_name: Some("Jett"),
+                map_name: Some("隐世修所"),
+                game_mode: Some("竞技模式"),
+                scoreline: None,
+                kda: None,
+                extracted_text: None,
+                parse_error: None,
+            },
+        )
+        .expect("metadata should seed");
+        connection
+            .execute(
+                "UPDATE clip_metadata SET match_id = 'matching-account' WHERE clip_id = ?1",
+                params![clip.id],
+            )
+            .expect("match identity should seed");
+        connection
+            .execute(
+                "INSERT INTO matches (game_id, account_id, player_name) VALUES ('matching-account', '1001', 'Correct#1001')",
+                [],
+            )
+            .expect("match should seed");
+
+        assert_eq!(
+            clear_mismatched_match_metadata(&connection).expect("cleanup should run"),
+            0
+        );
+        let clip = find_clip_by_id(&connection, clip.id).expect("clip should reload");
+        assert_eq!(clip.account_name.as_deref(), Some("Correct#1001"));
+        assert_eq!(clip.player_name.as_deref(), Some("Correct#1001"));
+    }
+
+    #[test]
+    fn persisted_snapshot_name_repair_updates_existing_custom_named_libraries() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+        let openid = "90000000000000000006";
+        let source_path = format!(r"D:\Imported ACLOS\wonderfulVideos{openid}");
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: &source_path,
+                name: "朋友的素材库",
+            },
+        )
+        .expect("source should upsert");
+        let clip = upsert_clip(
+            &connection,
+            ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: None,
+                video_path: &format!(r"{source_path}\old.mp4"),
+                file_name: "old.mp4",
+                file_size: 42,
+                modified_at: Some("100"),
+                duration_ms: None,
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+        )
+        .expect("clip should upsert");
+        upsert_clip_metadata(
+            &connection,
+            ClipMetadataInput {
+                clip_id: clip.id,
+                metadata_status: "enriched",
+                json_path: None,
+                account_name: Some("OlderName#1001"),
+                player_name: Some("OlderName#1001"),
+                agent_name: None,
+                map_name: None,
+                game_mode: None,
+                scoreline: None,
+                kda: None,
+                extracted_text: None,
+                parse_error: None,
+            },
+        )
+        .expect("metadata should seed");
+        connection
+            .execute(
+                "INSERT INTO matches (game_id, account_id, player_name, started_at) VALUES ('old-match', ?1, 'OlderName#1001', '100')",
+                params![openid],
+            )
+            .expect("match should seed");
+        let match_row_id: i64 = connection
+            .query_row(
+                "SELECT id FROM matches WHERE game_id = 'old-match'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("match id should load");
+        connection
+            .execute(
+                "INSERT INTO match_snapshots (match_id, snapshot_id, account_id, captured_at, account_name, raw_json) VALUES (?1, 'new-snapshot', ?2, '200', 'NewestName#2002', '{}')",
+                params![match_row_id, openid],
+            )
+            .expect("snapshot should seed");
+
+        assert_eq!(
+            repair_persisted_wonderful_account_names(&connection)
+                .expect("persisted names should repair"),
+            3
+        );
+        let clip = find_clip_by_id(&connection, clip.id).expect("clip should reload");
+        assert_eq!(clip.account_name.as_deref(), Some("NewestName#2002"));
+        assert_eq!(clip.player_name.as_deref(), Some("NewestName#2002"));
+        let match_name: String = connection
+            .query_row(
+                "SELECT player_name FROM matches WHERE id = ?1",
+                params![match_row_id],
+                |row| row.get(0),
+            )
+            .expect("match name should reload");
+        assert_eq!(match_name, "NewestName#2002");
+    }
+
+    #[test]
+    fn account_name_time_comparison_normalizes_units_offsets_and_invalid_values() {
+        assert_eq!(
+            compare_account_name_observed_at(Some("1710000000000"), Some("1709999999")),
+            std::cmp::Ordering::Greater,
+            "millisecond and second epochs must compare on the same scale",
+        );
+        assert_eq!(
+            compare_account_name_observed_at(
+                Some("2026-07-01T12:00:00+08:00"),
+                Some("2026-07-01T04:00:00Z"),
+            ),
+            std::cmp::Ordering::Equal,
+            "equivalent RFC3339 offsets must compare equal",
+        );
+        assert_eq!(
+            compare_account_name_observed_at(
+                Some("2026-07-01 04:00:01"),
+                Some("2026-07-01T04:00:00Z"),
+            ),
+            std::cmp::Ordering::Greater,
+            "SQLite UTC timestamps must compare with RFC3339 timestamps",
+        );
+        assert_eq!(
+            compare_account_name_observed_at(Some("not-a-time"), Some("1")),
+            std::cmp::Ordering::Less,
+            "an invalid timestamp must not beat a valid observation lexically",
+        );
+    }
+
+    #[test]
+    fn persisted_name_repair_propagates_latest_match_and_ignores_invalid_snapshot_names() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+        let openid = "90000000000000000007";
+        let source_path = format!(r"D:\Imported ACLOS\wonderfulVideos{openid}");
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: &source_path,
+                name: "自定义账号目录",
+            },
+        )
+        .expect("source should upsert");
+        let clip = upsert_clip(
+            &connection,
+            ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: None,
+                video_path: &format!(r"{source_path}\latest.mp4"),
+                file_name: "latest.mp4",
+                file_size: 42,
+                modified_at: Some("100"),
+                duration_ms: None,
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+        )
+        .expect("clip should upsert");
+        upsert_clip_metadata(
+            &connection,
+            ClipMetadataInput {
+                clip_id: clip.id,
+                metadata_status: "enriched",
+                json_path: None,
+                account_name: Some("StaleName#0001"),
+                player_name: Some("StaleName#0001"),
+                agent_name: None,
+                map_name: None,
+                game_mode: None,
+                scoreline: None,
+                kda: None,
+                extracted_text: None,
+                parse_error: None,
+            },
+        )
+        .expect("metadata should seed");
+        connection
+            .execute(
+                "INSERT INTO matches (game_id, account_id, player_name, started_at) VALUES ('latest-match', ?1, 'LatestMatch#3003', '300')",
+                params![openid],
+            )
+            .expect("latest match should seed");
+        let match_row_id: i64 = connection
+            .query_row(
+                "SELECT id FROM matches WHERE game_id = 'latest-match'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("match id should load");
+        connection
+            .execute(
+                "INSERT INTO match_snapshots (match_id, snapshot_id, account_id, captured_at, account_name, raw_json) VALUES (?1, 'older-valid', ?2, '200', 'OlderSnapshot#2002', '{}')",
+                params![match_row_id, openid],
+            )
+            .expect("valid snapshot should seed");
+        connection
+            .execute(
+                "INSERT INTO match_snapshots (match_id, snapshot_id, account_id, captured_at, account_name, raw_json) VALUES (?1, 'newer-invalid', ?2, '400', 'Cards/D3018FBE.png#1001', '{}')",
+                params![match_row_id, openid],
+            )
+            .expect("invalid snapshot should seed");
+
+        assert_eq!(
+            repair_persisted_wonderful_account_names(&connection)
+                .expect("persisted names should repair"),
+            2,
+        );
+        let repaired = find_clip_by_id(&connection, clip.id).expect("clip should reload");
+        assert_eq!(repaired.account_name.as_deref(), Some("LatestMatch#3003"));
+        assert_eq!(repaired.player_name.as_deref(), Some("LatestMatch#3003"));
     }
 
     #[test]
@@ -6083,6 +6783,36 @@ mod tests {
         )
         .expect("search should OR across searchable fields");
         assert_eq!(page_ids(&search_any_field), vec![triple]);
+    }
+
+    #[test]
+    fn library_search_matches_visible_account_fallback_for_custom_source_names() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+        let openid = "90000000000000000006";
+        let source_path = format!(r"D:\Friend Export\wonderfulVideos{openid}");
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: &source_path,
+                name: "朋友的素材库",
+            },
+        )
+        .expect("source should upsert");
+        let clip_id =
+            insert_page_fixture_clip_for_source(&connection, source.id, "friend.mp4", 1_000, 100);
+
+        let page = list_clip_page(
+            &connection,
+            &ClipListQuery {
+                query: Some(format!("账号 {openid}")),
+                ..ClipListQuery::default()
+            },
+        )
+        .expect("visible fallback search should run");
+
+        assert_eq!(page_ids(&page), vec![clip_id]);
+        assert_eq!(page.items[0].account_display_name, format!("账号 {openid}"));
     }
 
     #[test]
@@ -8335,6 +9065,22 @@ mod tests {
         assert_eq!(exists, 1, "index {index_name} should exist");
     }
 
+    fn assert_trigger_exists(connection: &Connection, trigger_name: &str) {
+        let exists: i64 = connection
+            .query_row(
+                "
+                SELECT COUNT(*)
+                FROM sqlite_master
+                WHERE type = 'trigger'
+                  AND name = ?1
+                ",
+                params![trigger_name],
+                |row| row.get(0),
+            )
+            .expect("trigger count should be readable");
+        assert_eq!(exists, 1, "trigger {trigger_name} should exist");
+    }
+
     fn table_columns(connection: &Connection, table_name: &str) -> Vec<String> {
         let sql = format!("PRAGMA table_info({table_name})");
         let mut statement = connection.prepare(&sql).expect("table info should prepare");
@@ -8729,6 +9475,72 @@ mod tests {
             },
         )
         .expect("clip should upsert")
+    }
+
+    fn seed_v17_account_name_repair_fixture(connection: &Connection, openid: &str) -> i64 {
+        let source_path = format!(r"D:\Imported ACLOS\wonderfulVideos{openid}");
+        let source = upsert_source_dir(
+            connection,
+            SourceDirInput {
+                path: &source_path,
+                name: "迁移测试素材库",
+            },
+        )
+        .expect("migration source should seed");
+        let clip = upsert_clip(
+            connection,
+            ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: None,
+                video_path: &format!(r"{source_path}\migration.mp4"),
+                file_name: "migration.mp4",
+                file_size: 42,
+                modified_at: Some("100"),
+                duration_ms: None,
+                recorded_at: None,
+                cover_path: None,
+                cover_source: "missing",
+            },
+        )
+        .expect("migration clip should seed");
+        upsert_clip_metadata(
+            connection,
+            ClipMetadataInput {
+                clip_id: clip.id,
+                metadata_status: "enriched",
+                json_path: None,
+                account_name: Some("StaleBeforeMigration#0001"),
+                player_name: Some("StaleBeforeMigration#0001"),
+                agent_name: None,
+                map_name: None,
+                game_mode: None,
+                scoreline: None,
+                kda: None,
+                extracted_text: None,
+                parse_error: None,
+            },
+        )
+        .expect("migration metadata should seed");
+        connection
+            .execute(
+                "INSERT INTO matches (game_id, account_id, player_name, started_at) VALUES ('migration-match', ?1, 'OlderMatch#1001', '100')",
+                params![openid],
+            )
+            .expect("migration match should seed");
+        let match_row_id: i64 = connection
+            .query_row(
+                "SELECT id FROM matches WHERE game_id = 'migration-match'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("migration match id should load");
+        connection
+            .execute(
+                "INSERT INTO match_snapshots (match_id, snapshot_id, account_id, captured_at, account_name, raw_json) VALUES (?1, 'migration-snapshot', ?2, '200', 'MigratedSnapshot#2002', '{}')",
+                params![match_row_id, openid],
+            )
+            .expect("migration snapshot should seed");
+        clip.id
     }
 
     fn unique_database_temp_dir() -> PathBuf {

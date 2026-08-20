@@ -2,7 +2,10 @@ import {
   ArrowRight,
   ArrowsClockwise,
   ChartBar,
+  ClipboardText,
   Database,
+  Eye,
+  EyeSlash,
   FolderOpen,
   HardDrives,
   MonitorPlay,
@@ -17,6 +20,7 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ManualClipImportDialog } from "../components/ManualClipImportDialog";
 import { SourceRelocationDialog } from "../components/SourceRelocationDialog";
 import { SourceWizardDialog } from "../components/SourceWizardDialog";
 import {
@@ -36,6 +40,8 @@ import { scanPathKey, scanTargetPathForSource } from "../lib/scanTargets";
 import type {
   AccountSummary,
   LibraryFacets,
+  ManualClipImportInput,
+  PendingManualClip,
   RegisterScanSourceInput,
   RegisterScanSourceResult,
   RelocateScanSourceResult,
@@ -54,6 +60,15 @@ type ScanWorkspaceProps = {
   accounts: AccountSummary[];
   scanTargets: ScanTarget[];
   sourceDirs: SourceDir[];
+  pendingClips: PendingManualClip[];
+  pendingIgnoredCount: number;
+  pendingError: string | null;
+  isPendingLoading: boolean;
+  importingPendingId: string | null;
+  showIgnoredPending: boolean;
+  manualAgentNames: readonly string[];
+  manualMapNames: readonly string[];
+  manualGameModes: readonly string[];
   isLoading: boolean;
   isScanning: boolean;
   progress: ScanProgress | null;
@@ -81,9 +96,12 @@ type ScanWorkspaceProps = {
   onStartScan: () => void;
   onSyncEnabledSources: () => void;
   onSyncSource: (source: SourceDir) => void;
+  onImportPendingClip: (pendingId: string, input: ManualClipImportInput) => Promise<boolean>;
+  onSetPendingIgnored: (pendingId: string, ignored: boolean) => void;
+  onToggleShowIgnoredPending: () => void;
 };
 
-type ScanWorkspaceSection = "sources" | "task" | "results";
+type ScanWorkspaceSection = "sources" | "task" | "pending" | "results";
 
 type ScanSectionDefinition = {
   id: ScanWorkspaceSection;
@@ -93,8 +111,9 @@ type ScanSectionDefinition = {
 };
 
 const SCAN_SECTIONS: ScanSectionDefinition[] = [
-  { id: "sources", label: "视频来源", description: "添加、启用与维护目录", icon: FolderOpen },
   { id: "task", label: "扫描任务", description: "选择范围并查看进度", icon: ArrowsClockwise },
+  { id: "sources", label: "视频来源", description: "添加、启用与维护目录", icon: FolderOpen },
+  { id: "pending", label: "待录入", description: "手动补全 NVIDIA 录屏分类", icon: ClipboardText },
   { id: "results", label: "识别结果", description: "核对统计、账号与素材库", icon: ChartBar },
 ];
 
@@ -104,6 +123,15 @@ export function ScanWorkspace({
   accounts,
   scanTargets,
   sourceDirs,
+  pendingClips,
+  pendingIgnoredCount,
+  pendingError,
+  isPendingLoading,
+  importingPendingId,
+  showIgnoredPending,
+  manualAgentNames,
+  manualMapNames,
+  manualGameModes,
   isLoading,
   isScanning,
   progress,
@@ -125,12 +153,14 @@ export function ScanWorkspace({
   onStartScan,
   onSyncEnabledSources,
   onSyncSource,
+  onImportPendingClip,
+  onSetPendingIgnored,
+  onToggleShowIgnoredPending,
 }: ScanWorkspaceProps) {
   const [isSourceWizardOpen, setIsSourceWizardOpen] = useState(false);
   const [relocationSource, setRelocationSource] = useState<SourceDir | null>(null);
-  const [activeSection, setActiveSection] = useState<ScanWorkspaceSection>(
-    () => isScanning ? "task" : "sources",
-  );
+  const [importTarget, setImportTarget] = useState<PendingManualClip | null>(null);
+  const [activeSection, setActiveSection] = useState<ScanWorkspaceSection>("task");
   const workspaceRef = useRef<HTMLElement>(null);
   const sectionHeadingRef = useRef<HTMLHeadingElement>(null);
   const previousSectionRef = useRef(activeSection);
@@ -199,6 +229,12 @@ export function ScanWorkspace({
   );
   const activeDefinition = SCAN_SECTIONS.find((section) => section.id === activeSection)
     ?? SCAN_SECTIONS[0];
+  const visiblePendingClips = useMemo(
+    () => pendingClips.filter((pending) => showIgnoredPending || !pending.ignored),
+    [pendingClips, showIgnoredPending],
+  );
+  const activePendingCount = pendingClips.filter((pending) => !pending.ignored).length;
+  const hasNvidiaSource = sourceDirs.some((source) => source.sourceKind === "nvidia");
 
   useEffect(() => {
     const startedScanning = isScanning && !wasScanningRef.current;
@@ -253,9 +289,9 @@ export function ScanWorkspace({
           {SCAN_SECTIONS.map((section) => {
             const SectionIcon = section.icon;
             const isActive = activeSection === section.id;
-            const needsAttention = section.id === "task" && (
-              isScanning || Boolean(errorMessage) || freshnessSummary.needsAttention
-            );
+            const needsAttention = section.id === "task"
+              ? isScanning || Boolean(errorMessage) || freshnessSummary.needsAttention
+              : section.id === "pending" && activePendingCount > 0;
             return (
               <button
                 key={section.id}
@@ -271,7 +307,13 @@ export function ScanWorkspace({
                   <small>{section.description}</small>
                 </span>
                 {needsAttention ? (
-                  <em aria-label={isScanning ? "扫描任务正在运行" : "扫描任务需要注意"} />
+                  <em aria-label={
+                    section.id === "pending"
+                      ? `有 ${activePendingCount} 个 NVIDIA 视频待录入`
+                      : isScanning
+                        ? "扫描任务正在运行"
+                        : "扫描任务需要注意"
+                  } />
                 ) : null}
               </button>
             );
@@ -473,7 +515,7 @@ export function ScanWorkspace({
                       <div>
                         <strong>扫描当前目录</strong>
                         <small>{scanTargets.length > 0
-                          ? `扫描已列出的 ${scanTargets.length} 个根目录。`
+                          ? `扫描已列出的 ${scanTargets.length} 个根目录。NVIDIA 视频会先进入待录入列表。`
                           : "尚未添加来源时，将尝试默认 ACLOS 目录。"}</small>
                       </div>
                       <button
@@ -490,7 +532,7 @@ export function ScanWorkspace({
                       <span className="scan-task-action-icon"><ArrowsClockwise weight="bold" /></span>
                       <div>
                         <strong>同步已启用来源</strong>
-                        <small>只同步 {enabledSourceCount} 个已启用的持久来源，适合日常更新。</small>
+                        <small>同步 {enabledSourceCount} 个已启用的持久来源，NVIDIA 新视频会等待手动分类，适合日常更新。</small>
                       </div>
                       <button
                         className="cinematic-button cinematic-button--secondary"
@@ -566,6 +608,94 @@ export function ScanWorkspace({
               </>
             ) : null}
 
+            {activeSection === "pending" ? (
+              <>
+                {!hasNvidiaSource ? (
+                  <section className="scan-warning" role="status">
+                    <WarningCircle weight="fill" />
+                    <span>
+                      <strong>还没有 NVIDIA 来源</strong>
+                      先在“视频来源”中选择 NVIDIA 目录；首次同步后，待录入的视频会出现在这里。
+                    </span>
+                  </section>
+                ) : null}
+
+                <section className="cinematic-panel scan-pending-panel" aria-labelledby="scan-pending-heading">
+                  <header className="cinematic-section-heading">
+                    <div>
+                      <ClipboardText weight="duotone" />
+                      <span id="scan-pending-heading">待录入的 NVIDIA 视频</span>
+                    </div>
+                    <small>{activePendingCount} 个待分类 · 不会自动导入素材库</small>
+                  </header>
+                  <p className="scan-pending-hint">
+                    NVIDIA 录屏没有可靠的对局元数据。首次同步、启动自动扫描或日常同步发现文件后，只会登记在这里，不会直接进入素材库；请为每条视频填写账户、英雄与地图，确认后才加入素材库。
+                  </p>
+
+                  {isPendingLoading && visiblePendingClips.length === 0 ? (
+                    <p className="scan-inline-empty">正在加载待录入列表…</p>
+                  ) : null}
+
+                  <div
+                    aria-label="待录入的 NVIDIA 视频列表"
+                    className="scan-pending-grid"
+                    role="region"
+                    tabIndex={visiblePendingClips.length > 0 ? 0 : undefined}
+                  >
+                    {visiblePendingClips.map((pending) => (
+                      <article className="scan-pending-row" data-ignored={pending.ignored || undefined} key={pending.id}>
+                        <span className="scan-pending-icon" aria-hidden="true"><MonitorPlay weight="duotone" /></span>
+                        <span className="scan-pending-copy">
+                          <strong>{pending.fileName}</strong>
+                          <small>
+                            {pending.sourceDirName}
+                            {pending.sourceRelativeDir ? ` · ${pending.sourceRelativeDir}` : ""}
+                            {pending.modifiedAt ? ` · ${formatDateTime(pending.modifiedAt)}` : ""}
+                            {` · ${formatBytes(pending.fileSize)}`}
+                          </small>
+                          {pending.ignored ? <em>已忽略，重新扫描不会自动录入</em> : null}
+                        </span>
+                        <span className="scan-pending-actions">
+                          <button
+                            className="cinematic-button cinematic-button--primary"
+                            disabled={importingPendingId !== null || isScanning}
+                            type="button"
+                            onClick={() => setImportTarget(pending)}
+                          >
+                            <UserCircle weight="fill" />
+                            录入
+                          </button>
+                          <button
+                            className="cinematic-button cinematic-button--secondary"
+                            disabled={importingPendingId !== null}
+                            type="button"
+                            onClick={() => onSetPendingIgnored(pending.id, !pending.ignored)}
+                          >
+                            {pending.ignored ? <Eye weight="bold" /> : <EyeSlash weight="bold" />}
+                            {pending.ignored ? "恢复" : "忽略"}
+                          </button>
+                        </span>
+                      </article>
+                    ))}
+                    {!isPendingLoading && visiblePendingClips.length === 0 ? (
+                      <p className="scan-inline-empty">
+                        还没有待录入的视频：首次同步、自动扫描或来源行同步发现的新录屏会登记到这里等待分类。
+                      </p>
+                    ) : null}
+                  </div>
+
+                  {pendingIgnoredCount > 0 || showIgnoredPending ? (
+                    <footer className="scan-pending-footer">
+                      <span>已忽略 {pendingIgnoredCount} 个视频</span>
+                      <button type="button" onClick={onToggleShowIgnoredPending}>
+                        {showIgnoredPending ? "隐藏已忽略" : "显示已忽略"}
+                      </button>
+                    </footer>
+                  ) : null}
+                </section>
+              </>
+            ) : null}
+
             {activeSection === "results" ? (
               <>
                 <section className="cinematic-panel scan-statistics-panel">
@@ -589,6 +719,15 @@ export function ScanWorkspace({
                       detail={terminalMessage ?? "当前索引"}
                     />
                     <ScanMetric icon={<UserCircle weight="duotone" />} label="识别账号" value={accounts.length.toLocaleString("zh-CN")} suffix="个" detail="自动归组" />
+                    {((summary?.pendingClipCount ?? 0) > 0 || activePendingCount > 0) ? (
+                      <ScanMetric
+                        icon={<ClipboardText weight="duotone" />}
+                        label="待录入 NVIDIA"
+                        value={Math.max(summary?.pendingClipCount ?? 0, activePendingCount).toLocaleString("zh-CN")}
+                        suffix="个"
+                        detail={activePendingCount > 0 ? "到“待录入”手动补全分类" : "本次扫描新发现"}
+                      />
+                    ) : null}
                     <ScanMetric icon={<HardDrives weight="duotone" />} label="占用空间" value={formatBytes(totalSize)} detail={summary ? `${summary.sourceDirCount} 个来源` : "本地只读"} />
                     <ScanMetric icon={<Timer weight="duotone" />} label="最近素材" value={latestModifiedAt ? formatDateTime(latestModifiedAt) : "暂无记录"} compact detail={activityMessage} />
                   </div>
@@ -656,6 +795,23 @@ export function ScanWorkspace({
         onOpenChange={(open) => !open && setRelocationSource(null)}
         onPreview={onPreviewSourceRelocation}
         onRelocate={onRelocateSource}
+      />
+      <ManualClipImportDialog
+        open={importTarget !== null}
+        clip={importTarget}
+        accounts={accounts}
+        agentNames={manualAgentNames}
+        mapNames={manualMapNames}
+        gameModes={manualGameModes}
+        isSubmitting={importingPendingId !== null}
+        error={pendingError}
+        onOpenChange={(open) => !open && setImportTarget(null)}
+        onSubmit={(input) => {
+          if (!importTarget) return;
+          void onImportPendingClip(importTarget.id, input).then((imported) => {
+            if (imported) setImportTarget(null);
+          });
+        }}
       />
     </section>
   );

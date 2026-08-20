@@ -50,10 +50,12 @@ flowchart LR
 | `lib.rs` | 初始化单实例保护和 Tauri、注册 `clip-media`、迁移数据库、恢复中断扫描/删除意图、管理扫描与缩略图协调器并注册 commands |
 | `commands.rs` | ping、扫描任务/磁盘发现、进度取消和缩略图 command 的聚合入口 |
 | `commands/sources.rs` | 来源注册/重叠确认、启停、单来源同步、启用来源批量同步、启动异步同步，以及来源根重新定位的预览/提交编排 |
+| `commands/manual_import.rs` | NVIDIA 待录入队列 command：列表、忽略/恢复与手动分类导入（导入后唤醒缩略图队列） |
 | `commands/library.rs` | 素材分页/详情、来源、标签、收藏、回收、备注、符合资格的单条/批量仅移除索引、媒体令牌及系统文件管理器 commands |
 | `commands/media_protocol.rs` | 通过 clip ID 查询最新路径，处理源/生成封面、HEAD、Range 和最多 1 MiB 的媒体响应 |
 | `thumbnail.rs` | 解析受控 FFmpeg、单 worker、超时/取消、指纹提交、事件和缓存维护 |
 | `app_updates.rs` | 固定稳定端点、公钥装配、检查/下载/取消/安装状态机、签名错误映射和发布说明约束 |
+| `commands/feedback.rs` | 用户主动发起的问题反馈：脱敏诊断快照 + 同对局片段上下文 + FFmpeg 采样帧 + 可选视频本体 → zip 诊断包 → 直传配置的 HTTPS 接口或回退保存文件；上传进度事件与包路径边界校验 |
 | `critical_tasks.rs` | 用 RAII lease 互斥扫描、永久删除、来源根重新定位和更新安装，错误/panic 后自动释放 |
 | `scan_coordinator.rs` | 保证同一时刻只有一个扫描任务，维护 job ID、进度、取消和终态 |
 | `scanner.rs` | 文件索引、封面匹配、元数据摄取、missing 判定和扫描批次统计 |
@@ -68,6 +70,7 @@ flowchart LR
 | `db/repositories/library.rs` | legacy 列表、分页摘要、全库 facets、筛选排序、行映射和批量事件/标签装配 |
 | `db/repositories/reconnect.rs` | 同一来源内 path/稳定身份/旧指纹的双侧唯一匹配，TEMP staging 后保守原地重连并协调缩略图指纹 |
 | `db/repositories/relocations.rs` | 来源根预览、可信匹配、冲突/受保护状态检查和事务内两阶段路径重写 |
+| `db/repositories/pending.rs` | NVIDIA 待录入队列的幂等登记、完整扫描清理、忽略标志与单事务手动导入（合成 matches + clips + clip_metadata） |
 | `db/repositories/*` | clips、删除意图、sources、tags、thumbnails 与仅移除索引的查询和事务写入 |
 | `file_identity.rs` | 复用永久删除所需的 Windows 卷序列号与文件索引只读能力；普通索引读取失败时安全降级为空身份 |
 | `wonderful_db.rs` / `wonderful_ingest.rs` | 官方 match/video 解密归一化、clip 匹配和视频时间线写入 |
@@ -91,13 +94,18 @@ flowchart LR
 | --- | --- |
 | `App.tsx` | 页面路由、筛选组合、全局刷新、通知和 controller 组合 |
 | `screens/LibraryWorkspace.tsx` | 素材库、选择、批量操作和加载更多入口 |
-| `screens/ScanWorkspace.tsx` | 来源队列、逐来源新鲜度/7 天提醒、根重新定位入口、全电脑发现、进度、取消和带新增数量的扫描结果 |
+| `screens/ScanWorkspace.tsx` | 来源队列、逐来源新鲜度/7 天提醒、根重新定位入口、全电脑发现、进度、取消、带新增数量的扫描结果，以及 NVIDIA 待录入分区（列表、忽略/恢复、打开录入弹窗） |
+| `components/ManualClipImportDialog.tsx` | NVIDIA 待录入视频的分类表单：账户（已有或新添加）、英雄、地图、可选模式与备注 |
+| `hooks/usePendingManualClipsController.ts` | 待录入列表加载、录入/忽略 mutation 与错误收敛；录入成功后触发素材库与 facets 刷新 |
 | `components/SourceRelocationDialog.tsx` | 新根选择、只读预览、可信匹配/冲突展示、二次确认和提交后同步结果 |
 | `components/SourceWizardDialog.tsx` | 四种来源类型、目录授权、显示名、自动同步资格和重叠来源二次确认 |
 | `screens/TagManagementWorkspace.tsx` | 标签统计、搜索、创建、修改和删除 |
-| `screens/PreviewWorkspace.tsx` | 按需详情、媒体播放、本人击杀/本人死亡时间轴、标签和备注 |
+| `screens/PreviewWorkspace.tsx` | 按需详情、媒体播放、本人击杀/本人死亡时间轴、标签和备注；面包屑提供问题反馈入口 |
+| `components/FeedbackDialog.tsx` | 问题反馈表单：类别、描述、联系方式、采样帧/完整视频勾选、隐私说明、上传进度与保存回退流程 |
+| `lib/feedback.ts` | 反馈类别文案与接口地址校验/归一化的纯逻辑 |
 | `screens/SettingsWorkspace.tsx` | 常规、素材库、播放、更新、数据与隐私和关于分类；承载完整更新状态机与安全确认 |
 | `lib/appPreferences.ts` / `hooks/useAppPreferences.ts` | 严格校验 `valoframe.preferences.v1`，同步恢复前端偏好，并在存储不可用时降级为会话内状态 |
+| `lib/manualImport.ts` | 待录入表单的纯校验与 payload 构建（账户键/新账户、英雄、地图、模式、备注） |
 | `services/appUpdater.ts` | 五个受控 updater application command 的唯一前端适配层 |
 | `hooks/useAppUpdaterController.ts` | 每日自动检查限频、手动检查、下载/取消/安装状态机和错误展示策略 |
 | `hooks/useClipPageController.ts` | 分页、generation 隔离、跨页去重和失败重试 |
@@ -119,13 +127,14 @@ flowchart LR
 
 | 类别 | Commands |
 | --- | --- |
-| 扫描与来源 | `register_scan_source`、`set_scan_source_enabled`、`sync_scan_source`、`sync_enabled_sources`、`request_startup_source_sync`、`preview_scan_source_relocation`、`relocate_scan_source`、`scan_default_aclos_dir`、`scan_roots`、`discover_and_scan_fixed_drives`、`get_scan_status`、`cancel_scan`、`get_scan_summary`（可按 job ID） |
+| 扫描与来源 | `register_scan_source`、`set_scan_source_enabled`、`sync_scan_source`、`sync_enabled_sources`、`request_startup_source_sync`、`preview_scan_source_relocation`、`relocate_scan_source`、`scan_default_aclos_dir`、`scan_roots`、`discover_and_scan_fixed_drives`、`get_scan_status`、`cancel_scan`、`get_scan_summary`（可按 job ID）、`list_pending_manual_clips`、`import_pending_manual_clip`、`set_pending_manual_clip_ignored` |
 | 素材读取 | `list_clip_page`、`get_library_facets`、`get_clip_detail`、`list_sources` |
 | 标签 | `list_tags`、`create_tag`、`update_tag`、`delete_tag` |
 | 素材写入 | `set_clip_favorite`、`set_clips_favorite`、`set_clip_trashed`、`set_clips_trashed`、`remove_clip_from_index`、`remove_clips_from_index`、`delete_clips_permanently`、`update_clip_note` |
 | 标签绑定 | `add_tag_to_clip`、`add_tag_to_clips`、`remove_tag_from_clip`、`remove_tag_from_clips` |
 | 缩略图 | `ensure_clip_thumbnails`、`retry_clip_thumbnails`、`get_thumbnail_status` |
 | 文件与媒体 | `get_clip_media`、`open_clip_externally`、`open_clip_location`、`copy_clip_path` |
+| 问题反馈 | `submit_feedback`（采集 + 打包 + 可选直传，`feedback-progress` 事件）、`save_feedback_package`（保存到用户选择的位置）、`discard_feedback_package`（放弃未保存的临时包） |
 | 稳定更新 | `get_app_update_runtime_info`、`check_for_app_update`、`download_app_update`、`cancel_app_update_download`、`install_app_update` |
 
 `list_clips`、`scan_custom_dir` 和 `ping_backend` 暂时保留兼容契约，但生产素材库不再依赖 `list_clips`。
@@ -162,11 +171,11 @@ flowchart LR
 
 1. 来源向导把用户授权目录规范化并拒绝重解析点；完全重复路径复用现有来源，父子目录重叠必须显式二次确认。ACLOS 可从一个根发现多个 `wonderfulVideos*` 逻辑来源，NVIDIA、Tracker 和 generic 各自保存一个递归来源。
 2. 全局“启动时自动扫描”偏好默认关闭并存于版本化 `localStorage`；开启后，React 在下次启动同步读取偏好并调用 `request_startup_source_sync`。该命令、`sync_enabled_sources` 和 `sync_scan_source` 都复用 `scan_coordinator`、同一个 scan job/run 协议与关键任务互斥；启动请求保留 10 分钟重启冷却，已有任务时不会并发启动第二个扫描。
-3. `aclos-structured` 只处理来源根直放 MP4 或一层对局目录，并读取 WonderfulDb/导出 JSON/日志/LevelDB；`recursive-mp4` 只读取用户根内大小写不敏感的普通 `.mp4`，不读取第三方插件数据库，也不伪造对局元数据。
-4. 递归适配器采用深度/文件数上限和 128 项短事务批次，跳过符号链接、junction/reparse point、越界 canonical path 和扫描期间大小/mtime 变化的文件；同一规范化文件路径只能归属一个来源。
+3. `aclos-structured` 只处理来源根直放 MP4 或一层对局目录，并读取 WonderfulDb/导出 JSON/日志/LevelDB；`recursive-mp4` 只读取用户根内大小写不敏感的普通 `.mp4`，不读取第三方插件数据库，也不伪造对局元数据。NVIDIA 与其他启用来源一样参加添加后的首次同步、当前目录扫描、批量同步和启动自动同步，但 `source_kind = nvidia` 的新发现文件不自动导入：它们幂等登记进 `pending_manual_clips` 待录入队列（计数进 `ScanSummary.pending_clip_count`），由用户在扫描目录的“待录入”分区手动填写账户/英雄/地图后经 `import_pending_manual_clip` 才入库；此前已入库的 NVIDIA clip 仍按既有路径/身份更新与重连，不会重复排队。
+4. 递归适配器采用深度/文件数上限和 128 项短事务批次，跳过符号链接、junction/reparse point、越界 canonical path 和扫描期间大小/mtime 变化的文件；同一规范化文件路径只能归属一个来源。`clips` 与 `pending_manual_clips` 还有数据库双向触发器保证严格互斥，防止重叠来源、重连、重定位或并发连接绕过扫描器门禁。手动导入在单事务内先认领并删除 pending 行、再写 clip，后续失败会整体回滚并恢复 pending。完整枚举且未取消时，扫描同时清理本轮未见的待录入行。
 5. 每个来源先完整枚举并在连接级 TEMP 表统计候选唯一性，再按“规范化路径 → 来源内双侧唯一稳定身份 → 身份全空旧行的双侧唯一文件名/大小/mtime”处理。复制、硬链接或重复指纹不合并；身份读取失败不阻断索引。
 6. 扫描按来源和文件推进，以事件上报进度，并在目录、文件和批次边界响应取消。只有来源可访问、枚举完整且未取消时才把本轮未见的历史文件标记为 `missing`；offline、partial、cancelled 均保留历史状态。
-7. 终态为 `completed`、`partial`、`cancelled` 或 `failed`；前端从事件、命令结果或状态轮询任一路径看到终态后立即释放 active job/扫描中状态，摘要恢复和索引刷新分别有界执行，不阻塞终态收敛。已安全提交的短事务保留，下一次重扫可幂等修复。只有 completed 完整扫描刷新 `lastScanAt`；终态摘要用 `summary_available` 区分真实“新增 0”与数量不可用，并可按 job ID 恢复。
+7. 终态为 `completed`、`partial`、`cancelled` 或 `failed`；前端从事件、命令结果或状态轮询任一路径看到终态后立即释放 active job/扫描中状态，摘要恢复和索引刷新分别有界执行，不阻塞终态收敛。已安全提交的短事务保留，下一次重扫可幂等修复。只有 completed 完整扫描刷新 `lastScanAt`；终态摘要用 `summary_available` 区分真实“新增 0”与数量不可用，并把 `pending_clip_count` 等统计持久化到 `scan_runs`，可按 job ID 恢复。
 8. 旧 `scan_roots` 入口保留兼容：v13→v14 历史迁移的 ACLOS 行在 `scan_root_path = path` 时仍以 `wonderfulVideos*` 父目录调用旧发现逻辑；递归来源始终使用自身配置根，不扩大授权边界。
 
 全电脑发现只遍历 Windows 固定磁盘，跳过临时目录、回收站、系统卷和重解析点；候选来源通过 MP4 布局验证后再交给同一多根扫描服务。
@@ -183,7 +192,7 @@ WonderfulDb clip record
   > filename/path inference
 ```
 
-这个优先级按字段和所有权执行。`matches`/`match_stats`/`match_events` 保存整场信息；`clips`/`clip_metadata` 保存视频身份和分类；`clip_segments`/`clip_events` 保存视频自己的组装区间和事件。普通高光以 `segmentStart + eventStart` 计算时间，击杀/死亡集锦把 `eventStart` 视为视频绝对时间；越界事件不裁剪、不渲染并形成元数据警告。单个视频的 `kill_count` 只能由该 clip 的当前玩家击杀事件计算；预览仅显示 `killer_is_me` 的本人击杀和 `killed_is_me` 的本人死亡。视频类型固定为三杀时刻、四杀时刻、五杀时刻、六杀时刻、击杀集锦和死亡时刻；标签表只保存用户创建的标签，标签名称不参与视频类型判断。
+这个优先级按字段和所有权执行。`matches`/`match_stats`/`match_events` 保存整场信息；`clips`/`clip_metadata` 保存视频身份和分类；`clip_segments`/`clip_events` 保存视频自己的组装区间和事件。NVIDIA 录屏没有这些元数据来源，因此不参与自动摄取：其分类由用户在待录入流程中手动提交，写入 `metadata_status = 'manual'`、`metadata_source = 'manual'` 的 clip_metadata 与合成 matches 行，账户身份复用 `match-account-<id>` 或新生成 `manual-<随机>` 账户。普通高光以 `segmentStart + eventStart` 计算时间，击杀/死亡集锦把 `eventStart` 视为视频绝对时间；越界事件不裁剪、不渲染并形成元数据警告。单个视频的 `kill_count` 只能由该 clip 的当前玩家击杀事件计算；预览仅显示 `killer_is_me` 的本人击杀和 `killed_is_me` 的本人死亡。视频类型固定为三杀时刻、四杀时刻、五杀时刻、六杀时刻、击杀集锦和死亡时刻；标签表只保存用户创建的标签，标签名称不参与视频类型判断。
 
 ### 5.4 媒体
 
@@ -226,6 +235,7 @@ WonderfulDb clip record
 - 来源根重定位拒绝 reparse point、越界/重叠根、零可信匹配、回收素材、删除 intent 和关键任务冲突；不会修改不可变回收快照或补造永久删除授权。
 - Tauri 单实例插件在数据库初始化前拦截第二个进程；重复启动只恢复、显示并聚焦现有主窗口，不接受外部路径或命令参数。
 - updater 原始 plugin commands 不进入窗口 capability；前端只能调用 Rust 固定端点/公钥的受控 commands。未嵌入公钥的 Community Beta 构建拒绝检查且不生成更新产物。
+- 问题反馈是唯一的上行网络路径：只有用户在反馈弹窗中主动提交时才会发起请求，目标只能是随命令传入的 HTTPS 接口（本机自测允许 localhost HTTP，其余 http 一律拒绝）；当前接口配置入口不在 UI 中、endpoint 恒为空，因此实际只走“保存 zip 文件”路径，上传代码保持同样约束待后台就绪后启用。诊断数据按脱敏白名单组装（不含 OpenID/PUUID、备注、标签、绝对路径），完整视频最大 1 GiB、描述 2000 字、上传超时 15 分钟；保存/放弃命令只接受应用反馈缓存目录内的 zip 路径。
 - 当前自定义 application commands 仍使用 Tauri 的默认应用命令可见性；若未来增加远程窗口或多权限窗口，应通过 `AppManifest::commands` 为这些 commands 建立显式 ACL。
 
 ## 8. 性能与一致性

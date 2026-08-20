@@ -237,6 +237,37 @@ pub(crate) fn finalize_scan_reconnect_plan(
         )
         .map_err(|error| readable_error("materializing normalized path conflicts", error))?;
 
+    // A path waiting for manual NVIDIA classification is already reserved even though it is not
+    // a clip yet. Materialize this before identity/fingerprint matching so an older clip cannot
+    // reconnect onto the pending path and bypass the manual-import gate. The owning source keeps
+    // the ordinary `new` decision so NVIDIA rescans can refresh/retain their pending row.
+    connection
+        .execute(
+            &format!(
+                "
+                UPDATE temp.{CANDIDATE_TABLE}
+                SET decision = CASE
+                        WHEN (
+                            SELECT pending.source_dir_id
+                            FROM pending_manual_clips AS pending
+                            WHERE pending.normalized_path = temp.{CANDIDATE_TABLE}.normalized_path
+                        ) = temp.{CANDIDATE_TABLE}.source_dir_id
+                        THEN 'new'
+                        ELSE 'foreign_path'
+                    END
+                WHERE source_dir_id = ?1
+                  AND decision = 'unplanned'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM pending_manual_clips AS pending
+                      WHERE pending.normalized_path = temp.{CANDIDATE_TABLE}.normalized_path
+                  )
+                "
+            ),
+            params![source_dir_id],
+        )
+        .map_err(|error| readable_error("reserving pending manual clip paths", error))?;
+
     // Existing normalized paths always win. A global path owned by another source cannot be
     // inserted because clips.normalized_path is unique, so preserve the previous fail-closed rule.
     connection
@@ -517,6 +548,11 @@ fn apply_planned_scan_reconnect_in_savepoint(
               FROM clips AS target
               WHERE target.normalized_path = :normalized_path
                 AND target.id <> clips.id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pending_manual_clips AS pending
+              WHERE pending.normalized_path = :normalized_path
           )
           AND LENGTH(:legacy_file_name) > 0
           AND {match_predicate}
@@ -1056,7 +1092,7 @@ fn decision_from_materialized(
         "foreign_path" => Ok(new_with_warning(
             candidate,
             ScanReconnectWarningKind::ForeignPathOwner,
-            "candidate path is already owned by source from another registration",
+            "candidate path is already owned by source from another registration or reserved for pending manual import",
         )),
         "normalized_path_conflict" => Ok(new_with_warning(
             candidate,

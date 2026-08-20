@@ -24,6 +24,7 @@ const VALID_NON_DEFAULT_PREFERENCES: AppPreferencesV1 = {
   motionMode: "reduced",
   scanOnStartup: true,
   automaticUpdateCheck: false,
+  feedbackEndpoint: "https://feedback.example.com/api",
 };
 
 test("app preferences expose the documented v1 defaults", () => {
@@ -38,6 +39,7 @@ test("app preferences expose the documented v1 defaults", () => {
     motionMode: "system",
     scanOnStartup: false,
     automaticUpdateCheck: true,
+    feedbackEndpoint: "",
   });
 
   const first = createDefaultAppPreferences();
@@ -55,12 +57,17 @@ test("valid v1 preferences survive parsing and unknown fields are ignored", () =
   assert.equal("futureField" in parsed, false);
 });
 
-test("older v1 payloads default only the new startup scan field", () => {
-  const { scanOnStartup: _missing, ...olderPayload } = VALID_NON_DEFAULT_PREFERENCES;
+test("older v1 payloads default only the newer fields", () => {
+  const {
+    scanOnStartup: _missingScan,
+    feedbackEndpoint: _missingEndpoint,
+    ...olderPayload
+  } = VALID_NON_DEFAULT_PREFERENCES;
 
   assert.deepEqual(normalizeAppPreferences(olderPayload), {
     ...VALID_NON_DEFAULT_PREFERENCES,
     scanOnStartup: false,
+    feedbackEndpoint: "",
   });
 });
 
@@ -77,6 +84,8 @@ test("each invalid v1 field falls back independently", () => {
     ["motionMode", "always"],
     ["scanOnStartup", "true"],
     ["automaticUpdateCheck", null],
+    ["feedbackEndpoint", 123],
+    ["feedbackEndpoint", "x".repeat(301)],
   ];
 
   for (const [field, invalidValue] of invalidCases) {

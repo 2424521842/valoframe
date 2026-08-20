@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "recordId": "personal-community-stable-v0.2.2-release-owner-decision",
+  "version": "0.2.2",
+  "tag": "v0.2.2",
+  "channel": "personal-community-stable",
+  "decision": "approved-by-repository-release-owner",
+  "decisionAuthority": "repository-release-owner",
+  "recordedOn": "2026-08-18",
+  "sourceBinding": "The stable workflow binds this decision to the lightweight v0.2.2 tag and its checked-out commit.",
+  "strictPublicReleaseApproval": false,
+  "independentLegalReviewCompleted": false,
+  "distributionPurpose": "free-personal-community",
+  "distributionScope": {
+    "freeOfCharge": true,
+    "nonCommercialCommunityProject": true,
+    "githubStableRelease": true,
+    "publicWindowsInstaller": true,
+    "inAppStableUpdater": true
+  },
+  "releaseOwnerConfirmations": {
+    "manifestExactGameImagesMayBeDistributedInThisChannel": true,
+    "projectBrandIconMayBeDistributedInThisChannel": true,
+    "unofficialProjectDisclaimerRequired": true,
+    "minimalLgplFfmpegMayBeDistributedInThisChannel": true,
+    "ffmpegUseIsLimitedToThumbnailGeneration": true,
+    "authenticodeMayBeDeferred": true,
+    "tauriUpdaterSignatureRemainsRequired": true
+  },
+  "distributionRequirements": {
+    "windowsUnsignedWarningMustBeDisclosed": true,
+    "ffmpegLicenseMaterialsMustAccompanyInstaller": true,
+    "ffmpegBinaryAndBuildEvidenceMustAccompanyRelease": true,
+    "ffmpegCorrespondingSourceMustAccompanyRelease": true,
+    "sha256ManifestMustCoverEveryOtherReleaseAsset": true,
+    "thirdPartyNoticesMustAccompanyInstaller": true,
+    "personalCommunityLimitationsMustBeDisclosed": true
+  },
+  "assetSet": {
+    "manifest": "src/data/valorantAssets.json",
+    "manifestSha256": "f647a04eb7879d9cb191136026220a26addc09e789f60ee21665b7512dfa8e8e",
+    "assetCount": 42,
+    "collectionFingerprint": "26c4c77a5a13d3ca1a84f4616b0cba1f251462882a0e86f9592d5fc8ef2e1c13",
+    "sourceAssetBytesMustRemainManifestExact": true
+  },
+  "nonAssertions": [
+    "This record is not an approval by Riot Games, Tencent, FFmpeg, or any other third party.",
+    "This record does not claim that independent legal review has been completed.",
+    "This record does not mark the future strict public-release policy as approved.",
+    "This record does not claim that the installer has an Authenticode publisher identity.",
+    "Non-commercial distribution does not waive third-party license obligations."
+  ]
+}

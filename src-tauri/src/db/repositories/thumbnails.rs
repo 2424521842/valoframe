@@ -53,10 +53,10 @@ pub fn thumbnail_fingerprint(
 
 /// Reconciles every clip, or a bounded selected set, against its persisted thumbnail state.
 ///
-/// A source-owned cover always suppresses generation. Available coverless clips are queued when
-/// first seen, when their fingerprint changes, when they were evicted, or when `force_retry`
-/// explicitly resets a terminal failure. Ready artifacts with an unchanged fingerprint are left
-/// untouched.
+/// A source-owned cover suppresses generation. Available coverless clips are queued when first
+/// seen, when their fingerprint changes, when they were evicted, or when `force_retry` explicitly
+/// resets a terminal failure. Legacy cover repair is deliberately a one-time schema migration;
+/// runtime reconciliation must not infer binding provenance from mutable group membership.
 pub fn reconcile_clip_thumbnails(
     connection: &Connection,
     clip_ids: Option<&[i64]>,
@@ -70,6 +70,112 @@ pub fn reconcile_clip_thumbnails(
         .commit()
         .map_err(|error| readable_error("finishing thumbnail reconciliation", error))?;
     Ok(result)
+}
+
+/// Clears untrusted source-cover bindings written by the legacy positional ACLOS matcher.
+///
+/// This helper is intentionally transaction-neutral: schema migration owns the surrounding
+/// transaction and updates `user_version` only after both the cover repair and thumbnail state
+/// transition succeed. Exact `cover-<video-stem>` or bare `<video-stem>` bindings are retained.
+/// Every other ACLOS file cover is conservatively removed, including singleton groups whose
+/// original multi-clip siblings may already have been removed from the index.
+pub(in crate::db) fn repair_legacy_aclos_source_covers_in_transaction(
+    connection: &Connection,
+) -> DbResult<ThumbnailReconcileResult> {
+    let candidates = {
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT clips.id, clips.file_name, clips.cover_path
+                FROM clips
+                JOIN source_dirs ON source_dirs.id = clips.source_dir_id
+                WHERE source_dirs.source_kind = 'aclos'
+                  AND clips.cover_source = 'file'
+                ORDER BY clips.id
+                ",
+            )
+            .map_err(|error| readable_error("preparing legacy ACLOS cover repair", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(|error| readable_error("querying legacy ACLOS cover repair", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| readable_error("reading legacy ACLOS cover repair", error))?;
+        rows
+    };
+
+    let mut repaired_clip_ids = Vec::new();
+    for (clip_id, file_name, cover_path) in candidates {
+        if cover_path
+            .as_deref()
+            .is_some_and(|cover_path| source_cover_matches_video_file_name(&file_name, cover_path))
+        {
+            continue;
+        }
+        let changed = connection
+            .execute(
+                "
+                UPDATE clips
+                SET cover_path = NULL,
+                    cover_source = 'missing',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?1
+                  AND cover_source = 'file'
+                  AND cover_path IS ?2
+                ",
+                params![clip_id, cover_path],
+            )
+            .map_err(|error| readable_error("repairing legacy ACLOS source cover", error))?;
+        if changed == 1 {
+            repaired_clip_ids.push(clip_id);
+        }
+    }
+
+    let mut reconciled = ThumbnailReconcileResult::default();
+    for clip_ids in repaired_clip_ids.chunks(MAX_COMMAND_CLIP_IDS) {
+        let batch = reconcile_clip_thumbnails_in_transaction(connection, Some(clip_ids), true)?;
+        reconciled.counts.requested = reconciled
+            .counts
+            .requested
+            .saturating_add(batch.counts.requested);
+        reconciled.counts.queued = reconciled.counts.queued.saturating_add(batch.counts.queued);
+        reconciled.counts.already_queued = reconciled
+            .counts
+            .already_queued
+            .saturating_add(batch.counts.already_queued);
+        reconciled.counts.skipped = reconciled
+            .counts
+            .skipped
+            .saturating_add(batch.counts.skipped);
+        reconciled.changed.extend(batch.changed);
+    }
+    Ok(reconciled)
+}
+
+fn source_cover_matches_video_file_name(video_file_name: &str, cover_path: &str) -> bool {
+    let Some(video_stem) = file_stem_lower(video_file_name) else {
+        return false;
+    };
+    let Some(cover_stem) = file_stem_lower(cover_path) else {
+        return false;
+    };
+    cover_stem.strip_prefix("cover-").unwrap_or(&cover_stem) == video_stem
+}
+
+fn file_stem_lower(path: &str) -> Option<String> {
+    let file_name = path
+        .rsplit(['/', '\\'])
+        .find(|component| !component.is_empty())?;
+    let stem = match file_name.rfind('.') {
+        Some(0) | None => file_name,
+        Some(extension_separator) => &file_name[..extension_separator],
+    };
+    (!stem.is_empty()).then(|| stem.to_lowercase())
 }
 
 /// Reconciles thumbnail rows using a transaction already owned by a larger atomic mutation.
@@ -872,8 +978,8 @@ mod tests {
     use super::*;
     use crate::db::{
         find_clip_by_id, find_clip_media_paths_by_id, initialize_schema, list_clip_page,
-        migrations::SCHEMA_VERSION, normalize_path, upsert_clip, upsert_source_dir, ClipInput,
-        ClipListQuery, SourceDirInput,
+        migrations::SCHEMA_VERSION, normalize_path, upsert_clip, upsert_clip_group,
+        upsert_source_dir, ClipGroupInput, ClipInput, ClipListQuery, SourceDirInput,
     };
 
     #[test]
@@ -986,6 +1092,168 @@ mod tests {
             find_clip_media_paths_by_id(&connection, source_id).expect("source media should load");
         assert!(source_media.generated_cover_file.is_none());
         assert_eq!(source_media.cover_source, "file");
+    }
+
+    #[test]
+    fn legacy_repair_clears_singleton_cover_and_requeues_suppressed_state_atomically() {
+        let connection = fixture_connection();
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: "D:\\Imported ACLOS\\aclos-highlight\\wonderfulVideos1001",
+                name: "朋友的素材",
+            },
+        )
+        .expect("fixture source should upsert");
+        let group = upsert_clip_group(
+            &connection,
+            ClipGroupInput {
+                source_dir_id: source.id,
+                group_key: "legacy-singleton",
+                display_name: "legacy-singleton",
+            },
+        )
+        .expect("fixture group should upsert");
+        let file_name = "8f2b9e4c63a747fda66c48df2a61d001.mp4";
+        let video_path = format!("{}\\legacy-singleton\\{file_name}", source.path);
+        let cover_path = format!("{}\\legacy-singleton\\cover-4-0001.jpeg", source.path);
+        let clip_id = upsert_clip(
+            &connection,
+            ClipInput {
+                source_dir_id: source.id,
+                clip_group_id: Some(group.id),
+                video_path: &video_path,
+                file_name,
+                file_size: 100,
+                modified_at: Some("100"),
+                duration_ms: Some(1_000),
+                recorded_at: None,
+                cover_path: Some(&cover_path),
+                cover_source: "file",
+            },
+        )
+        .expect("fixture clip should upsert")
+        .id;
+
+        let runtime_reconcile = reconcile_clip_thumbnails(&connection, None, false)
+            .expect("runtime reconcile should suppress the source cover");
+        assert_eq!(runtime_reconcile.counts.skipped, 1);
+        assert_eq!(
+            get_thumbnail_status(&connection, clip_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "suppressed"
+        );
+
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("migration transaction should start");
+        let repaired = repair_legacy_aclos_source_covers_in_transaction(&transaction)
+            .expect("legacy cover repair should run");
+        assert_eq!(repaired.counts.requested, 1);
+        assert_eq!(repaired.counts.queued, 1);
+        {
+            let clip = find_clip_by_id(&transaction, clip_id).expect("clip should load");
+            assert_eq!(clip.cover_path, None);
+            assert_eq!(clip.cover_source, "missing");
+            assert_eq!(clip.thumbnail_status.as_deref(), Some("pending"));
+        }
+        transaction
+            .commit()
+            .expect("migration transaction should commit");
+
+        let second_transaction = connection
+            .unchecked_transaction()
+            .expect("second migration transaction should start");
+        let repeated = repair_legacy_aclos_source_covers_in_transaction(&second_transaction)
+            .expect("legacy cover repair should be idempotent");
+        assert_eq!(repeated, ThumbnailReconcileResult::default());
+        second_transaction
+            .commit()
+            .expect("second migration transaction should commit");
+    }
+
+    #[test]
+    fn legacy_repair_preserves_unicode_and_bare_stem_exact_covers() {
+        assert!(source_cover_matches_video_file_name(
+            "ÄCE.mp4",
+            "D:\\covers\\cover-äce.jpeg"
+        ));
+        assert!(source_cover_matches_video_file_name(
+            "精彩时刻.mp4",
+            "D:\\covers\\精彩时刻.jpeg"
+        ));
+        assert!(!source_cover_matches_video_file_name(
+            "clip .mp4",
+            "D:\\covers\\cover-clip.jpeg"
+        ));
+
+        let connection = fixture_connection();
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: "D:\\Imported ACLOS\\aclos-highlight\\wonderfulVideos1002",
+                name: "朋友的 Unicode 素材",
+            },
+        )
+        .expect("fixture source should upsert");
+        let group = upsert_clip_group(
+            &connection,
+            ClipGroupInput {
+                source_dir_id: source.id,
+                group_key: "unicode-exact-covers",
+                display_name: "unicode-exact-covers",
+            },
+        )
+        .expect("fixture group should upsert");
+        let fixtures = [
+            ("ÄCE.mp4", "cover-äce.jpeg"),
+            ("精彩时刻.mp4", "精彩时刻.jpeg"),
+        ];
+        let clip_ids = fixtures
+            .iter()
+            .map(|(file_name, cover_name)| {
+                let video_path = format!("{}\\unicode-exact-covers\\{file_name}", source.path);
+                let cover_path = format!("{}\\unicode-exact-covers\\{cover_name}", source.path);
+                upsert_clip(
+                    &connection,
+                    ClipInput {
+                        source_dir_id: source.id,
+                        clip_group_id: Some(group.id),
+                        video_path: &video_path,
+                        file_name,
+                        file_size: 100,
+                        modified_at: Some("100"),
+                        duration_ms: Some(1_000),
+                        recorded_at: None,
+                        cover_path: Some(&cover_path),
+                        cover_source: "file",
+                    },
+                )
+                .expect("fixture clip should upsert")
+                .id
+            })
+            .collect::<Vec<_>>();
+        reconcile_clip_thumbnails(&connection, None, false)
+            .expect("source covers should become suppressed");
+
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("migration transaction should start");
+        let repaired = repair_legacy_aclos_source_covers_in_transaction(&transaction)
+            .expect("legacy cover repair should run");
+        assert_eq!(repaired, ThumbnailReconcileResult::default());
+        transaction
+            .commit()
+            .expect("migration transaction should commit");
+
+        for clip_id in clip_ids {
+            let clip = find_clip_by_id(&connection, clip_id).expect("clip should load");
+            assert!(clip.cover_path.is_some());
+            assert_eq!(clip.cover_source, "file");
+            assert_eq!(clip.thumbnail_status.as_deref(), Some("suppressed"));
+        }
     }
 
     #[test]

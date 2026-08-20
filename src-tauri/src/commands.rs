@@ -1,5 +1,7 @@
 mod export;
+mod feedback;
 mod library;
+mod manual_import;
 mod media_protocol;
 mod sources;
 
@@ -21,7 +23,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 pub use export::*;
+pub use feedback::*;
 pub use library::*;
+pub use manual_import::*;
 pub use media_protocol::clip_media_protocol_response;
 pub use sources::*;
 
@@ -1209,7 +1213,14 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(revealed_path.as_deref(), Some(fixture.clip_path.as_path()));
+        let canonical_path = fixture
+            .clip_path
+            .canonicalize()
+            .expect("fixture path should canonicalize");
+        let expected_shell_path = PathBuf::from(db::stable_path_for_storage(
+            canonical_path.to_string_lossy().as_ref(),
+        ));
+        assert_eq!(revealed_path, Some(expected_shell_path));
     }
 
     #[test]
@@ -1223,15 +1234,14 @@ mod tests {
         })
         .expect("an available in-root MP4 should be opened");
 
-        assert_eq!(
-            opened_path,
-            Some(
-                fixture
-                    .clip_path
-                    .canonicalize()
-                    .expect("fixture path should canonicalize")
-            )
-        );
+        let canonical_path = fixture
+            .clip_path
+            .canonicalize()
+            .expect("fixture path should canonicalize");
+        let expected_shell_path = PathBuf::from(db::stable_path_for_storage(
+            canonical_path.to_string_lossy().as_ref(),
+        ));
+        assert_eq!(opened_path, Some(expected_shell_path));
         let connection = db::open_database(&fixture.database_path).unwrap();
         db::update_clip_trashed(&connection, fixture.clip_id, true).unwrap();
         let error =
@@ -1240,6 +1250,121 @@ mod tests {
             })
             .expect_err("trashed clips should be rejected");
         assert!(error.contains("可用素材"));
+    }
+
+    #[test]
+    fn safe_open_commands_preserve_spaces_and_unicode_in_the_shell_path() {
+        let fixture = ClipCommandFixture::with_file("录像 空格.mp4");
+        let canonical_path = fixture
+            .clip_path
+            .canonicalize()
+            .expect("unicode fixture path should canonicalize");
+        let expected_shell_path = PathBuf::from(db::stable_path_for_storage(
+            canonical_path.to_string_lossy().as_ref(),
+        ));
+        let mut revealed_path = None;
+        let mut opened_path = None;
+
+        open_clip_location_for_database(&fixture.database_path, fixture.clip_id, |path| {
+            revealed_path = Some(path.to_path_buf());
+            Ok(())
+        })
+        .expect("a safe unicode MP4 should be revealed");
+        open_clip_externally_for_database(&fixture.database_path, fixture.clip_id, |path| {
+            opened_path = Some(path.to_path_buf());
+            Ok(())
+        })
+        .expect("a safe unicode MP4 should be opened");
+
+        assert_eq!(revealed_path, Some(expected_shell_path.clone()));
+        assert_eq!(opened_path, Some(expected_shell_path));
+    }
+
+    #[test]
+    fn safe_open_commands_reject_an_existing_file_outside_the_registered_source() {
+        let fixture = ClipCommandFixture::with_file("inside.mp4");
+        let outside_root = unique_temp_dir();
+        fs::create_dir_all(&outside_root).expect("outside root should be created");
+        let outside_path = outside_root.join("越界 空格.mp4");
+        fs::write(&outside_path, b"outside mp4").expect("outside file should be written");
+        let connection = db::open_database(&fixture.database_path).unwrap();
+        connection
+            .execute(
+                "UPDATE clips SET file_path = ?2, normalized_path = ?3 WHERE id = ?1",
+                rusqlite::params![
+                    fixture.clip_id,
+                    outside_path.to_string_lossy().as_ref(),
+                    db::normalize_path(outside_path.to_string_lossy().as_ref()),
+                ],
+            )
+            .expect("fixture path should move outside its registered source");
+        drop(connection);
+
+        let reveal_error =
+            open_clip_location_for_database(&fixture.database_path, fixture.clip_id, |_| {
+                panic!("an out-of-source file must not be revealed")
+            })
+            .expect_err("location should reject an out-of-source file");
+        let open_error =
+            open_clip_externally_for_database(&fixture.database_path, fixture.clip_id, |_| {
+                panic!("an out-of-source file must not be opened")
+            })
+            .expect_err("external open should reject an out-of-source file");
+
+        assert!(reveal_error.contains("越出已授权来源目录"));
+        assert!(open_error.contains("越出已授权来源目录"));
+        let _ = fs::remove_dir_all(outside_root);
+    }
+
+    #[test]
+    fn safe_open_commands_reject_an_ancestor_symlink_or_reparse_point_when_supported() {
+        let fixture = ClipCommandFixture::without_file("original.mp4");
+        let real_directory = fixture._root.join("真实目录");
+        let linked_directory = fixture._root.join("链接目录");
+        fs::create_dir_all(&real_directory).expect("real directory should be created");
+        let real_path = real_directory.join("录像 空格.mp4");
+        fs::write(&real_path, b"linked mp4").expect("linked target should be written");
+
+        #[cfg(windows)]
+        let link_result = std::os::windows::fs::symlink_dir(&real_directory, &linked_directory);
+        #[cfg(unix)]
+        let link_result = std::os::unix::fs::symlink(&real_directory, &linked_directory);
+        #[cfg(not(any(windows, unix)))]
+        let link_result: std::io::Result<()> = Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "directory symlinks are unavailable on this platform",
+        ));
+        if link_result.is_err() {
+            return;
+        }
+
+        let path_through_link = linked_directory.join("录像 空格.mp4");
+        let connection = db::open_database(&fixture.database_path).unwrap();
+        connection
+            .execute(
+                "UPDATE clips SET file_path = ?2, normalized_path = ?3 WHERE id = ?1",
+                rusqlite::params![
+                    fixture.clip_id,
+                    path_through_link.to_string_lossy().as_ref(),
+                    db::normalize_path(path_through_link.to_string_lossy().as_ref()),
+                ],
+            )
+            .expect("fixture path should use the linked ancestor");
+        drop(connection);
+
+        let reveal_error =
+            open_clip_location_for_database(&fixture.database_path, fixture.clip_id, |_| {
+                panic!("a reparse path must not be revealed")
+            })
+            .expect_err("location should reject an ancestor reparse point");
+        let open_error =
+            open_clip_externally_for_database(&fixture.database_path, fixture.clip_id, |_| {
+                panic!("a reparse path must not be opened")
+            })
+            .expect_err("external open should reject an ancestor reparse point");
+
+        assert!(reveal_error.contains("reparse point"));
+        assert!(open_error.contains("reparse point"));
     }
 
     #[test]

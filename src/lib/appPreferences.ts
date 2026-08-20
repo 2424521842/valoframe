@@ -23,6 +23,8 @@ export type AppPreferencesV1 = {
   motionMode: MotionMode;
   scanOnStartup: boolean;
   automaticUpdateCheck: boolean;
+  /** HTTPS endpoint for direct issue-feedback uploads; empty means save-to-file only. */
+  feedbackEndpoint: string;
 };
 
 export type AppPreferencesPatch = Partial<
@@ -51,6 +53,7 @@ export const DEFAULT_APP_PREFERENCES: Readonly<AppPreferencesV1> = Object.freeze
   motionMode: "system",
   scanOnStartup: false,
   automaticUpdateCheck: true,
+  feedbackEndpoint: "",
 });
 
 const STARTUP_DESTINATIONS: readonly StartupDestination[] = [
@@ -125,6 +128,9 @@ export function normalizeAppPreferences(value: unknown): AppPreferencesV1 {
     automaticUpdateCheck: isBoolean(value.automaticUpdateCheck)
       ? value.automaticUpdateCheck
       : DEFAULT_APP_PREFERENCES.automaticUpdateCheck,
+    feedbackEndpoint: isFeedbackEndpoint(value.feedbackEndpoint)
+      ? value.feedbackEndpoint
+      : DEFAULT_APP_PREFERENCES.feedbackEndpoint,
   };
 }
 
@@ -162,6 +168,9 @@ export function applyAppPreferencesPatch(
     automaticUpdateCheck: isBoolean(patch.automaticUpdateCheck)
       ? patch.automaticUpdateCheck
       : current.automaticUpdateCheck,
+    feedbackEndpoint: isFeedbackEndpoint(patch.feedbackEndpoint)
+      ? patch.feedbackEndpoint
+      : current.feedbackEndpoint,
   };
 }
 
@@ -223,6 +232,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isBoolean(value: unknown): value is boolean {
   return typeof value === "boolean";
+}
+
+const MAX_FEEDBACK_ENDPOINT_CHARS = 300;
+
+function isFeedbackEndpoint(value: unknown): value is string {
+  return typeof value === "string" && value.length <= MAX_FEEDBACK_ENDPOINT_CHARS;
 }
 
 function isVolumePercent(value: unknown): value is number {

@@ -20,6 +20,16 @@ export const bundledValorantAssetUrls = Object.freeze([
   ),
 ]);
 
+/** Canonical localized agent labels in manifest order; used by manual import forms. */
+export const valorantAgentDisplayNames: readonly string[] = Object.freeze(
+  assetManifest.agents.map(({ displayName }) => displayName),
+);
+
+/** Canonical localized map labels in manifest order; used by manual import forms. */
+export const valorantMapDisplayNames: readonly string[] = Object.freeze(
+  assetManifest.maps.map(({ displayName }) => displayName),
+);
+
 export function valorantMapListViewIconUrl(mapName: string): string {
   const relativePath = MAP_PATH_BY_NAME.get(normalizeAssetName(mapName));
   return relativePath ? `${LOCAL_ASSET_BASE}/${relativePath}` : "";

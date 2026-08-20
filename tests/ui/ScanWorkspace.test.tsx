@@ -5,6 +5,7 @@ import type { ComponentProps } from "react";
 import { SourceRelocationDialog } from "../../src/components/SourceRelocationDialog";
 import { ScanWorkspace } from "../../src/screens/ScanWorkspace";
 import type {
+  PendingManualClip,
   RelocateScanSourceResult,
   ScanSourceRelocationPreview,
   ScanSummary,
@@ -15,6 +16,7 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
   it("surfaces an explicit NVIDIA import entry and opens the wizard with NVIDIA selected", async () => {
     const user = userEvent.setup();
     renderWorkspace();
+    await openSourcesSection(user);
 
     const entryHeading = screen.getByRole("heading", { name: "导入 NVIDIA 录屏" });
     const entry = entryHeading.closest("section");
@@ -66,23 +68,25 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
     expect(within(dialog).getByRole("button", { name: "添加并首次同步" })).toBeDisabled();
   });
 
-  it("uses the settings-style source, task, and result navigation", async () => {
+  it("uses the settings-style source, task, pending, and result navigation", async () => {
     const user = userEvent.setup();
     renderWorkspace();
 
     const workflow = screen.getByRole("navigation", { name: "扫描分类" });
     const steps = within(workflow).getAllByRole("button");
-    expect(steps).toHaveLength(3);
-    expect(steps[0]).toHaveTextContent("视频来源");
-    expect(steps[1]).toHaveTextContent("扫描任务");
-    expect(steps[2]).toHaveTextContent("识别结果");
+    expect(steps).toHaveLength(4);
+    expect(steps[0]).toHaveTextContent("扫描任务");
+    expect(steps[1]).toHaveTextContent("视频来源");
+    expect(steps[2]).toHaveTextContent("待录入");
+    expect(steps[3]).toHaveTextContent("识别结果");
     expect(steps[0]).toHaveAttribute("aria-current", "page");
 
-    await user.click(steps[2]);
-    expect(steps[2]).toHaveAttribute("aria-current", "page");
+    await user.click(steps[3]);
+    expect(steps[3]).toHaveAttribute("aria-current", "page");
   });
 
-  it("always shows source-local freshness and excludes disabled sources from alerts", () => {
+  it("always shows source-local freshness and excludes disabled sources from alerts", async () => {
+    const user = userEvent.setup();
     renderWorkspace({
       sourceDirs: [
         source("today", "2026-08-09T00:00:00Z"),
@@ -91,6 +95,7 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
         source("disabled-never", null, false),
       ],
     });
+    await openSourcesSection(user);
 
     expect(screen.getByText("今天扫描")).toBeInTheDocument();
     expect(screen.getByText("6 天未扫描")).toBeInTheDocument();
@@ -107,6 +112,7 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
       sourceDirs: [source("archive", null, false)],
       onSetSourceEnabled,
     });
+    await openSourcesSection(user);
 
     expect(screen.getByText("未加入自动同步")).toBeVisible();
     const includeSource = screen.getByRole("button", { name: "加入自动同步 archive" });
@@ -119,13 +125,15 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
     );
   });
 
-  it("aggregates overdue and first-scan enabled sources", () => {
+  it("aggregates overdue and first-scan enabled sources", async () => {
+    const user = userEvent.setup();
     renderWorkspace({
       sourceDirs: [
         source("nine", "2026-07-31T00:00:00Z"),
         source("first", null),
       ],
     });
+    await openSourcesSection(user);
 
     expect(screen.getByText(
       "2 个视频来源需要扫描，最长 9 天未扫描，其中 1 个尚未完成首次扫描",
@@ -158,6 +166,7 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
 
     expect(screen.queryByRole("dialog", { name: "重新定位来源根目录" })).not.toBeInTheDocument();
     expect(previewRelocation).not.toHaveBeenCalled();
+    await openSourcesSection(user);
     await user.click(screen.getByRole("button", { name: "重新定位 archive" }));
 
     const relocationDialog = screen.getByRole("dialog", { name: "重新定位来源根目录" });
@@ -184,6 +193,7 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
       onPreviewSourceRelocation: previewRelocation,
       onRelocateSource: relocateSource,
     });
+    await openSourcesSection(user);
     await user.click(screen.getByRole("button", { name: "重新定位 archive" }));
     await user.click(screen.getByRole("button", { name: "选择新的根目录" }));
 
@@ -252,6 +262,7 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
       onPreviewSourceRelocation: previewRelocation,
       onRelocateSource: relocateSource,
     });
+    await openSourcesSection(user);
     await user.click(screen.getByRole("button", { name: "重新定位 archive" }));
     await user.click(screen.getByRole("button", { name: "选择新的根目录" }));
 
@@ -277,6 +288,7 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
       onPreviewSourceRelocation: vi.fn(async () => relocationPreview()),
       onRelocateSource: relocateSource,
     });
+    await openSourcesSection(user);
     await user.click(screen.getByRole("button", { name: "重新定位 archive" }));
     await user.click(screen.getByRole("button", { name: "选择新的根目录" }));
     await user.click(await screen.findByRole("button", { name: "继续确认" }));
@@ -301,6 +313,7 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
       onPreviewSourceRelocation: vi.fn(async () => preview),
       onRelocateSource: vi.fn(async () => relocationResult(preview, false)),
     });
+    await openSourcesSection(user);
     await user.click(screen.getByRole("button", { name: "重新定位 archive" }));
     await user.click(screen.getByRole("button", { name: "选择新的根目录" }));
     await user.click(await screen.findByRole("button", { name: "继续确认" }));
@@ -325,6 +338,7 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
         "failed-relocation-sync",
       )),
     });
+    await openSourcesSection(user);
     await user.click(screen.getByRole("button", { name: "重新定位 archive" }));
     await user.click(screen.getByRole("button", { name: "选择新的根目录" }));
     await user.click(await screen.findByRole("button", { name: "继续确认" }));
@@ -356,6 +370,7 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
         syncMessage: `同步 ${syncStatus}`,
       })),
     });
+    await openSourcesSection(user);
     await user.click(screen.getByRole("button", { name: "重新定位 archive" }));
     await user.click(screen.getByRole("button", { name: "选择新的根目录" }));
     await user.click(await screen.findByRole("button", { name: "继续确认" }));
@@ -375,6 +390,7 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
       onPreviewSourceRelocation: vi.fn(async () => preview),
       onRelocateSource: vi.fn(async () => relocationResult(preview, true)),
     });
+    await openSourcesSection(user);
     await user.click(screen.getByRole("button", { name: "重新定位 archive" }));
     await user.click(screen.getByRole("button", { name: "选择新的根目录" }));
     await user.click(await screen.findByRole("button", { name: "继续确认" }));
@@ -383,10 +399,50 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
     expect(await screen.findByText("重新定位成功，同步已完成")).toBeVisible();
     expect(screen.getByText("relocation-sync-job")).toBeVisible();
   });
+
+  it("lists pending NVIDIA recordings and opens the manual import dialog", async () => {
+    const user = userEvent.setup();
+    const onSetPendingIgnored = vi.fn();
+    renderWorkspace({
+      sourceDirs: [nvidiaSource()],
+      pendingClips: [pendingClip()],
+      onSetPendingIgnored,
+    });
+
+    const navigation = screen.getByRole("navigation", { name: "扫描分类" });
+    await user.click(within(navigation).getByRole("button", { name: /待录入/ }));
+
+    expect(screen.getByText("待录入的 NVIDIA 视频")).toBeVisible();
+    expect(screen.getByText("Valorant 2026.07.02 - 21.58.03.07.mp4")).toBeVisible();
+    expect(screen.getByText(/不会自动导入素材库/)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "忽略" }));
+    expect(onSetPendingIgnored).toHaveBeenCalledWith("pending-1", true);
+
+    await user.click(screen.getByRole("button", { name: "录入" }));
+    const dialog = await screen.findByRole("dialog", { name: "录入 NVIDIA 视频" });
+    expect(within(dialog).getByText("Valorant 2026.07.02 - 21.58.03.07.mp4")).toBeVisible();
+  });
+
+  it("flags the pending nav entry when recordings await classification", () => {
+    renderWorkspace({
+      pendingClips: [pendingClip()],
+    });
+
+    const navigation = screen.getByRole("navigation", { name: "扫描分类" });
+    const pendingNav = within(navigation).getByRole("button", { name: /待录入/ });
+    expect(pendingNav).not.toHaveAttribute("aria-current");
+    expect(within(pendingNav).getByLabelText(/有 1 个 NVIDIA 视频待录入/)).toBeVisible();
+  });
 });
 
 function renderWorkspace(overrides: Partial<ComponentProps<typeof ScanWorkspace>>) {
   return render(workspace(overrides));
+}
+
+async function openSourcesSection(user: ReturnType<typeof userEvent.setup>) {
+  const navigation = screen.getByRole("navigation", { name: "扫描分类" });
+  await user.click(within(navigation).getByRole("button", { name: /视频来源/ }));
 }
 
 function workspace(overrides: Partial<ComponentProps<typeof ScanWorkspace>>) {
@@ -400,6 +456,15 @@ function workspace(overrides: Partial<ComponentProps<typeof ScanWorkspace>>) {
       isLoading={false}
       isScanning={false}
       localDay={new Date("2026-08-09T12:00:00Z")}
+      pendingClips={[]}
+      pendingIgnoredCount={0}
+      pendingError={null}
+      isPendingLoading={false}
+      importingPendingId={null}
+      showIgnoredPending={false}
+      manualAgentNames={["捷风"]}
+      manualMapNames={["霓虹町"]}
+      manualGameModes={["竞技模式"]}
       progress={null}
       scanStatus="idle"
       scanTargets={[]}
@@ -418,6 +483,9 @@ function workspace(overrides: Partial<ComponentProps<typeof ScanWorkspace>>) {
       onStartScan={vi.fn()}
       onSyncEnabledSources={vi.fn()}
       onSyncSource={vi.fn()}
+      onImportPendingClip={vi.fn(async () => true)}
+      onSetPendingIgnored={vi.fn()}
+      onToggleShowIgnoredPending={vi.fn()}
       {...overrides}
     />
   );
@@ -438,6 +506,39 @@ function source(id: string, lastScanAt: string | null, enabled = true): SourceDi
     lastError: null,
     clipCount: 0,
     lastScanAt,
+  };
+}
+
+function nvidiaSource(): SourceDir {
+  return {
+    id: "nvidia",
+    name: "NVIDIA 录屏",
+    displayName: "NVIDIA 录屏",
+    path: "D:\\Videos\\NVIDIA",
+    sourceKind: "nvidia",
+    scanMode: "recursive-mp4",
+    scanRootPath: "D:\\Videos\\NVIDIA",
+    enabled: true,
+    status: "available",
+    accessibility: true,
+    lastError: null,
+    clipCount: 0,
+    lastScanAt: null,
+  };
+}
+
+function pendingClip(): PendingManualClip {
+  return {
+    id: "pending-1",
+    sourceDirId: "nvidia",
+    sourceDirName: "NVIDIA 录屏",
+    filePath: "D:\\Videos\\NVIDIA\\Valorant 2026.07.02 - 21.58.03.07.mp4",
+    fileName: "Valorant 2026.07.02 - 21.58.03.07.mp4",
+    fileSize: 84_500_000,
+    modifiedAt: "2026-07-02T22:06:00Z",
+    sourceRelativeDir: "",
+    ignored: false,
+    firstDiscoveredAt: "2026-07-02T22:45:00Z",
   };
 }
 

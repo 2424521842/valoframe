@@ -125,7 +125,7 @@ describe("SettingsWorkspace", () => {
     expect(summary).toHaveTextContent(/已启用\s*2/);
     expect(summary).toHaveTextContent(/异常来源\s*2/);
     expect(screen.getByText(/本机 SQLite 数据库/)).toBeVisible();
-    expect(screen.getByText(/不提供云同步、遥测或自动上传/)).toBeVisible();
+    expect(screen.getByText(/不提供云同步或遥测/)).toBeVisible();
     expect(screen.getByText(/只有从应用回收站再次确认“永久删除视频”后/)).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: /管理扫描来源/ }));

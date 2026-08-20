@@ -29,7 +29,7 @@ const SOURCE_OPTIONS: Array<{
   {
     kind: "nvidia",
     title: "NVIDIA 录屏",
-    description: "递归读取 NVIDIA 输出目录中的 MP4",
+    description: "自动发现 NVIDIA 输出目录中的 MP4，手动补全分类后才会入库",
     icon: <MonitorPlay weight="duotone" />,
   },
   {
