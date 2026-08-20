@@ -107,6 +107,11 @@ describe("whole-library facet consumption", () => {
     await waitFor(() => expect(mocks.getLibraryFacets).toHaveBeenCalledTimes(1));
 
     await user.click(screen.getByRole("button", { name: "扫描目录" }));
+    await user.click(
+      within(
+        await screen.findByRole("navigation", { name: "扫描分类" }),
+      ).getByRole("button", { name: /视频来源/ }),
+    );
     const sourceRow = (await screen.findByText("页外来源")).closest("article");
     expect(sourceRow).not.toBeNull();
     expect(within(sourceRow as HTMLElement).getByText("700 个片段")).toBeVisible();
