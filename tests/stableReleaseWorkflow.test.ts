@@ -157,7 +157,7 @@ test("Windows verifies, packages, stages, and installs personal community compli
   assert.match(workflow, /stage-personal-community-stable-ffmpeg\.ps1/u);
   assert.match(
     workflow,
-    /-DecisionPath release\/approvals\/personal-community-stable-v0\.2\.1\.json/u,
+    /-DecisionPath release\/approvals\/personal-community-stable-v0\.2\.2\.json/u,
   );
   assert.match(workflow, /--release-profile personal-community-stable/u);
   assert.match(workflow, /channelDistributionReady -ne \$true/u);

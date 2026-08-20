@@ -1,6 +1,6 @@
 [package]
 name = "valorant-highlight-manager"
-version = "0.2.1"
+version = "0.2.2"
 description = "VALOFRAME local VALORANT CN highlight asset manager"
 authors = ["VALOFRAME Contributors"]
 license = "MIT"

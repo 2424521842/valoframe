@@ -1,5 +1,5 @@
 import { StrictMode } from "react";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppUpdaterController } from "../../src/hooks/useAppUpdaterController";
@@ -676,6 +676,8 @@ async function openScanWorkspace(user: ReturnType<typeof userEvent.setup>) {
   await waitFor(() => expect(mocks.listSources).toHaveBeenCalled());
   await user.click(screen.getByRole("button", { name: "扫描目录" }));
   await screen.findByRole("heading", { name: "扫描目录" });
+  const navigation = screen.getByRole("navigation", { name: "扫描分类" });
+  await user.click(within(navigation).getByRole("button", { name: /视频来源/ }));
 }
 
 async function openScanTaskWorkspace(user: ReturnType<typeof userEvent.setup>) {

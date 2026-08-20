@@ -111,8 +111,8 @@ type ScanSectionDefinition = {
 };
 
 const SCAN_SECTIONS: ScanSectionDefinition[] = [
-  { id: "sources", label: "视频来源", description: "添加、启用与维护目录", icon: FolderOpen },
   { id: "task", label: "扫描任务", description: "选择范围并查看进度", icon: ArrowsClockwise },
+  { id: "sources", label: "视频来源", description: "添加、启用与维护目录", icon: FolderOpen },
   { id: "pending", label: "待录入", description: "手动补全 NVIDIA 录屏分类", icon: ClipboardText },
   { id: "results", label: "识别结果", description: "核对统计、账号与素材库", icon: ChartBar },
 ];
@@ -160,9 +160,7 @@ export function ScanWorkspace({
   const [isSourceWizardOpen, setIsSourceWizardOpen] = useState(false);
   const [relocationSource, setRelocationSource] = useState<SourceDir | null>(null);
   const [importTarget, setImportTarget] = useState<PendingManualClip | null>(null);
-  const [activeSection, setActiveSection] = useState<ScanWorkspaceSection>(
-    () => isScanning ? "task" : "sources",
-  );
+  const [activeSection, setActiveSection] = useState<ScanWorkspaceSection>("task");
   const workspaceRef = useRef<HTMLElement>(null);
   const sectionHeadingRef = useRef<HTMLHeadingElement>(null);
   const previousSectionRef = useRef(activeSection);
