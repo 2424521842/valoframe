@@ -125,7 +125,7 @@ CI 将已通过检查的全部 NSIS 载荷保留到 `RUNNER_TEMP` 下的预先�
 - `same-source-subdirectory-rename-auto-reconnect-user-state-preserved`：同一授权来源内子目录改名后自动重连，并保持 clip ID、收藏、标签、备注和评审状态。
 - `source-root-relocation-user-state-preserved`：用户预览并提交新根后恢复播放，保持全部索引状态，且完整同步成功前不伪造扫描新鲜度。
 - `kill-death-timeline-icons-tooltips-accessibility-and-seek`：本人击杀/本人死亡数量、红色准星/紫色骷髅、tooltip、无障碍名称和点击跳转秒数一致。
-- `signed-updater-v0.2.1-to-v0.2.2-schema-v16-user-state-preserved`：从手动安装的 v0.2.1 经签名 updater 升级，随后确认 schema v16 与用户状态完整。
+- `signed-updater-v0.2.1-to-v0.2.2-schema-v18-user-state-preserved`：从手动安装的 v0.2.1 经签名 updater 升级，随后确认 schema v18 与用户状态完整。
 - `index-only-removal-source-media-sha256-unchanged`：单条和批量仅移除索引后复核原视频 SHA-256 不变，并记录部分失败；该项属于 data-safety manifest。
 
 历史材料可以继续保留，当前路线使用 `v0.1.0-beta.1-manual-upgrade-to-v0.2.1` 和通用 `signed-updater-upgrade-to-higher-patch` 场景。

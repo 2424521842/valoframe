@@ -560,7 +560,7 @@ test("public release preflight covers every non-bundle approval domain", () => {
     "kill-death-timeline-icons-tooltips-accessibility-and-seek",
     "same-version-reinstall",
     "v0.1.0-beta.1-manual-upgrade-to-v0.2.1",
-    "signed-updater-v0.2.1-to-v0.2.2-schema-v16-user-state-preserved",
+    "signed-updater-v0.2.1-to-v0.2.2-schema-v18-user-state-preserved",
     "signed-updater-upgrade-to-higher-patch",
     "downgrade-rejected",
     "uninstall-user-data-preserved",
@@ -767,7 +767,7 @@ test("bundle gate proves NSIS format and all shipped compliance payload files", 
   assert.match(releaseWorkflow, /-FfmpegMode ResourceOverride/);
 });
 
-test("Windows startup smoke proves schema v16 and single-instance handoff", () => {
+test("Windows startup smoke proves schema v18 and single-instance handoff", () => {
   assert.match(
     releaseSmokeScript,
     /IsNullOrEmpty\(\$env:WEBVIEW2_USER_DATA_FOLDER\)[\s\S]*Refusing to inherit WEBVIEW2_USER_DATA_FOLDER[\s\S]*\$realDataBefore\s*=\s*Get-TreeFingerprint/,
@@ -784,10 +784,10 @@ test("Windows startup smoke proves schema v16 and single-instance handoff", () =
     releaseSmokeScript,
     /IsNullOrWhiteSpace\(\$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS\)[\s\S]*Refusing to inherit WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS/,
   );
-  assert.match(releaseSmokeScript, /\$ExpectedSchemaVersion\s*=\s*16/);
+  assert.match(releaseSmokeScript, /\$ExpectedSchemaVersion\s*=\s*18/);
   assert.match(
     releaseWorkflow,
-    /smokeReport\.database\.schemaVersion\s+-ne\s+16/,
+    /smokeReport\.database\.schemaVersion\s+-ne\s+18/,
   );
   assert.doesNotMatch(releaseWorkflow, /fresh schema-v13 database/);
   assert.match(releaseSmokeScript, /file_volume_serial/);

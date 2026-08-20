@@ -256,8 +256,8 @@ test("startup smoke consumes only the exact bundle-gate payload", () => {
     "Verified Community Beta startup payload files do not exactly match",
     "normalization.rawEmbeddedSha256",
     "-ExpectedExecutableSha256 $expectedMainHash",
-    "smoke.database.schemaVersion -ne 16",
-    "fresh schema-v16 database",
+    "smoke.database.schemaVersion -ne 18",
+    "fresh schema-v18 database",
     "singleInstance.sharedLaunchConfiguration.environmentOverrides.WEBVIEW2_USER_DATA_FOLDER",
     "smoke.runtime.webView2UserDataPath",
   ]) {
