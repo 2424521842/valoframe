@@ -2676,6 +2676,7 @@ if ($null -ne $cleanupError) {
 $report.runtime['processOutput'] = $processOutputCapture
 $report.runtime.singleInstance['processOutput'] = $secondInstanceProcessOutputCapture
 $report.runtime['cleaned'] = $true
+$global:LASTEXITCODE = 0
 Write-Host 'SMOKE-STAGE: emitting report'
 try {
     $report | ConvertTo-Json -Depth 12

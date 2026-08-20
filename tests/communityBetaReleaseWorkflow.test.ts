@@ -258,6 +258,7 @@ test("startup smoke consumes only the exact bundle-gate payload", () => {
     "-ExpectedExecutableSha256 $expectedMainHash",
     "smoke.database.schemaVersion -ne 18",
     "fresh schema-v18 database",
+    "windows-release-smoke.ps1 exited with code",
     "singleInstance.sharedLaunchConfiguration.environmentOverrides.WEBVIEW2_USER_DATA_FOLDER",
     "smoke.runtime.webView2UserDataPath",
   ]) {

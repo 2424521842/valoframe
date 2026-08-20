@@ -395,6 +395,9 @@ jobs:
             -FfmpegMode ResourceOverride `
             -IsolationParent $env:RUNNER_TEMP `
             -ExpectedExecutableSha256 $expectedMainHash
+          $smokeExitCode = $LASTEXITCODE
+          $global:LASTEXITCODE = 0
+          if ($smokeExitCode -ne 0) { throw "windows-release-smoke.ps1 exited with code $smokeExitCode." }
           $smokeJson = ($smokeOutput -join [Environment]::NewLine)
           $smokeReportPath = Join-Path $env:RC_EVIDENCE_DIR 'vhm-release-smoke-report.json'
           $smokeJson | Set-Content -LiteralPath $smokeReportPath -Encoding UTF8

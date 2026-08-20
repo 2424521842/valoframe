@@ -560,7 +560,10 @@ jobs:
             -FfmpegMode ResourceOverride `
             -IsolationParent $env:RUNNER_TEMP `
             -ExpectedExecutableSha256 $expectedMainHash
-          Write-Host "STABLE-STEP: smoke returned $($smokeJson.Count) output lines (LASTEXITCODE=$LASTEXITCODE)"
+          $smokeExitCode = $LASTEXITCODE
+          $global:LASTEXITCODE = 0
+          if ($smokeExitCode -ne 0) { throw "windows-release-smoke.ps1 exited with code $smokeExitCode." }
+          Write-Host "STABLE-STEP: smoke returned $($smokeJson.Count) output lines (exitCode=$smokeExitCode)"
           $smokeReportJson = $smokeJson -join "`n"
           $smokeReportJson | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'vhm-stable-startup-smoke.json') -Encoding utf8
           $smoke = $smokeReportJson | ConvertFrom-Json -Depth 30

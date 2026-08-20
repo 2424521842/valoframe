@@ -380,3 +380,8 @@ test("each updater manifest command fails closed", () => {
   assert.equal(callCount, 4);
   assert.equal(guardedCount, callCount);
 });
+test("stable smoke invocation guards a leaked native exit code", () => {
+  assert.match(workflow, /\$smokeExitCode = \$LASTEXITCODE/u);
+  assert.match(workflow, /\$global:LASTEXITCODE = 0/u);
+  assert.match(workflow, /windows-release-smoke\.ps1 exited with code/u);
+});
