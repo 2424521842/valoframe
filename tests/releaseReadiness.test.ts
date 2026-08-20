@@ -785,6 +785,8 @@ test("Windows startup smoke proves schema v18 and single-instance handoff", () =
     /IsNullOrWhiteSpace\(\$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS\)[\s\S]*Refusing to inherit WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS/,
   );
   assert.match(releaseSmokeScript, /\$ExpectedSchemaVersion\s*=\s*18/);
+  assert.match(releaseSmokeScript, /\$global:LASTEXITCODE\s*=\s*0/);
+  assert.match(releaseWorkflow, /windows-release-smoke\.ps1 exited with code/);
   assert.match(
     releaseWorkflow,
     /smokeReport\.database\.schemaVersion\s+-ne\s+18/,
