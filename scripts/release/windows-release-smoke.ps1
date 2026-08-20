@@ -16,7 +16,7 @@ the database, thumbnail cache, and WebView2 data directory.
 The executable is created suspended, assigned to a Windows Job configured with KILL_ON_JOB_CLOSE,
 and only then resumed. An explicit inherited-handle list redirects child stdout and stderr into the
 marker-gated environment root; failures include a bounded tail of both streams. The test fails
-closed unless it can prove Job containment, path containment, database schema v16 (including empty
+closed unless it can prove Job containment, path containment, database schema v18 (including empty
 trash-snapshot and delete-intent journals), an empty fresh custom-tag catalog, absence of scans, single-instance
 handoff to the original visible window, UI process survival, graceful exit code 0, an empty Job
 after shutdown, unchanged real application data/cache trees, and safe cleanup.
@@ -107,7 +107,7 @@ $SmokeMarkerContent = 'vhm-release-smoke-root-v1'
 $EnvironmentRootPrefix = 'vhm-release-smoke-env-'
 $EnvironmentMarkerName = '.vhm-release-smoke-env-root'
 $EnvironmentMarkerContent = 'vhm-release-smoke-env-root-v1'
-$ExpectedSchemaVersion = 16
+$ExpectedSchemaVersion = 18
 $RequiredTables = @(
     'source_dirs',
     'clip_groups',

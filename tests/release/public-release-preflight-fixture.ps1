@@ -167,7 +167,7 @@ try {
         'kill-death-timeline-icons-tooltips-accessibility-and-seek',
         'same-version-reinstall',
         'v0.1.0-beta.1-manual-upgrade-to-v0.2.1',
-        'signed-updater-v0.2.1-to-v0.2.2-schema-v16-user-state-preserved',
+        'signed-updater-v0.2.1-to-v0.2.2-schema-v18-user-state-preserved',
         'signed-updater-upgrade-to-higher-patch',
         'downgrade-rejected',
         'uninstall-user-data-preserved',
@@ -368,7 +368,7 @@ try {
         'same-source-subdirectory-rename-auto-reconnect-user-state-preserved',
         'source-root-relocation-user-state-preserved',
         'kill-death-timeline-icons-tooltips-accessibility-and-seek',
-        'signed-updater-v0.2.1-to-v0.2.2-schema-v16-user-state-preserved'
+        'signed-updater-v0.2.1-to-v0.2.2-schema-v18-user-state-preserved'
     )
     foreach ($requiredCode in $v021CleanVmCodes) {
         Write-Utf8File -LiteralPath $cleanManifestPath -Text $cleanManifestOriginalText

@@ -580,11 +580,11 @@ jobs:
           if ($smoke.status -cne 'passed') {
             throw 'Community Beta startup smoke failed.'
           }
-          if ([int] $smoke.database.schemaVersion -ne 16 -or
+          if ([int] $smoke.database.schemaVersion -ne 18 -or
               [int] $smoke.database.requiredTableCount -ne 16 -or
               [long] $smoke.database.trashSnapshotCount -ne 0 -or
               [long] $smoke.database.deleteIntentCount -ne 0) {
-            throw 'Community Beta startup smoke did not prove a fresh schema-v16 database with empty trash-snapshot and delete-intent journals.'
+            throw 'Community Beta startup smoke did not prove a fresh schema-v18 database with empty trash-snapshot and delete-intent journals.'
           }
           $singleInstance = $smoke.runtime.singleInstance
           if ($singleInstance.verified -ne $true -or
