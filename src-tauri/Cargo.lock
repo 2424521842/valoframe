@@ -4501,6 +4501,7 @@ dependencies = [
  "flate2",
  "hex",
  "minisign-verify",
+ "reqwest",
  "rusqlite",
  "semver",
  "serde",
@@ -4514,6 +4515,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tokio-util",
  "windows-sys 0.61.2",
  "zip",
 ]

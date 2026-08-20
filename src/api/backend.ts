@@ -1,6 +1,11 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { mockClips, mockSourceDirs, mockTags } from "../data/mockData.ts";
+import {
+  mockClips,
+  mockPendingManualClips,
+  mockSourceDirs,
+  mockTags,
+} from "../data/mockData.ts";
 import { TAG_COLORS } from "../lib/tags.ts";
 import {
   matchesVideoType,
@@ -15,6 +20,8 @@ import type {
   BackendClipPage,
   BackendClipSummary,
   BackendExportClipsResult,
+  BackendManualClipImportResult,
+  BackendPendingManualClip,
   BackendPermanentDeleteResult,
   BackendRemoveClipsFromIndexResult,
   BackendReviewClipPage,
@@ -36,15 +43,21 @@ import type {
   ClipEvent,
   ExportClipsResult,
   ClipMedia,
+  FeedbackProgress,
+  FeedbackSubmitInput,
+  FeedbackSubmitResult,
   FullDriveScanResult,
   LibraryFacets,
   LibraryFacetValue,
+  ManualClipImportInput,
+  PendingManualClip,
   PermanentDeleteResult,
   RemoveClipsFromIndexResult,
   RelocateScanSourceResult,
   RegisterScanSourceInput,
   RegisterScanSourceResult,
   ReviewClipPage,
+  SaveFeedbackPackageResult,
   ReviewClipState,
   ReviewDecision,
   ReviewDecisionMutation,
@@ -81,8 +94,13 @@ const browserPreviewTagStore = new Map<string, Tag>(
 const browserPreviewSourceStore = new Map<string, SourceDir>(
   mockSourceDirs.map((source) => [source.id, { ...source }]),
 );
+const browserPreviewPendingStore = new Map<string, PendingManualClip>(
+  mockPendingManualClips.map((pending) => [pending.id, { ...pending }]),
+);
 let browserPreviewTagSequence = 1;
 let browserPreviewScanSequence = 1;
+let browserPreviewClipSequence = 1;
+let browserPreviewManualAccountSequence = 1;
 const browserPreviewScanSummaries = new Map<string, ScanSummary>();
 let browserPreviewSourceSequence = Math.max(
   0,
@@ -459,6 +477,131 @@ export async function setScanSourceEnabled(
   }));
 }
 
+/** NVIDIA recordings awaiting manual classification. Ignored rows are hidden by default. */
+export async function listPendingManualClips(
+  includeIgnored = false,
+): Promise<PendingManualClip[]> {
+  if (isBrowserPreviewRuntime()) {
+    return [...browserPreviewPendingStore.values()]
+      .filter((pending) => includeIgnored || !pending.ignored)
+      .map((pending) => ({ ...pending }));
+  }
+  const items = await invoke<BackendPendingManualClip[]>("list_pending_manual_clips", {
+    includeIgnored,
+  });
+  return items.map(mapBackendPendingManualClip);
+}
+
+export async function setPendingManualClipIgnored(
+  pendingId: string,
+  ignored: boolean,
+): Promise<void> {
+  if (isBrowserPreviewRuntime()) {
+    const pending = browserPreviewPendingStore.get(pendingId);
+    if (!pending) throw new Error(`待录入视频不存在：${pendingId}`);
+    browserPreviewPendingStore.set(pendingId, { ...pending, ignored });
+    return;
+  }
+  await invoke("set_pending_manual_clip_ignored", {
+    pendingId: numericClipId(pendingId),
+    ignored,
+  });
+}
+
+/** Classifies one pending NVIDIA recording and imports it into the library. */
+export async function importPendingManualClip(
+  pendingId: string,
+  input: ManualClipImportInput,
+): Promise<Clip> {
+  if (isBrowserPreviewRuntime()) {
+    return browserPreviewImportPendingClip(pendingId, input);
+  }
+  const result = await invoke<BackendManualClipImportResult>("import_pending_manual_clip", {
+    pendingId: numericClipId(pendingId),
+    input,
+  });
+  return mapBackendClip(result.clip);
+}
+
+function mapBackendPendingManualClip(pending: BackendPendingManualClip): PendingManualClip {
+  return {
+    id: String(pending.id),
+    sourceDirId: String(pending.sourceDirId),
+    sourceDirName: pending.sourceDirName,
+    filePath: pending.filePath,
+    fileName: pending.fileName,
+    fileSize: pending.fileSize,
+    modifiedAt: pending.modifiedAt,
+    sourceRelativeDir: pending.sourceRelativeDir,
+    ignored: pending.ignored,
+    firstDiscoveredAt: pending.firstDiscoveredAt,
+  };
+}
+
+function browserPreviewImportPendingClip(
+  pendingId: string,
+  input: ManualClipImportInput,
+): Clip {
+  const pending = browserPreviewPendingStore.get(pendingId);
+  if (!pending) {
+    throw { code: "pending-clip-not-found", message: `待录入视频不存在：${pendingId}`, pendingId };
+  }
+  const source = browserPreviewSourceStore.get(pending.sourceDirId);
+  const accountId = input.accountKey?.startsWith("match-account-")
+    ? input.accountKey
+    : `match-account-manual-${browserPreviewManualAccountSequence++}`;
+  const now = new Date().toISOString();
+  const clip: Clip = {
+    id: `preview-imported-${browserPreviewClipSequence++}`,
+    fileName: pending.fileName,
+    filePath: pending.filePath,
+    sourceDirId: pending.sourceDirId,
+    sourceDirName: pending.sourceDirName,
+    sourceDirPath: source?.scanRootPath ?? pending.filePath,
+    sourceKind: source?.sourceKind ?? "nvidia",
+    scanMode: source?.scanMode ?? "recursive-mp4",
+    scanRootPath: source?.scanRootPath ?? pending.filePath,
+    sourceRelativeDir: pending.sourceRelativeDir,
+    clipGroupId: null,
+    clipGroupName: pending.fileName,
+    accountId,
+    accountIdentitySource: "match-account-id",
+    openid: null,
+    accountName: input.accountName,
+    accountDisplayName: input.accountName,
+    accountSourceName: pending.sourceDirName,
+    accountDetectedBy: "metadata",
+    playerName: input.playerName?.trim() || input.accountName,
+    agentName: input.agentName.trim(),
+    mapName: input.mapName?.trim() || "",
+    gameMode: input.gameMode?.trim() || "",
+    metadataStatus: "manual",
+    matchId: `manual-${pendingId}`,
+    matchAccountId: accountId.replace(/^match-account-/, ""),
+    scoreline: "",
+    kda: "",
+    agentAvatarUrl: "",
+    metadataSource: "manual",
+    createdAt: now,
+    modifiedAt: pending.modifiedAt ?? now,
+    sizeBytes: pending.fileSize,
+    durationMs: null,
+    isFavorite: false,
+    reviewDecision: "unreviewed",
+    reviewedAt: null,
+    isMissing: false,
+    fileStatus: "available",
+    tags: [],
+    note: input.note?.trim() || "",
+    extractedText: "",
+    thumbnailTone: THUMBNAIL_TONES[Math.abs(browserPreviewClipSequence) % THUMBNAIL_TONES.length],
+    thumbnailUrl: null,
+  };
+  browserPreviewClipStore.set(clip.id, cloneClip(clip));
+  browserPreviewPendingStore.delete(pendingId);
+  return cloneClip(clip);
+}
+
 export async function listTags(): Promise<Tag[]> {
   try {
     const tags = await invoke<BackendTag[]>("list_tags");
@@ -782,6 +925,83 @@ export async function exportClips(
       clipId: String(failure.clipId),
     })),
   };
+}
+
+export async function submitFeedback(
+  input: FeedbackSubmitInput,
+): Promise<FeedbackSubmitResult> {
+  if (isBrowserPreviewRuntime()) {
+    return browserPreviewSubmitFeedback(input);
+  }
+
+  return invoke<FeedbackSubmitResult>("submit_feedback", {
+    input: {
+      clipId: numericClipId(input.clipId),
+      category: input.category,
+      description: input.description,
+      contact: input.contact,
+      includeFrames: input.includeFrames,
+      includeVideo: input.includeVideo,
+      endpoint: input.endpoint,
+    },
+  });
+}
+
+export async function saveFeedbackPackage(
+  packagePath: string,
+  destinationPath: string,
+): Promise<SaveFeedbackPackageResult> {
+  if (isBrowserPreviewRuntime()) {
+    return { destinationPath, totalBytes: 0 };
+  }
+
+  return invoke<SaveFeedbackPackageResult>("save_feedback_package", {
+    packagePath,
+    destinationPath,
+  });
+}
+
+export async function discardFeedbackPackage(packagePath: string): Promise<void> {
+  if (isBrowserPreviewRuntime()) {
+    return;
+  }
+
+  await invoke("discard_feedback_package", { packagePath });
+}
+
+export async function listenToFeedbackProgress(
+  onProgress: (progress: FeedbackProgress) => void,
+): Promise<() => void> {
+  if (typeof window === "undefined" || isBrowserPreviewRuntime()) {
+    return () => {};
+  }
+
+  return listen<FeedbackProgress>("feedback-progress", (event) => {
+    onProgress(event.payload);
+  });
+}
+
+function browserPreviewSubmitFeedback(
+  input: FeedbackSubmitInput,
+): Promise<FeedbackSubmitResult> {
+  const clip = browserPreviewClipStore.get(input.clipId);
+  const uploaded = Boolean(input.endpoint.trim());
+  return Promise.resolve({
+    reportId: "vhm-preview-report",
+    status: uploaded ? "uploaded" : "needs-save",
+    packagePath: uploaded ? null : "valoframe-feedback-preview.zip",
+    suggestedFileName: "valoframe-feedback-preview.zip",
+    totalBytes: input.includeVideo ? (clip?.sizeBytes ?? 0) : 4 * 1024,
+    includedItems: [
+      "诊断元数据（对局与素材信息）",
+      ...(input.includeFrames ? ["3 张采样帧"] : []),
+      ...(input.includeVideo ? ["完整视频"] : []),
+    ],
+    message: uploaded
+      ? "问题反馈已上传（浏览器预览模拟）。"
+      : "诊断包已生成（浏览器预览模拟）。",
+    uploadError: null,
+  });
 }
 
 export async function deleteClipsPermanently(

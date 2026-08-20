@@ -33,11 +33,78 @@ pub struct WonderfulSnapshotIngestSummary {
     pub match_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AccountNameCandidate {
+    account_name: String,
+    observed_at: Option<String>,
+    source_priority: u8,
+    traversal_order: usize,
+}
+
 pub fn ingest_wonderful_metadata(
     connection: &Connection,
     accounts: &[WonderfulAccountRecord],
 ) -> DbResult<WonderfulIngestSummary> {
     ingest_wonderful_metadata_with_round_scores(connection, accounts, &[])
+}
+
+/// Resolves Riot ID history across the main WonderfulDb records and snapshots by observation
+/// time. Calling the two ingest functions in a fixed order is not sufficient: snapshots are often
+/// newer than the last video event after a player renames their Riot ID.
+pub fn propagate_latest_wonderful_account_names(
+    connection: &Connection,
+    accounts: &[WonderfulAccountRecord],
+    snapshot_accounts: &[WonderfulSnapshotAccountRecord],
+) -> DbResult<usize> {
+    let hints = latest_wonderful_account_name_hints(accounts, snapshot_accounts);
+    db::propagate_authoritative_account_name_hints(connection, &hints, None)
+}
+
+fn latest_wonderful_account_name_hints(
+    accounts: &[WonderfulAccountRecord],
+    snapshot_accounts: &[WonderfulSnapshotAccountRecord],
+) -> Vec<db::AccountNameHint> {
+    let mut latest_by_account = HashMap::<String, AccountNameCandidate>::new();
+
+    for account in accounts {
+        if let Some(candidate) = latest_valid_account_name_candidate(account) {
+            insert_latest_account_name_candidate(
+                &mut latest_by_account,
+                &account.openid,
+                candidate,
+            );
+        }
+    }
+    for account in snapshot_accounts {
+        if let Some(candidate) = latest_valid_snapshot_account_name_candidate(account) {
+            insert_latest_account_name_candidate(
+                &mut latest_by_account,
+                &account.openid,
+                candidate,
+            );
+        }
+    }
+
+    latest_by_account
+        .into_iter()
+        .map(|(account_id, candidate)| db::AccountNameHint {
+            account_id,
+            account_name: candidate.account_name,
+        })
+        .collect()
+}
+
+fn insert_latest_account_name_candidate(
+    latest_by_account: &mut HashMap<String, AccountNameCandidate>,
+    account_id: &str,
+    candidate: AccountNameCandidate,
+) {
+    let should_replace = latest_by_account
+        .get(account_id)
+        .is_none_or(|current| account_name_candidate_is_newer(&candidate, current));
+    if should_replace {
+        latest_by_account.insert(account_id.to_string(), candidate);
+    }
 }
 
 pub fn ingest_wonderful_metadata_with_round_scores(
@@ -497,10 +564,48 @@ pub fn ingest_wonderful_snapshots(
                 matched_rows.insert(match_row_id);
             }
         }
+        if let Some(account_name) = latest_valid_snapshot_account_name(account) {
+            db::propagate_authoritative_account_name_hints(
+                connection,
+                &[db::AccountNameHint {
+                    account_id: account.openid.clone(),
+                    account_name,
+                }],
+                None,
+            )?;
+        }
     }
 
     summary.match_count = matched_rows.len();
     Ok(summary)
+}
+
+fn latest_valid_snapshot_account_name(account: &WonderfulSnapshotAccountRecord) -> Option<String> {
+    latest_valid_snapshot_account_name_candidate(account).map(|candidate| candidate.account_name)
+}
+
+fn latest_valid_snapshot_account_name_candidate(
+    account: &WonderfulSnapshotAccountRecord,
+) -> Option<AccountNameCandidate> {
+    account
+        .snapshots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, snapshot)| {
+            let account_name = snapshot
+                .account_name
+                .as_deref()
+                .and_then(valid_wonderful_player_name)?;
+            let timestamp = nonempty_trimmed(snapshot.captured_at.as_deref())
+                .or_else(|| nonempty_trimmed(snapshot.match_record.match_time.as_deref()));
+            Some(AccountNameCandidate {
+                account_name: account_name.to_string(),
+                observed_at: timestamp.map(str::to_string),
+                source_priority: 3,
+                traversal_order: index,
+            })
+        })
+        .max_by(account_name_candidate_ordering)
 }
 
 fn upsert_wonderful_match(
@@ -675,11 +780,33 @@ fn parse_scoreline(value: Option<&str>) -> (Option<i64>, Option<i64>) {
 }
 
 fn latest_valid_account_name(account: &WonderfulAccountRecord) -> Option<String> {
-    let mut best: Option<(Option<&str>, Option<&str>, usize, &str)> = None;
+    latest_valid_account_name_candidate(account).map(|candidate| candidate.account_name)
+}
+
+fn latest_valid_account_name_candidate(
+    account: &WonderfulAccountRecord,
+) -> Option<AccountNameCandidate> {
+    let mut best = None;
     let mut traversal_order = 0usize;
 
     for match_record in &account.matches {
         let match_time = nonempty_trimmed(match_record.match_time.as_deref());
+        traversal_order += 1;
+        if let Some(account_name) = match_record
+            .account_name
+            .as_deref()
+            .and_then(valid_wonderful_player_name)
+        {
+            replace_with_newer_account_name_candidate(
+                &mut best,
+                AccountNameCandidate {
+                    account_name: account_name.to_string(),
+                    observed_at: match_time.map(str::to_string),
+                    source_priority: 1,
+                    traversal_order,
+                },
+            );
+        }
         for video in &match_record.videos {
             for segment in &video.segments {
                 for event in &segment.events {
@@ -692,23 +819,49 @@ fn latest_valid_account_name(account: &WonderfulAccountRecord) -> Option<String>
                         continue;
                     };
                     let event_time = nonempty_trimmed(event.event_time.as_deref());
-                    let candidate = (match_time, event_time, traversal_order, account_name);
-                    let should_replace = match best.as_ref() {
-                        Some(current) => {
-                            (candidate.0, candidate.1, candidate.2)
-                                > (current.0, current.1, current.2)
-                        }
-                        None => true,
-                    };
-                    if should_replace {
-                        best = Some(candidate);
-                    }
+                    replace_with_newer_account_name_candidate(
+                        &mut best,
+                        AccountNameCandidate {
+                            account_name: account_name.to_string(),
+                            observed_at: match_time.or(event_time).map(str::to_string),
+                            source_priority: 2,
+                            traversal_order,
+                        },
+                    );
                 }
             }
         }
     }
 
-    best.map(|(_, _, _, account_name)| account_name.to_string())
+    best
+}
+
+fn replace_with_newer_account_name_candidate(
+    current: &mut Option<AccountNameCandidate>,
+    candidate: AccountNameCandidate,
+) {
+    if current
+        .as_ref()
+        .is_none_or(|current| account_name_candidate_is_newer(&candidate, current))
+    {
+        *current = Some(candidate);
+    }
+}
+
+fn account_name_candidate_is_newer(
+    candidate: &AccountNameCandidate,
+    current: &AccountNameCandidate,
+) -> bool {
+    account_name_candidate_ordering(candidate, current).is_gt()
+}
+
+fn account_name_candidate_ordering(
+    left: &AccountNameCandidate,
+    right: &AccountNameCandidate,
+) -> std::cmp::Ordering {
+    db::compare_account_name_observed_at(left.observed_at.as_deref(), right.observed_at.as_deref())
+        .then_with(|| left.source_priority.cmp(&right.source_priority))
+        .then_with(|| left.traversal_order.cmp(&right.traversal_order))
 }
 
 fn nonempty_trimmed(value: Option<&str>) -> Option<&str> {
@@ -716,35 +869,7 @@ fn nonempty_trimmed(value: Option<&str>) -> Option<&str> {
 }
 
 fn valid_wonderful_player_name(value: &str) -> Option<&str> {
-    let trimmed = value.trim();
-    let normalized = trimmed.to_ascii_lowercase();
-    if trimmed.is_empty()
-        || matches!(normalized.as_str(), "undefined" | "null")
-        || normalized.starts_with("wonderfulvideos")
-        || normalized.starts_with("http://")
-        || normalized.starts_with("https://")
-        || trimmed.contains('/')
-        || trimmed.contains('\\')
-    {
-        return None;
-    }
-
-    let mut parts = trimmed.split('#');
-    let name = parts.next()?.trim();
-    let tag = parts.next()?.trim();
-    let normalized_name = name.to_ascii_lowercase();
-    if name.is_empty()
-        || tag.is_empty()
-        || parts.next().is_some()
-        || normalized_name.contains("playercards")
-        || [".png", ".jpg", ".jpeg", ".webp", ".svg"]
-            .iter()
-            .any(|extension| normalized_name.ends_with(extension))
-    {
-        return None;
-    }
-
-    Some(trimmed)
+    db::valid_tagged_account_name(value)
 }
 
 fn find_clip_for_video(
@@ -756,41 +881,45 @@ fn find_clip_for_video(
     if let Some(video_src) = video.video_src.as_deref() {
         let normalized_src = db::normalize_path(video_src);
         if !normalized_src.is_empty() {
-            let source_dir_name = format!("wonderfulVideos{openid}");
-            let clip_id = connection
+            let matched = connection
                 .query_row(
                     "
-                    SELECT clips.id
+                    SELECT clips.id, source_dirs.name, source_dirs.path
                     FROM clips
                     JOIN source_dirs ON source_dirs.id = clips.source_dir_id
                     JOIN clip_groups ON clip_groups.id = clips.clip_group_id
                     WHERE clips.normalized_path = ?1
-                      AND source_dirs.name = ?2
-                      AND (?3 = '' OR clip_groups.group_key = ?3)
+                      AND (?2 = '' OR clip_groups.group_key = ?2)
                     ",
-                    params![normalized_src, source_dir_name, match_id],
-                    |row| row.get::<_, i64>(0),
+                    params![normalized_src, match_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
                 )
                 .optional()
                 .map_err(|error| {
                     format!("Database matching official video path failed: {error}")
                 })?;
-            if clip_id.is_some() {
-                return Ok(clip_id);
+            if let Some((clip_id, source_name, source_path)) = matched {
+                if db::source_openid(&source_name, &source_path).as_deref() == Some(openid) {
+                    return Ok(Some(clip_id));
+                }
             }
         }
     }
 
-    let source_dir_name = format!("wonderfulVideos{openid}");
     let mut statement = connection
         .prepare(
             "
-            SELECT clips.id, clips.file_name
+            SELECT clips.id, clips.file_name, source_dirs.name, source_dirs.path
             FROM clips
             JOIN clip_groups ON clip_groups.id = clips.clip_group_id
             JOIN source_dirs ON source_dirs.id = clips.source_dir_id
-            WHERE source_dirs.name = ?1
-              AND clip_groups.group_key = ?2
+            WHERE clip_groups.group_key = ?1
             ORDER BY clips.id
             ",
         )
@@ -798,19 +927,25 @@ fn find_clip_for_video(
             format!("Database preparing official video fallback match failed: {error}")
         })?;
     let candidates = statement
-        .query_map(params![source_dir_name, match_id], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        .query_map(params![match_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })
         .map_err(|error| format!("Database matching official video fallback failed: {error}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("Database reading official video fallback failed: {error}"))?;
     let matching_ids = candidates
         .into_iter()
-        .filter_map(|(clip_id, file_name)| {
-            (Path::new(&file_name)
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                == Some(video.video_id.as_str()))
+        .filter_map(|(clip_id, file_name, source_name, source_path)| {
+            (db::source_openid(&source_name, &source_path).as_deref() == Some(openid)
+                && Path::new(&file_name)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    == Some(video.video_id.as_str()))
             .then_some(clip_id)
         })
         .collect::<Vec<_>>();
@@ -1057,10 +1192,12 @@ fn hash_optional_bool(hasher: &mut Sha256, value: Option<bool>) {
 #[cfg(test)]
 mod account_name_tests {
     // Account IDs and player names below are synthetic fixtures, not captured user data.
-    use super::{latest_valid_account_name, valid_wonderful_player_name};
+    use super::{
+        latest_valid_account_name, latest_wonderful_account_name_hints, valid_wonderful_player_name,
+    };
     use crate::wonderful_db::{
         WonderfulAccountRecord, WonderfulEventRecord, WonderfulMatchRecord, WonderfulSegmentRecord,
-        WonderfulVideoRecord,
+        WonderfulSnapshotAccountRecord, WonderfulSnapshotRecord, WonderfulVideoRecord,
     };
 
     #[test]
@@ -1075,6 +1212,8 @@ mod account_name_tests {
             "NULL",
             "wonderfulVideos90000000000000000006",
             "90000000000000000006",
+            "90000000000000000006#0000",
+            "undefined#0000",
             "Cards/D3018FBE.png#1001",
             r"C:\assets\card.png#1001",
             "https://assets.example/card.png#1001",
@@ -1125,6 +1264,63 @@ mod account_name_tests {
             latest_valid_account_name(&traversal_tie).as_deref(),
             Some("Second#2002")
         );
+    }
+
+    #[test]
+    fn uses_match_envelope_name_when_events_omit_player_name() {
+        let mut older = named_match("old-match", Some("2026-07-01T12:00:00Z"), &[]);
+        older.account_name = Some("OldName#1001".to_string());
+        let mut newer = named_match("new-match", Some("2026-07-04T12:00:00Z"), &[]);
+        newer.account_name = Some("CurrentName#2002".to_string());
+        let account = WonderfulAccountRecord {
+            openid: "90000000000000000006".to_string(),
+            // Deliberately reverse chronological order to prove selection uses timestamps rather
+            // than whichever database row happened to be traversed last.
+            matches: vec![newer, older],
+        };
+
+        assert_eq!(
+            latest_valid_account_name(&account).as_deref(),
+            Some("CurrentName#2002")
+        );
+    }
+
+    #[test]
+    fn resolves_snapshot_and_match_names_by_observed_time_instead_of_ingest_order() {
+        let openid = "90000000000000000006";
+        let matches = vec![WonderfulAccountRecord {
+            openid: openid.to_string(),
+            matches: vec![named_match(
+                "older-match",
+                Some("100"),
+                &[(None, "OlderMatchName#1001")],
+            )],
+        }];
+        let snapshots = vec![WonderfulSnapshotAccountRecord {
+            openid: openid.to_string(),
+            snapshots: vec![WonderfulSnapshotRecord {
+                match_record: named_match("snapshot-match", Some("150"), &[]),
+                snapshot_id: "snapshot-1".to_string(),
+                captured_at: Some("200".to_string()),
+                account_name: Some("NewerSnapshotName#2002".to_string()),
+                package_path: None,
+                thumb_path: None,
+                width: None,
+                height: None,
+                size_bytes: None,
+                raw_json: "{}".to_string(),
+            }],
+        }];
+
+        let snapshot_wins = latest_wonderful_account_name_hints(&matches, &snapshots);
+        assert_eq!(snapshot_wins.len(), 1);
+        assert_eq!(snapshot_wins[0].account_name, "NewerSnapshotName#2002");
+
+        let mut newer_matches = matches;
+        newer_matches[0].matches[0].match_time = Some("300".to_string());
+        let match_wins = latest_wonderful_account_name_hints(&newer_matches, &snapshots);
+        assert_eq!(match_wins.len(), 1);
+        assert_eq!(match_wins[0].account_name, "OlderMatchName#1001");
     }
 
     fn named_match(

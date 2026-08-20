@@ -5,8 +5,8 @@ use std::{cmp::Ordering, collections::HashMap};
 use rusqlite::{params, params_from_iter, types::Value, Connection, Row};
 
 use super::super::{
-    normalize_optional, readable_error, AccountIdentitySource, Clip, ClipEvent, ClipListQuery,
-    ClipPage, ClipSort, ClipSummary, DbResult, FavoriteFilter, HighlightFilter,
+    normalize_optional, readable_error, source_openid, AccountIdentitySource, Clip, ClipEvent,
+    ClipListQuery, ClipPage, ClipSort, ClipSummary, DbResult, FavoriteFilter, HighlightFilter,
     LibraryAccountFacet, LibraryFacetValue, LibraryFacets, LibrarySourceFacet, LibraryTagFacet,
     DEFAULT_CLIP_PAGE_LIMIT, MAX_CLIP_PAGE_LIMIT,
 };
@@ -910,6 +910,14 @@ pub(crate) fn build_clip_list_filter(
             Value::Text(pattern.clone()),
             searchable_expressions.len(),
         ));
+        let source_account_ids = source_dir_ids_matching_account_display(connection, search_term)?;
+        if !source_account_ids.is_empty() {
+            let placeholders = std::iter::repeat_n("?", source_account_ids.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            search_conditions.push(format!("clips.source_dir_id IN ({placeholders})"));
+            values.extend(source_account_ids.into_iter().map(Value::Integer));
+        }
         search_conditions.push(
             "EXISTS (
                 SELECT 1
@@ -1010,6 +1018,38 @@ pub(crate) fn build_clip_list_filter(
         where_sql: format!("WHERE {}", conditions.join(" AND ")),
         params: values,
     })
+}
+
+fn source_dir_ids_matching_account_display(
+    connection: &Connection,
+    search_term: &str,
+) -> DbResult<Vec<i64>> {
+    let search_term = search_term.to_lowercase();
+    let mut statement = connection
+        .prepare("SELECT id, name, path FROM source_dirs ORDER BY id")
+        .map_err(|error| readable_error("preparing source account search", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| readable_error("querying source account search", error))?;
+    let mut matching_ids = Vec::new();
+    for row in rows {
+        let (source_id, source_name, source_path) =
+            row.map_err(|error| readable_error("reading source account search", error))?;
+        if source_openid(&source_name, &source_path).is_some_and(|openid| {
+            format!("账号 {openid}")
+                .to_lowercase()
+                .contains(&search_term)
+        }) {
+            matching_ids.push(source_id);
+        }
+    }
+    Ok(matching_ids)
 }
 
 pub(crate) fn append_account_filter(
@@ -1794,31 +1834,6 @@ fn map_clip_event(row: &Row<'_>) -> rusqlite::Result<ClipEvent> {
         raw_json: row.get(16)?,
         created_at: row.get(17)?,
     })
-}
-
-fn source_openid(source_name: &str, source_path: &str) -> Option<String> {
-    openid_from_source_label(source_name).or_else(|| openid_from_source_label(source_path))
-}
-
-fn openid_from_source_label(value: &str) -> Option<String> {
-    const PREFIX: &str = "wonderfulVideos";
-
-    let leaf = value
-        .trim()
-        .trim_end_matches(['\\', '/'])
-        .rsplit(['\\', '/'])
-        .next()?;
-    let prefix = leaf.get(..PREFIX.len())?;
-    let openid = leaf.get(PREFIX.len()..)?;
-
-    if prefix.eq_ignore_ascii_case(PREFIX)
-        && !openid.is_empty()
-        && openid.chars().all(|character| character.is_ascii_digit())
-    {
-        Some(openid.to_string())
-    } else {
-        None
-    }
 }
 
 fn account_identity(

@@ -130,6 +130,11 @@ pub struct WonderfulMatchRecord {
     pub match_id: String,
     pub battle_id: Option<String>,
     pub match_time: Option<String>,
+    /// Account-level Riot ID carried by the match envelope (for example
+    /// `user_name` + `user_nick_id`). Some WonderfulDb exports omit
+    /// `PlayerName` from every event, so this must remain separate from
+    /// event participant names.
+    pub account_name: Option<String>,
     pub map_id: Option<String>,
     pub map_name: Option<String>,
     pub agent_name: Option<String>,
@@ -235,6 +240,37 @@ struct RawMatchRecord {
     match_id: Value,
     #[serde(alias = "matchTime", alias = "match_startTime", alias = "matches_time")]
     match_time: Option<Value>,
+    #[serde(
+        alias = "playerName",
+        alias = "player_name",
+        alias = "riotId",
+        alias = "riot_id",
+        alias = "gameNameWithTag",
+        alias = "accountName",
+        alias = "account_name"
+    )]
+    account_display_name: Option<Value>,
+    #[serde(
+        alias = "userName",
+        alias = "user_name",
+        alias = "roleName",
+        alias = "role_name",
+        alias = "gameName",
+        alias = "GameName",
+        alias = "nick"
+    )]
+    account_name_part: Option<Value>,
+    #[serde(
+        alias = "userNickId",
+        alias = "user_nick_id",
+        alias = "userNickID",
+        alias = "nickId",
+        alias = "nick_id",
+        alias = "tagLine",
+        alias = "TagLine",
+        alias = "tag"
+    )]
+    account_tag_part: Option<Value>,
     #[serde(alias = "mapName", alias = "match_map")]
     map_name: Option<Value>,
     map: Option<Value>,
@@ -556,6 +592,7 @@ fn normalize_match(openid: &str, value: Value) -> Result<WonderfulMatchRecord, W
 
     let career = raw.career.as_ref();
     let stats = raw.stats.as_ref();
+    let account_name = normalized_match_account_name(&raw, career);
     let map_id = object_string(raw.map.as_ref(), &["map_id", "mapId", "id"])
         .or_else(|| raw.map.as_ref().and_then(value_to_string));
     let map_name = raw
@@ -618,6 +655,7 @@ fn normalize_match(openid: &str, value: Value) -> Result<WonderfulMatchRecord, W
                     normalize_match_time(value)
                 })
             }),
+        account_name,
         map_id,
         map_name,
         agent_name,
@@ -637,6 +675,86 @@ fn normalize_match(openid: &str, value: Value) -> Result<WonderfulMatchRecord, W
             .map(|video| normalize_video(openid, video))
             .collect::<Result<_, _>>()?,
     })
+}
+
+fn normalized_match_account_name(raw: &RawMatchRecord, career: Option<&Value>) -> Option<String> {
+    raw.account_display_name
+        .as_ref()
+        .and_then(nonempty_value_to_string)
+        .and_then(normalize_complete_account_name)
+        .or_else(|| {
+            format_account_name_parts(
+                raw.account_name_part.as_ref(),
+                raw.account_tag_part.as_ref(),
+            )
+        })
+        .or_else(|| {
+            object_string(
+                career,
+                &[
+                    "riotId",
+                    "riot_id",
+                    "gameNameWithTag",
+                    "playerName",
+                    "player_name",
+                    "accountName",
+                    "account_name",
+                ],
+            )
+            .and_then(normalize_complete_account_name)
+        })
+        .or_else(|| {
+            let name = object_field(
+                career,
+                &[
+                    "userName",
+                    "user_name",
+                    "roleName",
+                    "role_name",
+                    "gameName",
+                    "GameName",
+                    "nick",
+                ],
+                nonempty_value_to_string,
+            );
+            let tag = object_field(
+                career,
+                &[
+                    "userNickId",
+                    "user_nick_id",
+                    "userNickID",
+                    "nickId",
+                    "nick_id",
+                    "tagLine",
+                    "TagLine",
+                    "tag",
+                ],
+                nonempty_value_to_string,
+            );
+            format_account_name_strings(name.as_deref(), tag.as_deref())
+        })
+}
+
+fn format_account_name_parts(name: Option<&Value>, tag: Option<&Value>) -> Option<String> {
+    let name = name.and_then(nonempty_value_to_string);
+    let tag = tag.and_then(nonempty_value_to_string);
+    format_account_name_strings(name.as_deref(), tag.as_deref())
+}
+
+fn format_account_name_strings(name: Option<&str>, tag: Option<&str>) -> Option<String> {
+    let name = name?.trim();
+    let candidate = match tag.map(str::trim).filter(|tag| !tag.is_empty()) {
+        Some(tag) if !name.contains('#') => {
+            format!("{name}#{}", tag.trim_start_matches('#').trim())
+        }
+        _ => name.to_string(),
+    };
+    normalize_complete_account_name(candidate)
+}
+
+fn normalize_complete_account_name(value: impl AsRef<str>) -> Option<String> {
+    display_names::player_name_for_display(value.as_ref())
+        .filter(|account_name| account_name.contains('#'))
 }
 
 fn normalize_snapshot(

@@ -614,6 +614,12 @@ fn unique_source_group_corrects_stale_match_account_on_rescan() {
         insert_clip_for_group(&connection, "90000000000000001", "match-stale", "clip.mp4");
     connection
         .execute(
+            "UPDATE source_dirs SET name = '朋友的素材库' WHERE id = (SELECT source_dir_id FROM clips WHERE id = ?1)",
+            params![clip_id],
+        )
+        .expect("source display name should be customized");
+    connection
+        .execute(
             "
             INSERT INTO matches (
                 game_id,

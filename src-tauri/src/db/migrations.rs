@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::{configure_connection, readable_error, DbResult};
 use crate::metadata::{classify_timeline_event_time, TimelineEventTimeSemantics};
 
-pub(super) const SCHEMA_VERSION: i64 = 16;
+pub(super) const SCHEMA_VERSION: i64 = 18;
 
 /// Applies the idempotent schema migration to a caller-controlled connection.
 pub fn initialize_schema(connection: &Connection) -> DbResult<()> {
@@ -349,6 +349,7 @@ fn initialize_schema_versioned(
                 new_clip_count INTEGER NOT NULL DEFAULT 0,
                 updated_clip_count INTEGER NOT NULL DEFAULT 0,
                 missing_clip_count INTEGER NOT NULL DEFAULT 0,
+                pending_clip_count INTEGER NOT NULL DEFAULT 0,
                 cover_missing_count INTEGER NOT NULL DEFAULT 0,
                 metadata_match_count INTEGER NOT NULL DEFAULT 0,
                 metadata_enriched_clip_count INTEGER NOT NULL DEFAULT 0,
@@ -360,6 +361,23 @@ fn initialize_schema_versioned(
                 message TEXT,
                 started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 finished_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS pending_manual_clips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_dir_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL UNIQUE,
+                normalized_path TEXT NOT NULL UNIQUE,
+                file_name TEXT NOT NULL,
+                extension TEXT NOT NULL DEFAULT 'mp4',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                modified_at TEXT,
+                source_relative_dir TEXT NOT NULL DEFAULT '',
+                ignored INTEGER NOT NULL DEFAULT 0 CHECK (ignored IN (0, 1)),
+                first_discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (source_dir_id) REFERENCES source_dirs(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS clip_trash_snapshots (
@@ -690,6 +708,12 @@ fn initialize_schema_versioned(
     ensure_column(
         connection,
         "scan_runs",
+        "pending_clip_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "scan_runs",
         "metadata_match_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
@@ -736,6 +760,7 @@ fn initialize_schema_versioned(
         migrate_windows_verbatim_source_paths_v16(connection)?;
     }
     create_clip_identity_validation_triggers(connection)?;
+    create_pending_clip_exclusivity_triggers(connection)?;
     create_schema_indexes(connection)?;
     if previous_schema_version < 7 {
         migrate_clip_paging_indexes(connection)?;
@@ -754,6 +779,12 @@ fn initialize_schema_versioned(
         connection
             .execute("DELETE FROM clip_delete_intents", [])
             .map_err(|error| readable_error("invalidating legacy delete intents", error))?;
+    }
+    if previous_schema_version < 18 {
+        super::repair_persisted_wonderful_account_names_in_transaction(connection)?;
+        let _ = super::repositories::thumbnails::repair_legacy_aclos_source_covers_in_transaction(
+            connection,
+        )?;
     }
     if previous_schema_version < SCHEMA_VERSION {
         connection
@@ -1798,6 +1829,61 @@ fn create_clip_identity_validation_triggers(connection: &Connection) -> DbResult
         .map_err(|error| readable_error("creating clip identity validation triggers", error))
 }
 
+fn create_pending_clip_exclusivity_triggers(connection: &Connection) -> DbResult<()> {
+    // SQLite cannot express uniqueness across two tables. These triggers make the pending queue
+    // and indexed library mutually exclusive even when two scanner connections race. Manual
+    // import deletes its pending row inside the same transaction before writing the clip.
+    connection
+        .execute_batch(
+            "
+            CREATE TRIGGER IF NOT EXISTS prevent_clip_pending_path_on_insert
+            BEFORE INSERT ON clips
+            WHEN EXISTS (
+                SELECT 1
+                FROM pending_manual_clips
+                WHERE normalized_path = NEW.normalized_path
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'clip path is pending manual import');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS prevent_clip_pending_path_on_update
+            BEFORE UPDATE OF normalized_path ON clips
+            WHEN EXISTS (
+                SELECT 1
+                FROM pending_manual_clips
+                WHERE normalized_path = NEW.normalized_path
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'clip path is pending manual import');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS prevent_pending_indexed_path_on_insert
+            BEFORE INSERT ON pending_manual_clips
+            WHEN EXISTS (
+                SELECT 1
+                FROM clips
+                WHERE normalized_path = NEW.normalized_path
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'clip path is already indexed');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS prevent_pending_indexed_path_on_update
+            BEFORE UPDATE OF normalized_path ON pending_manual_clips
+            WHEN EXISTS (
+                SELECT 1
+                FROM clips
+                WHERE normalized_path = NEW.normalized_path
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'clip path is already indexed');
+            END;
+            ",
+        )
+        .map_err(|error| readable_error("creating pending clip exclusivity triggers", error))
+}
+
 fn create_schema_indexes(connection: &Connection) -> DbResult<()> {
     connection
         .execute_batch(
@@ -1827,6 +1913,8 @@ fn create_schema_indexes(connection: &Connection) -> DbResult<()> {
                     modified_at DESC,
                     id DESC
                 );
+            CREATE INDEX IF NOT EXISTS idx_pending_manual_clips_source
+                ON pending_manual_clips(source_dir_id, ignored, id);
             ",
         )
         .map_err(|error| readable_error("creating schema indexes", error))

@@ -4,7 +4,7 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 
 use crate::{
-    db::DbResult,
+    db::{self, DbResult},
     display_names,
     highlight_log_parser::{HighlightLogKillEvent, HighlightLogLineKind, HighlightLogRecord},
     leveldb_reader::LevelDbBattleRecord,
@@ -510,35 +510,39 @@ fn find_matching_clip_ids(connection: &Connection, merged: &MergedMatch) -> DbRe
     let group_keys = group_keys_for_merged(merged);
     let mut clip_ids = Vec::new();
     let mut seen = HashSet::new();
-    let source_dir_name = merged
-        .account_id
-        .as_deref()
-        .map(|account_id| format!("wonderfulVideos{account_id}"));
+    let Some(account_id) = merged.account_id.as_deref() else {
+        return Ok(clip_ids);
+    };
     for group_key in group_keys {
         let mut statement = connection
             .prepare(
                 "
-                SELECT clips.id
+                SELECT clips.id, source_dirs.name, source_dirs.path
                 FROM clips
                 JOIN clip_groups
                     ON clip_groups.id = clips.clip_group_id
                 JOIN source_dirs
                     ON source_dirs.id = clips.source_dir_id
                 WHERE clip_groups.group_key = ?1
-                    AND source_dirs.name = ?2
                 ",
             )
             .map_err(|error| format!("Database preparing clip match query failed: {error}"))?;
         let rows = statement
-            .query_map(params![group_key, source_dir_name.as_deref()], |row| {
-                row.get::<_, i64>(0)
+            .query_map(params![group_key], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })
             .map_err(|error| format!("Database querying clip matches failed: {error}"))?;
 
         for row in rows {
-            let clip_id =
+            let (clip_id, source_name, source_path) =
                 row.map_err(|error| format!("Database reading clip match failed: {error}"))?;
-            if seen.insert(clip_id) {
+            if db::source_openid(&source_name, &source_path).as_deref() == Some(account_id)
+                && seen.insert(clip_id)
+            {
                 clip_ids.push(clip_id);
             }
         }
@@ -561,7 +565,7 @@ fn reconcile_account_from_unique_clip_source(
         let mut statement = connection
             .prepare(
                 "
-                SELECT DISTINCT source_dirs.name
+                SELECT DISTINCT source_dirs.name, source_dirs.path
                 FROM clips
                 JOIN clip_groups
                     ON clip_groups.id = clips.clip_group_id
@@ -574,15 +578,17 @@ fn reconcile_account_from_unique_clip_source(
                 format!("Database preparing source account reconciliation failed: {error}")
             })?;
         let rows = statement
-            .query_map(params![group_key], |row| row.get::<_, String>(0))
+            .query_map(params![group_key], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|error| {
                 format!("Database querying source account reconciliation failed: {error}")
             })?;
 
         for row in rows {
-            let source_dir_name =
+            let (source_dir_name, source_dir_path) =
                 row.map_err(|error| format!("Database reading source account failed: {error}"))?;
-            if let Some(account_id) = account_id_from_source_dir_name(&source_dir_name) {
+            if let Some(account_id) = db::source_openid(&source_dir_name, &source_dir_path) {
                 source_account_ids.insert(account_id);
             }
         }
@@ -741,19 +747,6 @@ fn account_id_from_record_src(record: &HighlightLogRecord) -> Option<String> {
         None
     } else {
         Some(digits)
-    }
-}
-
-fn account_id_from_source_dir_name(source_dir_name: &str) -> Option<String> {
-    let account_id = source_dir_name.strip_prefix("wonderfulVideos")?;
-    if account_id.is_empty()
-        || !account_id
-            .chars()
-            .all(|character| character.is_ascii_digit())
-    {
-        None
-    } else {
-        Some(account_id.to_string())
     }
 }
 

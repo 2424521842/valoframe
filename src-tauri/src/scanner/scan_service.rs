@@ -11,9 +11,10 @@ use rusqlite::Connection;
 
 use super::{
     default_aclos_app_data_dir, discover_library_sources, is_source_directory_name,
-    normalize_unique_scan_paths, push_unique_scan_root, read_sorted_entries, run_scan_batch,
-    scan_path_key, scan_roots_from_videocut_log, MetadataScanConfig, ScanBatchInput, ScanExecution,
-    ScanProgress, ScanProgressReporter, ScanRuntime, ScanSummary,
+    metadata_is_reparse_point, normalize_unique_scan_paths, push_unique_scan_root,
+    read_sorted_entries, run_scan_batch, scan_path_key, scan_roots_from_videocut_log,
+    MetadataScanConfig, ScanBatchInput, ScanExecution, ScanProgress, ScanProgressReporter,
+    ScanRuntime, ScanSummary,
 };
 use crate::db::DbResult;
 
@@ -172,10 +173,10 @@ fn scan_discovered_aclos_roots_with_progress_inner(
                 source_paths: Vec::new(),
                 persistent_sources: Vec::new(),
                 metadata_config: MetadataScanConfig {
-                    anchor: None,
+                    anchors: Vec::new(),
                     allow_external_fallback: true,
-                    account_hint_scope: None,
-                    use_local_account_hint_scope: false,
+                    account_hint_scopes: Vec::new(),
+                    use_local_account_hint_scopes: false,
                 },
                 initial_errors: Vec::new(),
                 empty_message: Some("未发现标准无畏时刻素材".to_string()),
@@ -299,10 +300,10 @@ fn scan_roots_inner(
             source_paths,
             persistent_sources: Vec::new(),
             metadata_config: MetadataScanConfig {
-                anchor: None,
+                anchors: Vec::new(),
                 allow_external_fallback: true,
-                account_hint_scope: None,
-                use_local_account_hint_scope: true,
+                account_hint_scopes: Vec::new(),
+                use_local_account_hint_scopes: true,
             },
             initial_errors: Vec::new(),
             empty_message: Some("No source directories provided".to_string()),
@@ -320,10 +321,16 @@ fn resolve_explicit_source_paths(roots: &[PathBuf]) -> Vec<PathBuf> {
             continue;
         }
 
-        let discovered_children = read_sorted_entries(root)
-            .ok()
-            .into_iter()
-            .flatten()
+        let mut source_parents = vec![root.clone()];
+        let standard_library = root.join("aclos-highlight");
+        if std::fs::symlink_metadata(&standard_library)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata_is_reparse_point(&metadata))
+        {
+            source_parents.push(standard_library);
+        }
+        let discovered_children = source_parents
+            .iter()
+            .flat_map(|parent| read_sorted_entries(parent).unwrap_or_default())
             .filter(|path| path.is_dir() && is_source_directory_name(path))
             .collect::<Vec<_>>();
         if discovered_children.is_empty() {
@@ -353,10 +360,10 @@ fn scan_custom_directory_inner(
                 source_paths: discovery.sources,
                 persistent_sources: Vec::new(),
                 metadata_config: MetadataScanConfig {
-                    anchor: discovery.roots.first().cloned(),
+                    anchors: discovery.roots.clone(),
                     allow_external_fallback: true,
-                    account_hint_scope: None,
-                    use_local_account_hint_scope: true,
+                    account_hint_scopes: Vec::new(),
+                    use_local_account_hint_scopes: true,
                 },
                 initial_errors: discovery.errors,
                 empty_message: discovery.empty_message,
@@ -373,10 +380,10 @@ fn scan_custom_directory_inner(
             source_paths: roots,
             persistent_sources: Vec::new(),
             metadata_config: MetadataScanConfig {
-                anchor: None,
+                anchors: Vec::new(),
                 allow_external_fallback: true,
-                account_hint_scope: None,
-                use_local_account_hint_scope: true,
+                account_hint_scopes: Vec::new(),
+                use_local_account_hint_scopes: true,
             },
             initial_errors: Vec::new(),
             empty_message: None,
@@ -395,11 +402,11 @@ pub(super) fn scan_library_roots(
     runtime: ScanRuntime<'_>,
 ) -> DbResult<ScanExecution> {
     let discovery = discover_library_sources(roots, source_path_filter);
-    let metadata_anchor = discovery.roots.first().cloned();
-    let account_hint_scope = if all_roots_external {
-        None
+    let metadata_anchors = discovery.roots.clone();
+    let account_hint_scopes = if all_roots_external {
+        Vec::new()
     } else {
-        metadata_anchor.clone()
+        metadata_anchors.first().cloned().into_iter().collect()
     };
 
     run_scan_batch(
@@ -409,10 +416,10 @@ pub(super) fn scan_library_roots(
             source_paths: discovery.sources,
             persistent_sources: Vec::new(),
             metadata_config: MetadataScanConfig {
-                anchor: metadata_anchor,
+                anchors: metadata_anchors,
                 allow_external_fallback: all_roots_external,
-                account_hint_scope,
-                use_local_account_hint_scope: false,
+                account_hint_scopes,
+                use_local_account_hint_scopes: false,
             },
             initial_errors: discovery.errors,
             empty_message: discovery.empty_message,
@@ -487,6 +494,9 @@ pub fn sync_enabled_scan_sources_with_progress_and_cancel<F>(
 where
     F: Fn(ScanProgress),
 {
+    // Every enabled persisted source participates in manual and startup synchronization.
+    // The NVIDIA adapter still keeps newly discovered recordings out of `clips` by placing them
+    // in the manual-classification queue until the user supplies the required metadata.
     let sources = crate::db::list_enabled_source_dirs(connection)?;
     sync_persistent_sources_inner(
         connection,
@@ -541,10 +551,14 @@ fn sync_persistent_sources_inner(
         persistent_sources.push(source);
     }
 
-    let metadata_anchor = persistent_sources
+    let metadata_anchors = persistent_sources
         .iter()
-        .find(|source| source.scan_mode == crate::db::ScanMode::AclosStructured)
-        .map(|source| PathBuf::from(&source.scan_root_path));
+        .filter(|source| source.scan_mode == crate::db::ScanMode::AclosStructured)
+        .map(|source| PathBuf::from(&source.scan_root_path))
+        .fold(Vec::new(), |mut anchors, anchor| {
+            push_unique_scan_root(&mut anchors, anchor);
+            anchors
+        });
     run_scan_batch(
         connection,
         ScanBatchInput {
@@ -552,10 +566,10 @@ fn sync_persistent_sources_inner(
             source_paths: Vec::new(),
             persistent_sources,
             metadata_config: MetadataScanConfig {
-                anchor: metadata_anchor.clone(),
+                anchors: metadata_anchors,
                 allow_external_fallback: true,
-                account_hint_scope: metadata_anchor,
-                use_local_account_hint_scope: true,
+                account_hint_scopes: Vec::new(),
+                use_local_account_hint_scopes: true,
             },
             initial_errors,
             empty_message: Some("没有可同步的视频来源".to_string()),

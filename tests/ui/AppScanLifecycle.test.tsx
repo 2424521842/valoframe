@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   getLibraryFacets: vi.fn(),
   listClips: vi.fn(),
   listClipPage: vi.fn(),
+  listPendingManualClips: vi.fn(),
   listSources: vi.fn(),
   listTags: vi.fn(),
   openDirectory: vi.fn(),
@@ -81,6 +82,7 @@ vi.mock("../../src/api/backend", async (importOriginal) => {
     getLibraryFacets: mocks.getLibraryFacets,
     listClips: mocks.listClips,
     listClipPage: mocks.listClipPage,
+    listPendingManualClips: mocks.listPendingManualClips,
     listSources: mocks.listSources,
     listTags: mocks.listTags,
     previewScanSourceRelocation: mocks.previewScanSourceRelocation,
@@ -116,6 +118,7 @@ describe("production scan lifecycle", () => {
     mocks.getLibraryFacets.mockReset();
     mocks.listClips.mockReset();
     mocks.listClipPage.mockReset();
+    mocks.listPendingManualClips.mockReset();
     mocks.listSources.mockReset();
     mocks.listTags.mockReset();
     mocks.openDirectory.mockReset();
@@ -134,6 +137,7 @@ describe("production scan lifecycle", () => {
       hasMore: false,
       nextOffset: null,
     });
+    mocks.listPendingManualClips.mockResolvedValue([]);
     mocks.getLibraryFacets.mockResolvedValue(libraryFacets());
     mocks.listSources.mockResolvedValue(sourceDirs);
     mocks.listTags.mockResolvedValue([]);

@@ -17,7 +17,8 @@ pub fn latest_scan_summary(connection: &Connection) -> DbResult<Option<ScanSumma
         .query_row(
             "
             SELECT root_path, source_dir_count, clip_group_count, new_clip_count,
-                   updated_clip_count, missing_clip_count, cover_missing_count,
+                   updated_clip_count, missing_clip_count, pending_clip_count,
+                   cover_missing_count,
                    metadata_match_count, metadata_enriched_clip_count,
                    metadata_event_count, metadata_warning_count,
                    diagnostic_omitted_count, errors_json, message
@@ -44,7 +45,8 @@ pub fn scan_summary_for_job(
         .query_row(
             "
             SELECT root_path, source_dir_count, clip_group_count, new_clip_count,
-                   updated_clip_count, missing_clip_count, cover_missing_count,
+                   updated_clip_count, missing_clip_count, pending_clip_count,
+                   cover_missing_count,
                    metadata_match_count, metadata_enriched_clip_count,
                    metadata_event_count, metadata_warning_count,
                    diagnostic_omitted_count, errors_json, message
@@ -61,7 +63,7 @@ pub fn scan_summary_for_job(
 }
 
 fn map_scan_summary(row: &Row<'_>) -> rusqlite::Result<ScanSummary> {
-    let errors_json: String = row.get(12)?;
+    let errors_json: String = row.get(13)?;
     let bounded = parse_bounded_scan_errors(&errors_json);
     Ok(ScanSummary {
         root_path: row.get(0)?,
@@ -70,14 +72,15 @@ fn map_scan_summary(row: &Row<'_>) -> rusqlite::Result<ScanSummary> {
         new_clip_count: row.get(3)?,
         updated_clip_count: row.get(4)?,
         missing_clip_count: row.get(5)?,
-        cover_missing_count: row.get(6)?,
-        metadata_match_count: row.get(7)?,
-        metadata_enriched_clip_count: row.get(8)?,
-        metadata_event_count: row.get(9)?,
-        metadata_warning_count: row.get(10)?,
-        omitted_error_count: row.get::<_, i64>(11)?.saturating_add(bounded.omitted_count),
+        pending_clip_count: row.get(6)?,
+        cover_missing_count: row.get(7)?,
+        metadata_match_count: row.get(8)?,
+        metadata_enriched_clip_count: row.get(9)?,
+        metadata_event_count: row.get(10)?,
+        metadata_warning_count: row.get(11)?,
+        omitted_error_count: row.get::<_, i64>(12)?.saturating_add(bounded.omitted_count),
         errors: bounded.errors,
-        message: row.get(13)?,
+        message: row.get(14)?,
     })
 }
 
@@ -256,14 +259,15 @@ fn finish_scan_run(
                 new_clip_count = ?6,
                 updated_clip_count = ?7,
                 missing_clip_count = ?8,
-                cover_missing_count = ?9,
-                metadata_match_count = ?10,
-                metadata_enriched_clip_count = ?11,
-                metadata_event_count = ?12,
-                metadata_warning_count = ?13,
-                diagnostic_omitted_count = ?14,
-                errors_json = ?15,
-                message = ?16,
+                pending_clip_count = ?9,
+                cover_missing_count = ?10,
+                metadata_match_count = ?11,
+                metadata_enriched_clip_count = ?12,
+                metadata_event_count = ?13,
+                metadata_warning_count = ?14,
+                diagnostic_omitted_count = ?15,
+                errors_json = ?16,
+                message = ?17,
                 summary_available = 1,
                 finished_at = CURRENT_TIMESTAMP
             WHERE id = ?1
@@ -277,6 +281,7 @@ fn finish_scan_run(
                 summary.new_clip_count,
                 summary.updated_clip_count,
                 summary.missing_clip_count,
+                summary.pending_clip_count,
                 summary.cover_missing_count,
                 summary.metadata_match_count,
                 summary.metadata_enriched_clip_count,
@@ -469,6 +474,7 @@ mod tests {
         ensure_scan_run_started(&connection, "exact-zero", "D:/clips")
             .expect("scan run should start");
         let mut zero_summary = ScanSummary::empty("D:/clips".to_string());
+        zero_summary.pending_clip_count = 2;
         zero_summary.message = Some("completed".to_string());
         finalize_scan_run_for_job(
             &connection,
@@ -477,13 +483,11 @@ mod tests {
             &zero_summary,
         )
         .expect("full summary should finalize");
-        assert_eq!(
-            scan_summary_for_job(&connection, "exact-zero")
-                .unwrap()
-                .expect("real zero summary should load")
-                .new_clip_count,
-            0,
-        );
+        let restored = scan_summary_for_job(&connection, "exact-zero")
+            .unwrap()
+            .expect("real zero summary should load");
+        assert_eq!(restored.new_clip_count, 0);
+        assert_eq!(restored.pending_clip_count, 2);
 
         ensure_scan_run_terminal(
             &connection,

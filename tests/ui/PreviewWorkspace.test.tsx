@@ -789,6 +789,27 @@ describe("PreviewWorkspace media and note behavior", () => {
     expect(onOpenExternal).toHaveBeenCalledWith(clipA.id);
   });
 
+  it("opens the source video with the system player instead of only revealing its folder", async () => {
+    getClipMediaMock.mockResolvedValue({
+      clipId: clipA.id,
+      playable: false,
+      mediaUrl: null,
+      message: "不可播放",
+    });
+    const onOpenExternal = vi.fn();
+    const onOpenOriginal = vi.fn();
+    render(
+      <PreviewWorkspace
+        {...createPreviewProps({ onOpenExternal, onOpenOriginal })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "打开源文件" }));
+
+    expect(onOpenExternal).toHaveBeenCalledWith(clipA.id);
+    expect(onOpenOriginal).not.toHaveBeenCalled();
+  });
+
   it("syncs a parent note update without requesting clip media again", async () => {
     getClipMediaMock.mockResolvedValue({
       clipId: clipA.id,
@@ -1034,6 +1055,23 @@ describe("PreviewWorkspace media and note behavior", () => {
     expect(updatedVideo).toHaveAttribute("poster", updated.thumbnailUrl);
     expect(updatedVideo?.currentTime).toBe(7);
     expect(getClipMediaMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the issue feedback dialog from the breadcrumb action", async () => {
+    getClipMediaMock.mockResolvedValue({
+      clipId: clipA.id,
+      playable: false,
+      mediaUrl: null,
+      message: "不可播放",
+    });
+
+    render(<PreviewWorkspace {...createPreviewProps()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /反馈问题/ }));
+
+    expect(screen.getByRole("heading", { name: "反馈问题" })).toBeVisible();
+    expect(screen.getByText(/当前片段：/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "生成诊断包" })).toBeVisible();
   });
 });
 

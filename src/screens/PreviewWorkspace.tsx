@@ -6,6 +6,7 @@ import {
   CornersIn,
   CornersOut,
   Crosshair,
+  FlagBanner,
   FolderOpen,
   Heart,
   Pause,
@@ -22,6 +23,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { commandErrorMessage, displayHighlightTitle, getClipMedia } from "../api/backend";
+import { FeedbackDialog } from "../components/FeedbackDialog";
 import { ThumbnailImage } from "../components/ThumbnailImage";
 import {
   PLAYBACK_KEY_SHORTCUTS,
@@ -42,6 +44,7 @@ type PreviewWorkspaceProps = {
   initialMuted?: boolean;
   tags: Tag[];
   activityMessage: string;
+  feedbackEndpoint?: string;
   onAudioPreferenceChange?: (preference: {
     volumePercent: number;
     muted: boolean;
@@ -90,6 +93,7 @@ export function PreviewWorkspace({
   initialMuted = false,
   tags,
   activityMessage,
+  feedbackEndpoint = "",
   onAudioPreferenceChange,
   onBack,
   onCopyPath,
@@ -117,6 +121,7 @@ export function PreviewWorkspace({
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [newTagName, setNewTagName] = useState("");
   const [selectedTagId, setSelectedTagId] = useState("");
+  const [isFeedbackOpen, setIsFeedbackOpen] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const activeClipIdRef = useRef<string | null>(clip?.id ?? null);
   const mediaRequestTokenRef = useRef(0);
@@ -505,9 +510,24 @@ export function PreviewWorkspace({
             <span>{clipTitle(clip)}</span>
             <b>关键时刻</b>
           </div>
-          <button className="cinematic-button cinematic-button--secondary cinematic-button--small" type="button" onClick={() => onOpenOriginal(clip.id)}>
-            <FolderOpen weight="bold" />打开源文件
-          </button>
+          <div className="preview-breadcrumb-actions">
+            <button
+              className="cinematic-button cinematic-button--secondary cinematic-button--small"
+              title="视频内容与信息不符？上报问题给开发者"
+              type="button"
+              onClick={() => setIsFeedbackOpen(true)}
+            >
+              <FlagBanner weight="bold" />反馈问题
+            </button>
+            <button
+              className="cinematic-button cinematic-button--secondary cinematic-button--small"
+              title="使用系统默认播放器打开源视频"
+              type="button"
+              onClick={() => onOpenExternal(clip.id)}
+            >
+              <ArrowSquareOut weight="bold" />打开源文件
+            </button>
+          </div>
         </header>
 
         <div
@@ -775,6 +795,12 @@ export function PreviewWorkspace({
           <button type="button" onClick={() => onCopyPath(clip.id)}><Copy weight="bold" />复制路径</button>
         </footer>
       </aside>
+      <FeedbackDialog
+        clip={clip}
+        endpoint={feedbackEndpoint}
+        open={isFeedbackOpen}
+        onOpenChange={setIsFeedbackOpen}
+      />
     </section>
   );
 }

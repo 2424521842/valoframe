@@ -156,6 +156,36 @@ pub struct Source {
     pub last_scan_at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingManualClip {
+    pub id: i64,
+    pub source_dir_id: i64,
+    pub source_dir_name: String,
+    pub file_path: String,
+    pub file_name: String,
+    pub file_size: i64,
+    pub modified_at: Option<String>,
+    pub source_relative_dir: String,
+    pub ignored: bool,
+    pub first_discovered_at: Option<String>,
+}
+
+/// Manual classification submitted for one pending NVIDIA recording. `account_key` is an existing
+/// stable account identity (`match-account-<id>`); any other value or an empty key creates a new
+/// manual account identified by the submitted account display name.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualClipImportInput {
+    pub account_key: Option<String>,
+    pub account_name: String,
+    pub player_name: Option<String>,
+    pub agent_name: String,
+    pub map_name: Option<String>,
+    pub game_mode: Option<String>,
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SourceDirInput<'a> {
     pub path: &'a str,
@@ -735,4 +765,71 @@ pub(crate) struct ClipFileTarget {
     pub file_status: String,
     pub extension: String,
     pub source_dir_path: String,
+}
+
+/// Sanitized clip snapshot included in user-submitted feedback packages. Sensitive identity
+/// fields (OpenID, match account id), personal state (note, tags, favorite/review), and absolute
+/// local paths are deliberately absent; video_path and clip_group_id are transport-only and are
+/// stripped by serde before serialization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FeedbackClipSnapshot {
+    pub id: i64,
+    #[serde(skip)]
+    pub clip_group_id: Option<i64>,
+    #[serde(skip)]
+    pub video_path: String,
+    pub clip_group_name: Option<String>,
+    pub file_name: String,
+    pub extension: String,
+    pub file_size: i64,
+    pub modified_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub recorded_at: Option<String>,
+    pub cover_source: String,
+    pub thumbnail_status: Option<String>,
+    pub file_status: String,
+    pub account_display_name: String,
+    pub account_name: Option<String>,
+    pub player_name: Option<String>,
+    pub agent_name: Option<String>,
+    pub map_name: Option<String>,
+    pub game_mode: Option<String>,
+    pub metadata_status: String,
+    pub match_id: Option<String>,
+    pub scoreline: Option<String>,
+    pub kda: Option<String>,
+    pub agent_avatar_url: Option<String>,
+    pub round_label: Option<String>,
+    pub weapon_name: Option<String>,
+    pub kill_count: Option<i64>,
+    pub match_started_at: Option<String>,
+    pub combat_score: Option<i64>,
+    pub has_won: Option<bool>,
+    pub official_video_name: Option<String>,
+    pub official_video_type: Option<String>,
+    pub highlight_type: Option<i64>,
+    pub metadata_source: Option<String>,
+    pub source_dir_display_name: String,
+    pub source_kind: SourceKind,
+    pub scan_mode: ScanMode,
+    pub source_relative_dir: String,
+}
+
+/// Lightweight sibling-clip context for the same match, helping the operator see whether a
+/// mismatch is a wrong grouping or a wrong file assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FeedbackSiblingClip {
+    pub id: i64,
+    pub file_name: String,
+    pub file_size: i64,
+    pub duration_ms: Option<i64>,
+    pub recorded_at: Option<String>,
+    pub modified_at: Option<String>,
+    pub official_video_name: Option<String>,
+    pub kill_count: Option<i64>,
+    pub scoreline: Option<String>,
+    pub agent_name: Option<String>,
+    pub map_name: Option<String>,
 }

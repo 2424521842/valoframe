@@ -119,3 +119,14 @@ test("formats every terminal state with zero, positive, and unavailable counts",
     }
   }
 });
+
+test("reports NVIDIA discoveries as pending instead of library imports", () => {
+  assert.equal(
+    scanTerminalActivityMessage("completed", {
+      ...baseSummary,
+      newClipCount: 0,
+      pendingClipCount: 3,
+    }),
+    "扫描完成：新增 0 个视频，另有 3 个 NVIDIA 视频待手动录入",
+  );
+});

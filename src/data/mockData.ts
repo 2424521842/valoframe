@@ -1,4 +1,4 @@
-import type { Clip, SourceDir, Tag } from "../types";
+import type { Clip, PendingManualClip, SourceDir, Tag } from "../types";
 
 export const mockSourceDirs: SourceDir[] = [
   {
@@ -45,6 +45,21 @@ export const mockSourceDirs: SourceDir[] = [
     lastError: null,
     clipCount: 1,
     lastScanAt: "2026-07-01T18:20:00Z",
+  },
+  {
+    id: "source-nvidia",
+    name: "NVIDIA 录屏",
+    displayName: "NVIDIA 录屏",
+    path: "D:\\Videos\\NVIDIA",
+    sourceKind: "nvidia",
+    scanMode: "recursive-mp4",
+    scanRootPath: "D:\\Videos\\NVIDIA",
+    enabled: true,
+    status: "available",
+    accessibility: true,
+    lastError: null,
+    clipCount: 0,
+    lastScanAt: "2026-07-02T22:45:00Z",
   },
 ];
 
@@ -455,6 +470,33 @@ const mockClipFixtures: MockClipFixture[] = [
     extractedText: "Ascent mid control team play",
     thumbnailTone: "green",
     thumbnailUrl: null,
+  },
+];
+
+export const mockPendingManualClips: PendingManualClip[] = [
+  {
+    id: "pending-1",
+    sourceDirId: "source-nvidia",
+    sourceDirName: "NVIDIA 录屏",
+    filePath: "D:\\Videos\\NVIDIA\\Valorant 2026.07.02 - 21.58.03.07.mp4",
+    fileName: "Valorant 2026.07.02 - 21.58.03.07.mp4",
+    fileSize: 84_500_000,
+    modifiedAt: "2026-07-02T22:06:00Z",
+    sourceRelativeDir: "",
+    ignored: false,
+    firstDiscoveredAt: "2026-07-02T22:45:00Z",
+  },
+  {
+    id: "pending-2",
+    sourceDirId: "source-nvidia",
+    sourceDirName: "NVIDIA 录屏",
+    filePath: "D:\\Videos\\NVIDIA\\Desktop 2026.07.01 - 20.11.52.14.mp4",
+    fileName: "Desktop 2026.07.01 - 20.11.52.14.mp4",
+    fileSize: 132_000_000,
+    modifiedAt: "2026-07-01T20:16:00Z",
+    sourceRelativeDir: "",
+    ignored: false,
+    firstDiscoveredAt: "2026-07-02T22:45:00Z",
   },
 ];
 

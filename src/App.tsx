@@ -32,6 +32,8 @@ import { CinematicSidebar } from "./components/CinematicSidebar";
 import { UiIcon } from "./components/UiIcon";
 import { groupClipsByMatch } from "./lib/accountGrouping";
 import { deriveActiveFilters, transitionLibraryMode } from "./lib/activeFilters";
+import { deriveMapOptions } from "./lib/maps";
+import { valorantAgentDisplayNames } from "./lib/valorantAssets";
 import {
   buildClipListQuery,
   CLIP_SEARCH_DEBOUNCE_MS,
@@ -46,6 +48,7 @@ import { useClipMutationController } from "./hooks/useClipMutationController";
 import { useLibraryFacetsController } from "./hooks/useLibraryFacetsController";
 import { useLocalDay } from "./hooks/useLocalDay";
 import { useScanController } from "./hooks/useScanController";
+import { usePendingManualClipsController } from "./hooks/usePendingManualClipsController";
 import { useTagController } from "./hooks/useTagController";
 import { useThumbnailController } from "./hooks/useThumbnailController";
 import { useAppUpdaterController } from "./hooks/useAppUpdaterController";
@@ -454,7 +457,6 @@ function App() {
     () => mergeScanTargets(sourceDirs, manualScanTargets, excludedScanPaths),
     [excludedScanPaths, manualScanTargets, sourceDirs],
   );
-
   const loadSourceList = useCallback(async (
     { preserveActivity = false }: { preserveActivity?: boolean } = {},
   ): Promise<boolean> => {
@@ -737,6 +739,27 @@ function App() {
     return Boolean(result && (result.removedIds.includes(clipId) || result.missingIds.includes(clipId)));
   }, [handleRemoveClipsFromIndex]);
 
+  const manualAgentNames = valorantAgentDisplayNames;
+  const manualMapNames = useMemo(
+    () => deriveMapOptions((libraryFacets?.maps ?? []).map((facet) => facet.value)),
+    [libraryFacets],
+  );
+  const manualGameModes = useMemo(
+    () => (libraryFacets?.gameModes ?? []).map((facet) => facet.value),
+    [libraryFacets],
+  );
+  const pendingController = usePendingManualClipsController({
+    notify: (message) => setActivityMessage(message),
+    onImported: (clip) => {
+      invalidateDetailCache();
+      setActivityMessage(`已录入 ${clip.fileName}，素材库已同步刷新`);
+      void Promise.all([
+        loadLibraryFacets(),
+        refreshCurrentClipQuery({ preserveActivity: true }),
+      ]);
+    },
+  });
+
   const refreshAfterScan = async () => {
     invalidateDetailCache();
     const outcomes = await Promise.allSettled([
@@ -744,6 +767,7 @@ function App() {
       refreshCurrentClipQuery({ preserveActivity: true }),
       loadTagList({ preserveActivity: true }),
       loadLibraryFacets(),
+      pendingController.load({ preserveActivity: true }),
     ]);
     return outcomes.every((outcome) => (
       outcome.status === "fulfilled" && outcome.value
@@ -855,7 +879,9 @@ function App() {
       }
       await loadSourceList();
       setActivityMessage(
-        result.duplicateCount > 0 ? "已复用现有视频来源" : "视频来源已注册，开始首次同步",
+        result.duplicateCount > 0
+          ? "已复用现有视频来源"
+          : "视频来源已注册，开始首次同步",
       );
       // Registration should not keep the source wizard open for the entire first scan. Run each
       // adapter sequentially in the background so multi-source ACLOS registrations still avoid
@@ -1161,6 +1187,15 @@ function App() {
               facets={libraryFacets}
               isLoading={isLoadingClips}
               isScanning={isScanning}
+              pendingClips={pendingController.items}
+              pendingIgnoredCount={pendingController.ignoredCount}
+              pendingError={pendingController.error}
+              isPendingLoading={pendingController.isLoading}
+              importingPendingId={pendingController.importingId}
+              showIgnoredPending={pendingController.showIgnored}
+              manualAgentNames={manualAgentNames}
+              manualMapNames={manualMapNames}
+              manualGameModes={manualGameModes}
               progress={scanProgress}
               scanStatus={scanStatus}
               scanTargets={scanTargets}
@@ -1179,6 +1214,9 @@ function App() {
               onStartScan={handleStartScan}
               onSyncEnabledSources={() => void handleSyncEnabledSources()}
               onSyncSource={(source) => void handleSyncSource(source.id)}
+              onImportPendingClip={pendingController.importClip}
+              onSetPendingIgnored={(pendingId, ignored) => void pendingController.setIgnored(pendingId, ignored)}
+              onToggleShowIgnoredPending={pendingController.toggleShowIgnored}
             />
           ) : activeScreen === "tags" ? (
             <TagManagementWorkspace
@@ -1218,6 +1256,7 @@ function App() {
               clips={clips}
               detailError={detailState.error}
               detailStatus={previewDetailStatus}
+              feedbackEndpoint={preferences.feedbackEndpoint}
               initialMuted={preferences.previewMuted}
               initialVolumePercent={preferences.previewVolumePercent}
               tags={libraryTags}

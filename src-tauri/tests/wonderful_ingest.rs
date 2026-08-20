@@ -13,7 +13,7 @@ use valorant_highlight_manager_lib::{
     },
     wonderful_ingest::{
         ingest_wonderful_metadata, ingest_wonderful_metadata_with_round_scores,
-        ingest_wonderful_snapshots,
+        ingest_wonderful_snapshots, propagate_latest_wonderful_account_names,
     },
 };
 
@@ -1893,6 +1893,69 @@ fn wonderful_name_overrides_lower_priority_names_account_wide_and_is_idempotent(
         .query_row("SELECT COUNT(*) FROM clips", [], |row| row.get(0))
         .expect("clip count should load");
     assert_eq!(indexed_clip_count, 3);
+}
+
+#[test]
+fn imported_database_uses_path_identity_and_the_newest_snapshot_name() {
+    let connection = Connection::open_in_memory().expect("database should open");
+    db::initialize_schema(&connection).expect("schema should initialize");
+    let openid = "90000000000000000006";
+    let match_id = "imported-friend-match";
+    let clip_path = r"D:\Friend Export\ACLOS\aclos-highlight\wonderfulVideos90000000000000000006\imported-friend-match\friend.mp4";
+    let clip_id = insert_indexed_clip(&connection, openid, match_id, clip_path, "friend.mp4");
+    connection
+        .execute(
+            "UPDATE source_dirs SET name = '朋友的素材库' WHERE id = (SELECT source_dir_id FROM clips WHERE id = ?1)",
+            params![clip_id],
+        )
+        .expect("source display name should be customized");
+
+    let mut video = video_record("friend", "好友高光", "1", Some(clip_path), 1);
+    set_video_player_name(&mut video, None);
+    let accounts = vec![WonderfulAccountRecord {
+        openid: openid.to_string(),
+        matches: vec![WonderfulMatchRecord {
+            account_name: Some("OlderEventName#1001".to_string()),
+            ..match_record(match_id, "100", video)
+        }],
+    }];
+    let snapshot_accounts = vec![WonderfulSnapshotAccountRecord {
+        openid: openid.to_string(),
+        snapshots: vec![WonderfulSnapshotRecord {
+            match_record: WonderfulMatchRecord {
+                match_id: match_id.to_string(),
+                match_time: Some("150".to_string()),
+                ..WonderfulMatchRecord::default()
+            },
+            snapshot_id: "friend-snapshot".to_string(),
+            captured_at: Some("200".to_string()),
+            account_name: Some("NewestSnapshotName#2002".to_string()),
+            package_path: None,
+            thumb_path: None,
+            width: None,
+            height: None,
+            size_bytes: None,
+            raw_json: "{}".to_string(),
+        }],
+    }];
+
+    ingest_wonderful_snapshots(&connection, &snapshot_accounts)
+        .expect("snapshot metadata should import");
+    let summary = ingest_wonderful_metadata(&connection, &accounts)
+        .expect("official video metadata should match the custom-named source");
+    propagate_latest_wonderful_account_names(&connection, &accounts, &snapshot_accounts)
+        .expect("latest cross-source name should propagate");
+
+    assert_eq!(summary.matched_video_count, 1);
+    let clip = db::find_clip_by_id(&connection, clip_id).expect("clip should reload");
+    assert_eq!(clip.metadata_source.as_deref(), Some("wonderful_db"));
+    assert_eq!(clip.match_account_id.as_deref(), Some(openid));
+    assert_eq!(
+        clip.account_name.as_deref(),
+        Some("NewestSnapshotName#2002")
+    );
+    assert_eq!(clip.player_name.as_deref(), Some("NewestSnapshotName#2002"));
+    assert_eq!(clip.account_display_name, "NewestSnapshotName#2002");
 }
 
 #[test]

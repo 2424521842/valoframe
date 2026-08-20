@@ -46,6 +46,41 @@ export type RegisterScanSourceInput = {
   allowOverlap?: boolean;
 };
 
+/** One NVIDIA recording held back from the index until the user classifies it. */
+export type PendingManualClip = {
+  id: string;
+  sourceDirId: string;
+  sourceDirName: string;
+  filePath: string;
+  fileName: string;
+  fileSize: number;
+  modifiedAt: string | null;
+  sourceRelativeDir: string;
+  ignored: boolean;
+  firstDiscoveredAt: string | null;
+};
+
+export type BackendPendingManualClip = Omit<PendingManualClip, "id" | "sourceDirId"> & {
+  id: number;
+  sourceDirId: number;
+};
+
+/** Manual classification for a pending NVIDIA recording. */
+export type ManualClipImportInput = {
+  /** Existing stable account identity (`match-account-<id>`); empty means a new account. */
+  accountKey: string | null;
+  accountName: string;
+  playerName?: string | null;
+  agentName: string;
+  mapName?: string | null;
+  gameMode?: string | null;
+  note?: string | null;
+};
+
+export type BackendManualClipImportResult = {
+  clip: BackendClip;
+};
+
 export type ScanSourceOverlap = {
   id: string;
   displayName: string;
@@ -741,6 +776,8 @@ export type ScanSummary = {
   newClipCount: number;
   updatedClipCount: number;
   missingClipCount: number;
+  /** NVIDIA videos held back for manual classification by this scan. */
+  pendingClipCount?: number;
   coverMissingCount: number;
   metadataMatchCount?: number;
   metadataEnrichedClipCount?: number;
@@ -864,4 +901,41 @@ export type BackendThumbnailProgress = {
 
 export type ThumbnailProgress = Omit<BackendThumbnailProgress, "clipId"> & {
   clipId: string;
+};
+
+export type FeedbackCategory = "mismatch" | "playback" | "metadata" | "other";
+
+export type FeedbackSubmitInput = {
+  clipId: string;
+  category: FeedbackCategory;
+  description: string;
+  contact: string;
+  includeFrames: boolean;
+  includeVideo: boolean;
+  endpoint: string;
+};
+
+export type FeedbackSubmitResult = {
+  reportId: string;
+  /** uploaded: delivered to the configured endpoint; needs-save: package waits for the save dialog. */
+  status: "uploaded" | "needs-save";
+  packagePath: string | null;
+  suggestedFileName: string | null;
+  totalBytes: number;
+  includedItems: string[];
+  message: string;
+  uploadError: string | null;
+};
+
+export type FeedbackProgress = {
+  reportId: string;
+  phase: "building" | "uploading";
+  message: string;
+  uploadedBytes: number;
+  totalBytes: number;
+};
+
+export type SaveFeedbackPackageResult = {
+  destinationPath: string;
+  totalBytes: number;
 };

@@ -1,6 +1,7 @@
 pub(super) mod clips;
 pub(super) mod deletions;
 pub(super) mod library;
+pub(super) mod pending;
 pub(super) mod reconnect;
 pub(super) mod relocations;
 pub(super) mod reviews;

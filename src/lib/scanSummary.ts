@@ -23,23 +23,27 @@ export function scanTerminalActivityMessage(
   summary: ScanSummary | null | undefined,
 ): string {
   const count = summary ? summary.newClipCount.toLocaleString("zh-CN") : null;
+  const pendingCount = summary?.pendingClipCount ?? 0;
+  const pendingSuffix = pendingCount > 0
+    ? `，另有 ${pendingCount.toLocaleString("zh-CN")} 个 NVIDIA 视频待手动录入`
+    : "";
   switch (status) {
     case "completed":
       return count === null
         ? "扫描完成：新增数量不可用"
-        : `扫描完成：新增 ${count} 个视频`;
+        : `扫描完成：新增 ${count} 个视频${pendingSuffix}`;
     case "partial":
       return count === null
         ? "扫描部分完成：新增数量不可用"
-        : `扫描部分完成：已安全新增 ${count} 个视频`;
+        : `扫描部分完成：已安全新增 ${count} 个视频${pendingSuffix}`;
     case "cancelled":
       return count === null
         ? "扫描已取消：新增数量不可用"
-        : `扫描已取消：已安全新增 ${count} 个视频`;
+        : `扫描已取消：已安全新增 ${count} 个视频${pendingSuffix}`;
     case "failed":
       return count === null
         ? "扫描失败：新增数量不可用"
-        : `扫描失败：已安全新增 ${count} 个视频`;
+        : `扫描失败：已安全新增 ${count} 个视频${pendingSuffix}`;
     default:
       return "扫描新增数量不可用";
   }
