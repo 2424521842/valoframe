@@ -385,3 +385,21 @@ test("stable smoke invocation guards a leaked native exit code", () => {
   assert.match(workflow, /\$global:LASTEXITCODE = 0/u);
   assert.match(workflow, /windows-release-smoke\.ps1 exited with code/u);
 });
+test("stable release assets keep ASCII-only names for updater and draft verification", () => {
+  assert.match(
+    workflow,
+    /\$stableInstallerName = "VALOFRAME-\$\(\$env:APP_VERSION\)-x64-setup\.exe"/u,
+  );
+  assert.match(
+    workflow,
+    /\$stableUpdaterPackageName = "VALOFRAME-\$\(\$env:APP_VERSION\)-x64-setup\.nsis\.zip"/u,
+  );
+  assert.match(
+    workflow,
+    /Join-Path \$env:STABLE_ASSET_DIR \$stableUpdaterPackageName/u,
+  );
+  assert.match(
+    workflow,
+    /\$package = Join-Path \$env:STABLE_ASSET_DIR "VALOFRAME-\$\(\$env:APP_VERSION\)-x64-setup\.nsis\.zip"/u,
+  );
+});

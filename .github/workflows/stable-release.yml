@@ -581,9 +581,12 @@ jobs:
           VALOFRAME_UPDATER_PUBLIC_KEY: ${{ vars.VALOFRAME_UPDATER_PUBLIC_KEY }}
         run: |
           [void] (New-Item -ItemType Directory -Path $env:STABLE_ASSET_DIR)
-          Copy-Item -LiteralPath $env:STABLE_INSTALLER -Destination $env:STABLE_ASSET_DIR
-          Copy-Item -LiteralPath $env:STABLE_UPDATER_PACKAGE -Destination $env:STABLE_ASSET_DIR
-          Copy-Item -LiteralPath $env:STABLE_UPDATER_SIGNATURE -Destination $env:STABLE_ASSET_DIR
+          $stableInstallerName = "VALOFRAME-$($env:APP_VERSION)-x64-setup.exe"
+          $stableUpdaterPackageName = "VALOFRAME-$($env:APP_VERSION)-x64-setup.nsis.zip"
+          $stableUpdaterSignatureName = "$stableUpdaterPackageName.sig"
+          Copy-Item -LiteralPath $env:STABLE_INSTALLER -Destination (Join-Path $env:STABLE_ASSET_DIR $stableInstallerName)
+          Copy-Item -LiteralPath $env:STABLE_UPDATER_PACKAGE -Destination (Join-Path $env:STABLE_ASSET_DIR $stableUpdaterPackageName)
+          Copy-Item -LiteralPath $env:STABLE_UPDATER_SIGNATURE -Destination (Join-Path $env:STABLE_ASSET_DIR $stableUpdaterSignatureName)
           Copy-Item -LiteralPath $env:STABLE_NOTES -Destination (Join-Path $env:STABLE_ASSET_DIR 'RELEASE-NOTES.md')
           Copy-Item -LiteralPath $env:STABLE_FFMPEG_ARCHIVE -Destination (Join-Path $env:STABLE_ASSET_DIR 'valoframe-ffmpeg-minimal-windows-x64.zip')
           Copy-Item -LiteralPath $env:STABLE_FFMPEG_SOURCE -Destination (Join-Path $env:STABLE_ASSET_DIR 'ffmpeg-corresponding-source.tar.xz')
@@ -634,7 +637,7 @@ jobs:
           ) | Set-Content -LiteralPath $publishNotes -Encoding utf8
           "STABLE_PUBLISH_NOTES=$publishNotes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          $package = Join-Path $env:STABLE_ASSET_DIR ([System.IO.Path]::GetFileName($env:STABLE_UPDATER_PACKAGE))
+          $package = Join-Path $env:STABLE_ASSET_DIR "VALOFRAME-$($env:APP_VERSION)-x64-setup.nsis.zip"
           $signature = "$package.sig"
           $publishedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'")
           $manifest = Join-Path $env:STABLE_ASSET_DIR 'latest.json'
