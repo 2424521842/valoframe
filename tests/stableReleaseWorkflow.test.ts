@@ -315,7 +315,11 @@ test("publication rejects duplicates and non-increasing SemVer before draft crea
       buildIndex > monotonicIndex &&
       draftIndex > buildIndex,
   );
-  assert.match(workflow, /--verify-tag/u);
+  assert.match(
+    workflow,
+    /git rev-list -n 1 "refs\/tags\/\$env:RELEASE_TAG"/u,
+  );
+  assert.doesNotMatch(workflow, /--verify-tag/u);
   assert.doesNotMatch(workflow, /--target/u);
   assert.match(workflow, /--draft/u);
 });
@@ -329,6 +333,14 @@ test("draft assets and updater signatures are reverified before publication", ()
   );
   assert.ok(remoteVerifyIndex > 0 && publishIndex > remoteVerifyIndex);
   assert.match(workflow, /gh release download/u);
+  assert.match(
+    workflow,
+    /Could not locate the stable draft release for verification/u,
+  );
+  assert.match(
+    workflow,
+    /Could not resolve the stable lightweight tag for verification/u,
+  );
   assert.match(
     workflow,
     /Remote draft asset differs from the verified local file/u,

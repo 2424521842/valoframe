@@ -697,9 +697,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $assets = @(Get-ChildItem -LiteralPath $env:STABLE_ASSET_DIR -File | Sort-Object Name | ForEach-Object FullName)
+          $tagSha = ((& git rev-list -n 1 "refs/tags/$env:RELEASE_TAG") -join '').Trim()
+          if ($LASTEXITCODE -ne 0 -or $tagSha -cne $env:SOURCE_COMMIT) {
+            throw "Local tag refs/tags/$env:RELEASE_TAG does not point to the checked-out source commit."
+          }
           gh release create $env:RELEASE_TAG @assets `
             --repo $env:GITHUB_REPOSITORY `
-            --verify-tag `
             --title "瓦刻（VALOFRAME）$env:RELEASE_TAG" `
             --notes-file $env:STABLE_PUBLISH_NOTES `
             --draft
@@ -712,10 +715,12 @@ jobs:
           VALOFRAME_UPDATER_PUBLIC_KEY: ${{ vars.VALOFRAME_UPDATER_PUBLIC_KEY }}
         run: |
           $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json databaseId,isDraft,isPrerelease,tagName,targetCommitish,assets | ConvertFrom-Json -Depth 20
+          if ($LASTEXITCODE -ne 0 -or $null -eq $release) { throw 'Could not locate the stable draft release for verification.' }
           if ($release.isDraft -ne $true -or $release.isPrerelease -ne $false -or $release.tagName -cne $env:RELEASE_TAG) {
             throw 'Remote release must remain a stable-channel draft during verification.'
           }
           $tagRef = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG" | ConvertFrom-Json -Depth 10
+          if ($LASTEXITCODE -ne 0 -or $null -eq $tagRef) { throw 'Could not resolve the stable lightweight tag for verification.' }
           if ([string] $tagRef.object.type -cne 'commit' -or [string] $tagRef.object.sha -cne $env:SOURCE_COMMIT) {
             throw 'Stable lightweight tag does not point to the checked-out source commit.'
           }
