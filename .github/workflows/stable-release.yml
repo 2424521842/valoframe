@@ -740,7 +740,7 @@ jobs:
               throw "Remote draft asset differs from the verified local file: $name"
             }
           }
-          $manifest = Get-Content -Raw -LiteralPath (Join-Path $env:STABLE_REMOTE_DIR 'latest.json') -Encoding UTF8 | ConvertFrom-Json -Depth 10
+          $manifest = Get-Content -Raw -LiteralPath (Join-Path $env:STABLE_REMOTE_DIR 'latest.json') -Encoding UTF8 | ConvertFrom-Json -Depth 10 -DateKind String
           $publishedAt = [string] $manifest.pub_date
           $packagePath = [uri]::UnescapeDataString(([uri] $manifest.platforms.'windows-x86_64'.url).AbsolutePath)
           $packageName = [System.IO.Path]::GetFileName($packagePath)
@@ -853,7 +853,7 @@ jobs:
             -Uri ([uri] 'https://github.com/2424521842/valoframe/releases/latest/download/latest.json') `
             -Destination $publicManifest `
             -ExpectedSha256 ((Get-FileHash -LiteralPath $localManifest -Algorithm SHA256).Hash)
-          $manifest = Get-Content -Raw -LiteralPath $publicManifest -Encoding UTF8 | ConvertFrom-Json -Depth 10
+          $manifest = Get-Content -Raw -LiteralPath $publicManifest -Encoding UTF8 | ConvertFrom-Json -Depth 10 -DateKind String
           $packageUri = [uri] $manifest.platforms.'windows-x86_64'.url
           $expectedPrefix = "/$env:EXPECTED_REPOSITORY/releases/download/$env:RELEASE_TAG/"
           if ($packageUri.Scheme -cne 'https' -or $packageUri.Host -cne 'github.com' -or
