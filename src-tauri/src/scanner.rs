@@ -570,8 +570,11 @@ fn run_scan_batch(
             } else {
                 normalize_unique_scan_paths(metadata_config.anchors.iter().map(PathBuf::as_path))
             });
-        let allow_metadata_fallback =
-            metadata_config.allow_external_fallback && metadata_anchors.len() <= 1;
+        // The fallback decision is per anchor, not per batch: `metadata_source_paths` only reaches
+        // the AppData root when the anchor itself carries no `WonderfulDb`/`logs`/`Local Storage`.
+        // Gating it on a single anchor stranded every multi-account library, because the default
+        // layout keeps recordings under `AppData\ACLOS` while metadata lives in `AppData\Roaming\ACLOS`.
+        let allow_metadata_fallback = metadata_config.allow_external_fallback;
         let mut wonderful_accounts = Vec::new();
         let mut wonderful_snapshot_accounts = Vec::new();
         for metadata_anchor in metadata_anchors {
@@ -2950,6 +2953,70 @@ mod tests {
             clip.account_name.as_deref() == Some("NewestGlobalName#2002")
                 && clip.player_name.as_deref() == Some("NewestGlobalName#2002")
         }));
+    }
+
+    /// Reproduces the shipped default layout: recordings live under several account directories
+    /// that carry no metadata of their own, while `WonderfulDb` sits in the APPDATA root. Gating
+    /// the AppData fallback on a single metadata anchor stranded every multi-account library,
+    /// because each `wonderfulVideos<openid>` parent contributes its own anchor.
+    #[test]
+    fn scan_roots_falls_back_to_appdata_metadata_for_multiple_anchors() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let fixture = ScanBatchFixture::new("multi-anchor-appdata-fallback");
+        let original_appdata = std::env::var_os("APPDATA");
+        let appdata_root = fixture.path().join("Roaming");
+        let appdata_aclos_root = appdata_root.join("ACLOS");
+        prepare_empty_metadata_root(&appdata_aclos_root);
+
+        // Two accounts stored under two unrelated parents, mirroring "素材搬到别的盘" setups.
+        let cases = [
+            ("ArchiveA", "90000000000000000006", "match-a", "video-a"),
+            ("ArchiveB", "90000000000000000007", "match-b", "video-b"),
+        ];
+        let mut sources = Vec::new();
+        for (archive_name, openid, match_id, video_id) in cases {
+            let archive = fixture.path().join(archive_name);
+            let source = archive.join(format!("wonderfulVideos{openid}"));
+            let group = source.join(match_id);
+            fs::create_dir_all(&group).expect("match group should be created");
+            fs::write(group.join(format!("{video_id}.mp4")), b"video")
+                .expect("clip should be written");
+            let plaintext = format!(
+                r#"{{"key_wonderful_list_{openid}":[{{"matches_id":"{match_id}","match_startTime":"2026-07-04T12:00:00Z","user_name":"Player{openid}","user_nick_id":"2002","match_map":"隐世修所","videos":[{{"video_id":"{video_id}","video_name":"击杀集锦","video_type":"2","round_clips":[]}}]}}]}}"#,
+            );
+            // Metadata exists ONLY in the APPDATA root, never beside the recordings.
+            fs::write(
+                appdata_aclos_root.join("WonderfulDb").join(openid),
+                encrypt_wonderful_db_text(openid, &plaintext),
+            )
+            .expect("appdata WonderfulDb fixture should be written");
+            sources.push(source);
+        }
+
+        std::env::set_var("APPDATA", &appdata_root);
+        let connection = fixture.open();
+        let summary = crate::scanner::scan_roots(&connection, &sources);
+        match original_appdata {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+        let summary = summary.expect("multi-anchor metadata scan should run");
+
+        let clips = db::list_clips(&connection).expect("clips should list");
+        assert_eq!(clips.len(), 2);
+        // Each anchor reads the shared AppData WonderfulDb, so the per-anchor counter observes
+        // every video once per anchor. Ingest upserts are idempotent, so assert on the resulting
+        // rows rather than on that inflated tally.
+        assert!(summary.metadata_enriched_clip_count >= 2);
+        for clip in &clips {
+            assert_eq!(clip.map_name.as_deref(), Some("隐世修所"));
+            assert!(
+                clip.account_name
+                    .as_deref()
+                    .is_some_and(|name| name.ends_with("#2002")),
+                "each account should resolve its Riot ID from the AppData WonderfulDb"
+            );
+        }
     }
 
     #[test]
