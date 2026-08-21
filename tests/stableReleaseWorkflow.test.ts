@@ -337,6 +337,11 @@ test("draft assets and updater signatures are reverified before publication", ()
     workflow,
     /Could not locate the stable draft release for verification/u,
   );
+  assert.equal(
+    (workflow.match(/ConvertFrom-Json -Depth 10 -DateKind String/gu) ?? [])
+      .length,
+    2,
+  );
   assert.match(
     workflow,
     /Could not resolve the stable lightweight tag for verification/u,
