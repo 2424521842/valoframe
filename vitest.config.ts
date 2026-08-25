@@ -7,10 +7,8 @@ export default defineConfig({
     environment: "jsdom",
     include: ["tests/ui/**/*.test.tsx"],
     setupFiles: ["./vitest.setup.ts"],
-    // Full-App mount tests render the whole workspace tree and routinely need several seconds.
-    // On a many-core machine vitest starts one worker per core, so the default 5s timeout expired
-    // for whichever files happened to share a core; the failures moved around between runs.
+    // Full-App mount tests render the whole workspace tree behind React.lazy and need well over
+    // the default 5s on a loaded machine. The async wait budget is raised in vitest.setup.ts.
     testTimeout: 20_000,
-    maxWorkers: 8,
   },
 });
