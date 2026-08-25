@@ -25,7 +25,9 @@
 
 - **GitHub（推荐）**：[下载 `VALOFRAME-0.2.4-x64-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.2.4/VALOFRAME-0.2.4-x64-setup.exe)（8.51 MB）
   - SHA-256：`f22fec3bfe3aa619eefe70998a988d96ec2ec778cd1359db944c66acc68d589a`
-- **蓝奏云（备用，供无法访问 GitHub 的用户）**：v0.2.4 镜像上传后在[发布说明](https://github.com/2424521842/valoframe/releases/tag/v0.2.4)中给出链接与提取码；镜像与 GitHub 是同一个文件，校验值相同。
+- **蓝奏云（备用，供无法访问 GitHub 的用户）**：[下载 `VALOFRAME-0.2.4-x64-setup.exe`](https://wwbfc.lanzoue.com/igDdD44l13ih)（密码：`cuy4`，8.51 MB）
+  - SHA-256：`f22fec3bfe3aa619eefe70998a988d96ec2ec778cd1359db944c66acc68d589a`
+  - 与 GitHub 入口是同一个文件，因此校验值相同；两边都应核对一致后再安装。
 - **完整性校验**：在同一 Release 下载 `SHA256SUMS.txt`，核对安装包文件名与 SHA-256。发布流程会在公开前后重新下载并逐文件复核全部资产。
 
 > [!IMPORTANT]
