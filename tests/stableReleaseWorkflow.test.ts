@@ -10,6 +10,11 @@ const workflow = read(".github/workflows/stable-release.yml");
 const stableConfig = JSON.parse(read("src-tauri/tauri.stable.conf.json"));
 const publicPolicy = JSON.parse(read("release/public-release-policy.json"));
 
+/** The version this working tree ships, used to locate the matching owner decision. */
+function releaseVersion(): string {
+  return JSON.parse(read("package.json")).version as string;
+}
+
 test("stable release is triggered only by canonical-looking version tags", () => {
   assert.match(
     workflow,
@@ -155,9 +160,14 @@ test("Windows verifies, packages, stages, and installs personal community compli
     /package-minimal-ffmpeg-community-beta\.mjs[\s\S]*?--contract third_party\/ffmpeg\/personal-community-stable-minimal-windows-x64\.json/u,
   );
   assert.match(workflow, /stage-personal-community-stable-ffmpeg\.ps1/u);
+  // Track the shipped version instead of a copied literal, so a release bump does not need this
+  // assertion edited in lockstep.
   assert.match(
     workflow,
-    /-DecisionPath release\/approvals\/personal-community-stable-v0\.2\.3\.json/u,
+    new RegExp(
+      `-DecisionPath release/approvals/personal-community-stable-v${releaseVersion().replace(/\./gu, "\\.")}\\.json`,
+      "u",
+    ),
   );
   assert.match(workflow, /--release-profile personal-community-stable/u);
   assert.match(workflow, /channelDistributionReady -ne \$true/u);

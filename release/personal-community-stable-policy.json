@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "releaseProfile": "personal-community-stable",
   "purpose": "Free personal community distribution with stable Tauri updates",
-  "ownerDecision": "release/approvals/personal-community-stable-v0.2.3.json",
+  "ownerDecision": "release/approvals/personal-community-stable-v0.2.4.json",
   "mandatory": {
     "canonicalStableTag": true,
     "versionAndTagMatch": true,

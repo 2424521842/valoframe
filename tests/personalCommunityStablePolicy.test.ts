@@ -11,8 +11,11 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
 const readJson = (path: string): JsonObject => JSON.parse(read(path));
 
+/** The version this working tree ships; the decision and notes must exist for exactly it. */
+const releaseVersion: string = JSON.parse(read("package.json")).version;
+
 const decision = readJson(
-  "release/approvals/personal-community-stable-v0.2.3.json",
+  `release/approvals/personal-community-stable-v${releaseVersion}.json`,
 );
 const policy = readJson("release/personal-community-stable-policy.json");
 const ffmpegContract = readJson(
@@ -20,12 +23,12 @@ const ffmpegContract = readJson(
 );
 const generator = read("scripts/release/generate-compliance-evidence.mjs");
 const licensing = read("docs/LICENSING.md");
-const notes = read("release/notes/v0.2.3.md");
+const notes = read(`release/notes/v${releaseVersion}.md`);
 const bundleGate = read("scripts/release/check-bundle.ps1");
 
-test("v0.2.3 has a narrowly scoped repository-owner community decision", () => {
-  assert.equal(decision.version, "0.2.3");
-  assert.equal(decision.tag, "v0.2.3");
+test("the shipped version has a narrowly scoped repository-owner community decision", () => {
+  assert.equal(decision.version, releaseVersion);
+  assert.equal(decision.tag, `v${releaseVersion}`);
   assert.equal(decision.channel, "personal-community-stable");
   assert.equal(decision.decision, "approved-by-repository-release-owner");
   assert.equal(decision.distributionPurpose, "free-personal-community");

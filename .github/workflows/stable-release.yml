@@ -353,7 +353,7 @@ jobs:
             -ReleaseTag $env:RELEASE_TAG `
             -RepositorySlug $env:GITHUB_REPOSITORY `
             -ApplicationSourceCommit $env:SOURCE_COMMIT `
-            -DecisionPath release/approvals/personal-community-stable-v0.2.3.json `
+            -DecisionPath release/approvals/personal-community-stable-v0.2.4.json `
             -RepositoryRoot $env:GITHUB_WORKSPACE `
             -OutputManifestPath $manifestPath
           $stage = ($stageJson -join "`n") | ConvertFrom-Json -Depth 30
@@ -521,7 +521,7 @@ jobs:
             -ResourceDirectory $releaseRoot `
             -FfmpegManifestPath $env:STABLE_FFMPEG_MANIFEST `
             -AllowPersonalCommunityStable `
-            -PersonalCommunityStableDecisionPath (Join-Path $env:GITHUB_WORKSPACE 'release\approvals\personal-community-stable-v0.2.3.json') `
+            -PersonalCommunityStableDecisionPath (Join-Path $env:GITHUB_WORKSPACE 'release\approvals\personal-community-stable-v0.2.4.json') `
             -FFmpegArchivePath $env:STABLE_FFMPEG_ARCHIVE `
             -SourceBundlePath $env:STABLE_FFMPEG_SOURCE
           $bundleReportText = $bundleReportJson -join "`n"
@@ -606,7 +606,7 @@ jobs:
           Copy-Item -LiteralPath $licenseEvidenceRoot -Destination (Join-Path $compliancePackageRoot 'licenses') -Recurse
           Copy-Item -LiteralPath $env:STABLE_FFMPEG_MANIFEST -Destination (Join-Path $compliancePackageRoot 'FFMPEG-MANIFEST.json')
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'release\personal-community-stable-policy.json') -Destination $compliancePackageRoot
-          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'release\approvals\personal-community-stable-v0.2.3.json') -Destination $compliancePackageRoot
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'release\approvals\personal-community-stable-v0.2.4.json') -Destination $compliancePackageRoot
           $complianceZip = Join-Path $env:STABLE_ASSET_DIR 'personal-community-stable-compliance.zip'
           [System.IO.Compression.ZipFile]::CreateFromDirectory(
             $compliancePackageRoot,

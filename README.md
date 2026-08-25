@@ -10,34 +10,32 @@
   <a href="https://github.com/2424521842/valoframe/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/2424521842/valoframe/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2ea44f"></a>
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4">
-  <a href="https://github.com/2424521842/valoframe/releases/tag/v0.2.3"><img alt="Status: Personal Community Stable" src="https://img.shields.io/badge/status-Personal%20Community%20Stable-ff4655"></a>
+  <a href="https://github.com/2424521842/valoframe/releases/tag/v0.2.4"><img alt="Status: Personal Community Stable" src="https://img.shields.io/badge/status-Personal%20Community%20Stable-ff4655"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/2424521842/valoframe/releases/download/v0.2.3/VALOFRAME-0.2.3-x64-setup.exe"><strong>下载 Windows 安装包</strong></a>
+  <a href="https://github.com/2424521842/valoframe/releases/download/v0.2.4/VALOFRAME-0.2.4-x64-setup.exe"><strong>下载 Windows 安装包</strong></a>
   ·
-  <a href="https://github.com/2424521842/valoframe/releases/tag/v0.2.3">查看 v0.2.3 发布说明</a>
+  <a href="https://github.com/2424521842/valoframe/releases/tag/v0.2.4">查看 v0.2.4 发布说明</a>
 </p>
 
 ## 下载
 
-当前版本：[`v0.2.3`](https://github.com/2424521842/valoframe/releases/tag/v0.2.3) · Windows 10/11 x64 · Personal Community Stable
+当前版本：[`v0.2.4`](https://github.com/2424521842/valoframe/releases/tag/v0.2.4) · Windows 10/11 x64 · Personal Community Stable
 
-- **GitHub（推荐）**：[下载 `VALOFRAME-0.2.3-x64-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.2.3/VALOFRAME-0.2.3-x64-setup.exe)（8.45 MB）
-  - SHA-256：`ec45c9ca279276712bebf4c1362d621cf88dbdb71e39849c9becc508e73f4727`
-- **蓝奏云（备用，供无法访问 GitHub 的用户）**：[下载 `VALOFRAME-0.2.3-x64-setup.exe`](https://wwbfc.lanzoue.com/izzuX43z8n4d)（密码：`51mf`，8.45 MB）
-  - SHA-256：`ec45c9ca279276712bebf4c1362d621cf88dbdb71e39849c9becc508e73f4727`
-  - 与 GitHub 入口是同一个文件，因此校验值相同；两边都应核对一致后再安装。
+- **GitHub（推荐）**：[下载 `VALOFRAME-0.2.4-x64-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.2.4/VALOFRAME-0.2.4-x64-setup.exe)
+  - 文件大小与 SHA-256 见同一 Release 的 `SHA256SUMS.txt` 与[发布说明](https://github.com/2424521842/valoframe/releases/tag/v0.2.4)。
+- **蓝奏云（备用，供无法访问 GitHub 的用户）**：v0.2.4 镜像上传后在[发布说明](https://github.com/2424521842/valoframe/releases/tag/v0.2.4)中给出链接与提取码；镜像与 GitHub 是同一个文件，校验值相同。
 - **完整性校验**：在同一 Release 下载 `SHA256SUMS.txt`，核对安装包文件名与 SHA-256。发布流程会在公开前后重新下载并逐文件复核全部资产。
 
 > [!IMPORTANT]
 > 普通用户只需下载上面列出的 `.exe` 安装包。Release 页中的 `Source code`、FFmpeg 压缩包与对应源码、许可归档、JSON 报告、更新包和校验清单等是源码或技术附件，不是安装包。
 
 > [!WARNING]
-> v0.2.3 安装器当前未使用 Windows Authenticode，Windows 可能显示“未知发布者”或 SmartScreen 警告。请只从本项目 GitHub Release 或上述蓝奏云备用入口下载，并核对 SHA-256。应用内后续更新使用独立的 Tauri/Minisign 签名验证；这不等同于 Windows 发布者签名。
+> v0.2.4 安装器当前未使用 Windows Authenticode，Windows 可能显示“未知发布者”或 SmartScreen 警告。请只从本项目 GitHub Release 或上述蓝奏云备用入口下载，并核对 SHA-256。应用内后续更新使用独立的 Tauri/Minisign 签名验证；这不等同于 Windows 发布者签名。
 
 > [!NOTE]
-> 这是非官方、免费、个人社区项目，与 Riot Games、腾讯及其关联公司不存在隶属、赞助或认可关系。发布负责人已将清单锁定的 42 张游戏图片批准用于 v0.2.3 个人社区稳定渠道；该项目内部决定不声称第三方批准或独立法律审核已经完成。记录见 [v0.2.3 渠道决定](release/approvals/personal-community-stable-v0.2.3.json)和[原有游戏素材记录](release/approvals/game-content-rights.json)。
+> 这是非官方、免费、个人社区项目，与 Riot Games、腾讯及其关联公司不存在隶属、赞助或认可关系。发布负责人已将清单锁定的 42 张游戏图片批准用于 v0.2.4 个人社区稳定渠道；该项目内部决定不声称第三方批准或独立法律审核已经完成。记录见 [v0.2.4 渠道决定](release/approvals/personal-community-stable-v0.2.4.json)和[原有游戏素材记录](release/approvals/game-content-rights.json)。
 
 <p align="center">
   <img src="docs/images/valoframe-library.png" width="1280" alt="瓦刻素材库界面，使用 FixtureAlpha 合成对局数据">
@@ -61,7 +59,7 @@
 | --- | --- | --- |
 | 浏览器界面预览 | 可用 | 使用合成 mock 数据体验素材库、扫描、标签和详情；不访问真实本地素材 |
 | 桌面源码运行 | 内部测试 | 可验证真实扫描与本地预览；必须从干净提交构建并记录 commit |
-| 个人社区稳定版 | [v0.2.3 已发布](https://github.com/2424521842/valoframe/releases/tag/v0.2.3) | 免费、非官方 Windows 版；稳定更新包强制验签，安装器可能显示未知发布者 |
+| 个人社区稳定版 | [v0.2.4 已发布](https://github.com/2424521842/valoframe/releases/tag/v0.2.4) | 免费、非官方 Windows 版；稳定更新包强制验签，安装器可能显示未知发布者 |
 | Community Beta | [v0.1.0-beta.1 已发布](https://github.com/2424521842/valoframe/releases/tag/v0.1.0-beta.1) | GitHub Prerelease；未签名、无自动更新，下载后需核对对应 SHA-256 |
 | 未来严格企业式发行 | 可选加固 | Authenticode、可信时间戳、独立法审和完整干净 VM 矩阵不阻止当前个人社区稳定版 |
 
@@ -70,9 +68,9 @@
 ## 安装
 
 1. 从上方 GitHub Release 入口（或蓝奏云备用入口）下载 `.exe`，不要把 `Source code`、`.nsis.zip` 或技术附件当作安装程序。
-2. 在 PowerShell 中运行 `Get-FileHash -Algorithm SHA256 -LiteralPath '.\VALOFRAME-0.2.3-x64-setup.exe'`，确认结果与同一 Release 的 `SHA256SUMS.txt` 完全一致。
+2. 在 PowerShell 中运行 `Get-FileHash -Algorithm SHA256 -LiteralPath '.\VALOFRAME-0.2.4-x64-setup.exe'`，确认结果与同一 Release 的 `SHA256SUMS.txt` 完全一致。
 3. 双击安装。如果 Windows 显示“Windows 已保护你的电脑”，先确认来源和哈希，再选择“更多信息”→“仍要运行”；无法确认时请取消安装。
-4. v0.2.3 可作为稳定更新通道的手动安装起点；后续稳定版本可在设置中检查、验签并确认安装。首次扫描前仍建议备份重要数据。
+4. v0.2.4 可作为稳定更新通道的手动安装起点；后续稳定版本可在设置中检查、验签并确认安装。首次扫描前仍建议备份重要数据。
 
 ## 快速体验
 
@@ -173,4 +171,4 @@ npm run assets:verify
 
 项目自有源代码和随附文档采用 [MIT License](LICENSE)。第三方依赖、FFmpeg、游戏内容、名称、商标、品牌图标及其他非项目自有素材不因此获得 MIT 授权，详见[许可范围说明](LICENSE-SCOPE.txt)与[许可文档](docs/LICENSING.md)。
 
-本项目由个人开发者以免费、非商业的社区工具方式发布，并参考 Riot Games 的 [Legal Jibber Jabber](https://www.riotgames.com/en/legal)。该网页本身不构成授权。发布负责人已确认清单锁定的 42 张游戏图片可用于 v0.2.3 `personal-community-stable` 渠道；该决定不声称 Riot Games、腾讯或其他第三方批准，也不声称独立法律审核已经完成。“非商业”描述本次发布目的，不给第一方 MIT 代码增加新的使用限制，也不免除 FFmpeg 等第三方许可证义务。VALORANT、《无畏契约》及相关名称、商标和游戏内容归其各自权利人所有。
+本项目由个人开发者以免费、非商业的社区工具方式发布，并参考 Riot Games 的 [Legal Jibber Jabber](https://www.riotgames.com/en/legal)。该网页本身不构成授权。发布负责人已确认清单锁定的 42 张游戏图片可用于 v0.2.4 `personal-community-stable` 渠道；该决定不声称 Riot Games、腾讯或其他第三方批准，也不声称独立法律审核已经完成。“非商业”描述本次发布目的，不给第一方 MIT 代码增加新的使用限制，也不免除 FFmpeg 等第三方许可证义务。VALORANT、《无畏契约》及相关名称、商标和游戏内容归其各自权利人所有。
