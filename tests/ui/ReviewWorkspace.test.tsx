@@ -365,6 +365,49 @@ describe("ReviewWorkspace", () => {
     expect(screen.queryByText("有一轮未完成的挑片")).not.toBeInTheDocument();
   });
 
+  it("clears every condition from the current-scope panel", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+
+    await user.click(await screen.findByRole("button", { name: "修改范围" }));
+    await chooseReviewScopeOption(user, "账号", "Summer#0002");
+    await waitFor(() => expect(screen.getByText("账号：Summer#0002")).toBeVisible());
+
+    await user.click(screen.getByRole("button", { name: /清空全部条件/ }));
+
+    expect(screen.getByText("全部可用素材")).toBeVisible();
+    expect(screen.queryByText("账号：Summer#0002")).not.toBeInTheDocument();
+    await waitFor(() => expect(latestReviewQuery()).toEqual({
+      sortBy: "modified-desc",
+      offset: 0,
+      limit: 200,
+    }));
+  });
+
+  it("offers finishing early directly in the session once anything has been decided", async () => {
+    const onViewSelected = vi.fn();
+    renderWorkspace({ onViewSelected });
+    await startReview();
+
+    const session = screen.getByLabelText("快速挑片会话");
+    // Nothing decided yet: finishing early is not an outcome worth offering.
+    expect(within(session).queryByRole("button", { name: "提前结束并查看结果" })).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "d" });
+    await waitFor(() => expect(screen.getByText("1 / 5")).toBeVisible());
+
+    // Reachable without opening the exit dialog first.
+    const finish = within(screen.getByLabelText("快速挑片会话"))
+      .getByRole("button", { name: "提前结束并查看结果" });
+    expect(finish).toBeVisible();
+    expect(screen.getByText(/剩余 4 条保持未处理/)).toBeVisible();
+
+    await userEvent.click(finish);
+
+    expect(await screen.findByRole("heading", { name: "本轮挑片已提前结束" })).toBeVisible();
+    expect(mocks.setClipReviewDecision).not.toHaveBeenCalled();
+  });
+
   it("uses the result actions to hand only selected clips to existing batch workflows", async () => {
     const onViewSelected = vi.fn();
     const onFavoriteSelected = vi.fn(async () => true);

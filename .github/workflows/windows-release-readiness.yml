@@ -405,11 +405,11 @@ jobs:
           if ($smokeReport.status -cne 'passed') {
             throw 'Release startup smoke report did not finish with passed status.'
           }
-          if ([int] $smokeReport.database.schemaVersion -ne 18 -or
+          if ([int] $smokeReport.database.schemaVersion -ne 21 -or
               [int] $smokeReport.database.requiredTableCount -ne 16 -or
               [long] $smokeReport.database.trashSnapshotCount -ne 0 -or
               [long] $smokeReport.database.deleteIntentCount -ne 0) {
-            throw 'Release startup smoke did not prove a fresh schema-v18 database with empty trash-snapshot and delete-intent journals.'
+            throw 'Release startup smoke did not prove a fresh schema-v21 database with empty trash-snapshot and delete-intent journals.'
           }
           $singleInstance = $smokeReport.runtime.singleInstance
           if ($singleInstance.verified -ne $true -or

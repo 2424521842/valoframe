@@ -1,3 +1,4 @@
+pub(super) mod ads;
 pub(super) mod clips;
 pub(super) mod deletions;
 pub(super) mod library;

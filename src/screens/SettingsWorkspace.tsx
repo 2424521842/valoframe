@@ -279,6 +279,56 @@ export function SettingsWorkspace({
                 </SettingRow>
 
                 <SettingRow
+                  description="开启后会在侧栏底部显示带「广告」标识的静态图文卡片。素材由瓦刻后端下载到本机后再显示，界面本身不会连接任何外部服务器；关闭后不再发起素材请求。"
+                  title="显示广告"
+                  titleId="ads-enabled-label"
+                >
+                  <UiSwitch
+                    aria-labelledby="ads-enabled-label"
+                    checked={values.adsEnabled}
+                    onCheckedChange={(checked) => preferences.updatePreferences({ adsEnabled: checked })}
+                  />
+                </SettingRow>
+
+                {values.adsEnabled ? (
+                  <>
+                    <SettingRow
+                      description="广告方提供的素材清单接口，必须以 https:// 开头（本机联调可用 http://localhost）。留空则不显示广告。"
+                      title="广告素材接口"
+                      titleId="ad-endpoint-label"
+                    >
+                      <input
+                        aria-labelledby="ad-endpoint-label"
+                        className="settings-input"
+                        placeholder="https://ad.example.com/manifest"
+                        type="url"
+                        value={values.adManifestEndpoint}
+                        onChange={(event) => preferences.updatePreferences({
+                          adManifestEndpoint: event.target.value,
+                        })}
+                      />
+                    </SettingRow>
+
+                    <SettingRow
+                      description="广告方落地页域名，多个用逗号或空格分隔。只有列表内的域名（含其子域名）才允许打开；留空将阻止所有广告点击。"
+                      title="落地页域名允许列表"
+                      titleId="ad-hosts-label"
+                    >
+                      <input
+                        aria-labelledby="ad-hosts-label"
+                        className="settings-input"
+                        placeholder="ad.example.com, lp.example.com"
+                        type="text"
+                        value={values.adAllowedHosts}
+                        onChange={(event) => preferences.updatePreferences({
+                          adAllowedHosts: event.target.value,
+                        })}
+                      />
+                    </SettingRow>
+                  </>
+                ) : null}
+
+                <SettingRow
                   description="只重置本页中的偏好，不会修改来源、标签、索引、缓存、视频或更新检查记录。"
                   title="恢复默认设置"
                 >

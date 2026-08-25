@@ -7,6 +7,7 @@ import {
   CornersOut,
   Crosshair,
   Database,
+  FlagCheckered,
   WarningCircle,
   FolderOpen,
   GameController,
@@ -512,6 +513,25 @@ export function ReviewSession({
         <ReviewAction decision="pending" disabled={isBusy} icon={<ArrowDown weight="bold" />} keyHint="S / ↓" label="待定" onClick={() => void runDecision("pending")} />
         <ReviewAction decision="selected" disabled={isBusy} icon={<ArrowRight weight="bold" />} keyHint="D / →" label="入选" onClick={() => void runDecision("selected")} />
       </footer>
+
+      {/* Finishing early used to be reachable only by opening the exit dialog. Once anything has
+          been decided it is a primary outcome of the round, so it gets its own visible control. */}
+      {controller.counts.reviewed > 0 && controller.counts.remaining > 0 ? (
+        <div className="review-session-finish">
+          <button
+            className="cinematic-button cinematic-button--primary"
+            disabled={isBusy}
+            type="button"
+            onClick={finishEarly}
+          >
+            <FlagCheckered weight="fill" />
+            提前结束并查看结果
+          </button>
+          <small>
+            已入选 {controller.counts.selected} 条 · 剩余 {controller.counts.remaining} 条保持未处理
+          </small>
+        </div>
+      ) : null}
 
       <UiAlertDialog open={exitDialogOpen} onOpenChange={setExitDialogOpen}>
         <UiAlertDialogContent>

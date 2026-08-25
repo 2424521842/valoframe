@@ -1,3 +1,4 @@
+pub mod ads;
 mod app_updates;
 mod commands;
 mod critical_tasks;
@@ -6,6 +7,7 @@ pub mod display_names;
 pub mod drive_discovery;
 pub(crate) mod file_identity;
 pub mod highlight_log_parser;
+pub(crate) mod http_client;
 pub mod leveldb_reader;
 pub mod metadata;
 pub mod metadata_ingest;
@@ -31,6 +33,7 @@ const RELEASE_SMOKE_MARKER_CONTENT: &str = "vhm-release-smoke-root-v1";
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) database_path: String,
+    pub(crate) ad_image_cache_root: PathBuf,
     pub(crate) scan_coordinator: Arc<scan_coordinator::ScanCoordinator>,
     pub(crate) thumbnail_queue: Arc<thumbnail::ThumbnailQueue>,
     pub(crate) critical_tasks: Arc<critical_tasks::CriticalTaskGate>,
@@ -49,6 +52,7 @@ pub fn run() {
             commands::clip_media_protocol_response(
                 &state.database_path,
                 state.thumbnail_queue.cache_root(),
+                &state.ad_image_cache_root,
                 request,
             )
         })
@@ -101,6 +105,12 @@ pub fn run() {
                         .join("thumbnails"),
                 ),
             };
+            // Ad creative images live beside the thumbnail cache so both are covered by the same
+            // protected-path checks and by whatever the user clears.
+            let ad_image_cache_root = cache_root
+                .parent()
+                .map(|parent| parent.join(ads::AD_IMAGE_CACHE_DIR_NAME))
+                .unwrap_or_else(|| PathBuf::from(ads::AD_IMAGE_CACHE_DIR_NAME));
             if let Ok(mut recovery_dir) = startup_recovery_dir_for_setup.lock() {
                 *recovery_dir = Some(data_dir.clone());
             }
@@ -142,6 +152,7 @@ pub fn run() {
 
             let app_state = AppState {
                 database_path: database_path.display().to_string(),
+                ad_image_cache_root,
                 scan_coordinator: Arc::new(scan_coordinator::ScanCoordinator::default()),
                 thumbnail_queue,
                 critical_tasks: Arc::new(critical_tasks::CriticalTaskGate::default()),
@@ -228,6 +239,10 @@ pub fn run() {
             commands::submit_feedback,
             commands::save_feedback_package,
             commands::discard_feedback_package,
+            commands::list_ad_creatives,
+            commands::refresh_ad_creatives,
+            commands::record_ad_impression,
+            commands::record_ad_click,
             app_updates::get_app_update_runtime_info,
             app_updates::check_for_app_update,
             app_updates::download_app_update,

@@ -434,6 +434,24 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
     expect(pendingNav).not.toHaveAttribute("aria-current");
     expect(within(pendingNav).getByLabelText(/有 1 个 NVIDIA 视频待录入/)).toBeVisible();
   });
+
+  it("keeps the pending list and manual import dialog usable for unparsable timestamps", async () => {
+    const user = userEvent.setup();
+    renderWorkspace({
+      sourceDirs: [nvidiaSource()],
+      // A raw `pending_manual_clips.modified_at` row is bare unix seconds; formatting it as a
+      // date used to throw and blank out the whole workspace.
+      pendingClips: [{ ...pendingClip(), modifiedAt: "1751491083" }],
+    });
+
+    const navigation = screen.getByRole("navigation", { name: "扫描分类" });
+    await user.click(within(navigation).getByRole("button", { name: /待录入/ }));
+
+    expect(screen.getByText("待录入的 NVIDIA 视频")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "录入" }));
+    expect(await screen.findByRole("dialog", { name: "录入 NVIDIA 视频" })).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "选择英雄" })).toBeVisible();
+  });
 });
 
 function renderWorkspace(overrides: Partial<ComponentProps<typeof ScanWorkspace>>) {

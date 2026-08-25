@@ -1,5 +1,7 @@
 import { MonitorPlay, Plus, UserCircle, WarningCircle } from "@phosphor-icons/react";
 import { useEffect, useState, type FormEvent } from "react";
+import { pendingMediaUrlForId } from "../api/backend";
+import { formatBytes } from "../lib/formatters";
 import type { AccountSummary, ManualClipImportInput, PendingManualClip } from "../types";
 import {
   EMPTY_MANUAL_IMPORT_FORM,
@@ -53,11 +55,13 @@ export function ManualClipImportDialog({
 }: ManualClipImportDialogProps) {
   const [form, setForm] = useState<ManualImportFormState>(EMPTY_MANUAL_IMPORT_FORM);
   const [fieldErrors, setFieldErrors] = useState<ManualImportFormErrors>({});
+  const [previewFailed, setPreviewFailed] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setForm(EMPTY_MANUAL_IMPORT_FORM);
     setFieldErrors({});
+    setPreviewFailed(false);
   }, [open, clip?.id]);
 
   const setField = <K extends keyof ManualImportFormState>(
@@ -95,8 +99,29 @@ export function ManualClipImportDialog({
 
         {clip ? (
           <section className="manual-import-file" aria-label="待录入文件">
+            <video
+              className="manual-import-video"
+              controls
+              preload="metadata"
+              // Keyed so switching pending rows reloads the source instead of keeping the old
+              // buffer, and reset on close so no stream stays open behind a hidden dialog.
+              key={clip.id}
+              src={pendingMediaUrlForId(clip.id)}
+              onError={() => setPreviewFailed(true)}
+              onLoadedMetadata={() => setPreviewFailed(false)}
+            />
+            {previewFailed ? (
+              <p className="manual-import-video-error" role="status">
+                <WarningCircle weight="fill" />
+                无法在应用内预览该视频，可能是当前 WebView2 解码链不支持；分类信息仍可正常填写。
+              </p>
+            ) : null}
             <strong>{clip.fileName}</strong>
-            <small>{clip.sourceDirName}{clip.sourceRelativeDir ? ` · ${clip.sourceRelativeDir}` : ""}</small>
+            <small>
+              {clip.sourceDirName}
+              {clip.sourceRelativeDir ? ` · ${clip.sourceRelativeDir}` : ""}
+              {` · ${formatBytes(clip.fileSize)}`}
+            </small>
           </section>
         ) : null}
 

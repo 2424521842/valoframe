@@ -14,6 +14,15 @@ function readJson(path: string): Record<string, any> {
   return JSON.parse(read(path)) as Record<string, any>;
 }
 
+/** Track the Rust schema instead of copying the number into the release gates. */
+function rustSchemaVersion(): number {
+  const match = read("src-tauri/src/db/migrations.rs").match(
+    /SCHEMA_VERSION:\s*i64\s*=\s*(\d+)/u,
+  );
+  assert.ok(match, "migrations.rs must declare SCHEMA_VERSION");
+  return Number(match![1]);
+}
+
 const workflow = read(".github/workflows/community-beta.yml");
 const communityBetaDocumentation = read("docs/COMMUNITY_BETA.md");
 const bundleGate = read("scripts/release/check-bundle.ps1");
@@ -256,8 +265,8 @@ test("startup smoke consumes only the exact bundle-gate payload", () => {
     "Verified Community Beta startup payload files do not exactly match",
     "normalization.rawEmbeddedSha256",
     "-ExpectedExecutableSha256 $expectedMainHash",
-    "smoke.database.schemaVersion -ne 18",
-    "fresh schema-v18 database",
+    `smoke.database.schemaVersion -ne ${rustSchemaVersion()}`,
+    `fresh schema-v${rustSchemaVersion()} database`,
     "windows-release-smoke.ps1 exited with code",
     "singleInstance.sharedLaunchConfiguration.environmentOverrides.WEBVIEW2_USER_DATA_FOLDER",
     "smoke.runtime.webView2UserDataPath",

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ManualClipImportDialog } from "../../src/components/ManualClipImportDialog";
@@ -117,6 +117,29 @@ describe("ManualClipImportDialog", () => {
       accountKey: "match-account-1001",
       accountName: "FixtureAlpha#0001",
     }));
+  });
+
+  it("streams the pending recording so the user can watch it before classifying", () => {
+    renderDialog();
+
+    const file = screen.getByLabelText("待录入文件");
+    const video = file.querySelector("video");
+    expect(video).not.toBeNull();
+    // Keyed by pending id so switching rows reloads rather than reusing the previous buffer.
+    expect(video).toHaveAttribute("src", expect.stringContaining("pending/pending-1"));
+    expect(video).toHaveAttribute("controls");
+    expect(screen.getByText(/85 MB/)).toBeVisible();
+  });
+
+  it("keeps the form usable when the recording cannot be decoded for preview", () => {
+    renderDialog();
+
+    const video = screen.getByLabelText("待录入文件").querySelector("video");
+    fireEvent.error(video!);
+
+    expect(screen.getByText(/无法在应用内预览该视频/)).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "选择英雄" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "录入到素材库" })).toBeEnabled();
   });
 });
 

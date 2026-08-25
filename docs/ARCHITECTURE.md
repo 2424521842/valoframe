@@ -52,7 +52,9 @@ flowchart LR
 | `commands/sources.rs` | 来源注册/重叠确认、启停、单来源同步、启用来源批量同步、启动异步同步，以及来源根重新定位的预览/提交编排 |
 | `commands/manual_import.rs` | NVIDIA 待录入队列 command：列表、忽略/恢复与手动分类导入（导入后唤醒缩略图队列） |
 | `commands/library.rs` | 素材分页/详情、来源、标签、收藏、回收、备注、符合资格的单条/批量仅移除索引、媒体令牌及系统文件管理器 commands |
-| `commands/media_protocol.rs` | 通过 clip ID 查询最新路径，处理源/生成封面、HEAD、Range 和最多 1 MiB 的媒体响应 |
+| `commands/media_protocol.rs` | 通过 clip ID 查询最新路径，处理源/生成封面、缓存广告素材图、HEAD、Range 和最多 1 MiB 的媒体响应 |
+| `ads.rs` | 广告清单拉取与校验（HTTPS 强制、字段长度与 ID 字符白名单）、素材图魔数校验与本地缓存、落地页域名允许列表校验与 `click_id` 生成 |
+| `commands/ads.rs` | 广告素材列表、清单刷新、曝光计数、点击记录与经 `ShellExecuteW` 打开系统浏览器 |
 | `thumbnail.rs` | 解析受控 FFmpeg、单 worker、超时/取消、指纹提交、事件和缓存维护 |
 | `app_updates.rs` | 固定稳定端点、公钥装配、检查/下载/取消/安装状态机、签名错误映射和发布说明约束 |
 | `commands/feedback.rs` | 用户主动发起的问题反馈：脱敏诊断快照 + 同对局片段上下文 + FFmpeg 采样帧 + 可选视频本体 → zip 诊断包 → 直传配置的 HTTPS 接口或回退保存文件；上传进度事件与包路径边界校验 |
@@ -136,6 +138,7 @@ flowchart LR
 | 文件与媒体 | `get_clip_media`、`open_clip_externally`、`open_clip_location`、`copy_clip_path` |
 | 问题反馈 | `submit_feedback`（采集 + 打包 + 可选直传，`feedback-progress` 事件）、`save_feedback_package`（保存到用户选择的位置）、`discard_feedback_package`（放弃未保存的临时包） |
 | 稳定更新 | `get_app_update_runtime_info`、`check_for_app_update`、`download_app_update`、`cancel_app_update_download`、`install_app_update` |
+| 广告位（默认关闭） | `list_ad_creatives`（读本地缓存，不联网）、`refresh_ad_creatives`（拉取并校验清单、缓存素材图）、`record_ad_impression`、`record_ad_click`（落库 `click_id` 后按域名允许列表打开系统浏览器，返回 `click_id`） |
 
 `list_clips`、`scan_custom_dir` 和 `ping_backend` 暂时保留兼容契约，但生产素材库不再依赖 `list_clips`。
 
@@ -236,6 +239,7 @@ WonderfulDb clip record
 - Tauri 单实例插件在数据库初始化前拦截第二个进程；重复启动只恢复、显示并聚焦现有主窗口，不接受外部路径或命令参数。
 - updater 原始 plugin commands 不进入窗口 capability；前端只能调用 Rust 固定端点/公钥的受控 commands。未嵌入公钥的 Community Beta 构建拒绝检查且不生成更新产物。
 - 问题反馈是唯一的上行网络路径：只有用户在反馈弹窗中主动提交时才会发起请求，目标只能是随命令传入的 HTTPS 接口（本机自测允许 localhost HTTP，其余 http 一律拒绝）；当前接口配置入口不在 UI 中、endpoint 恒为空，因此实际只走“保存 zip 文件”路径，上传代码保持同样约束待后台就绪后启用。诊断数据按脱敏白名单组装（不含 OpenID/PUUID、备注、标签、绝对路径），完整视频最大 1 GiB、描述 2000 字、上传超时 15 分钟；保存/放弃命令只接受应用反馈缓存目录内的 zip 路径。
+- 广告位默认关闭，且不引入任何第三方 SDK：CSP 不放开、capability 不新增。广告清单是不可信输入，由 Rust 侧校验 HTTPS、字段长度、素材 ID 字符白名单（仅 `A-Za-z0-9-_`，杜绝路径穿越）与落地页模板占位符后才入库；单条非法素材被丢弃而非整批失败。素材图按魔数而非 `Content-Type` 判定 PNG/JPEG，限 512 KiB，缓存 basename 经 `resolve_cached_image` 校验不得逸出缓存目录，再经 `clip-media://ad/<id>` 投递，因此前端始终零外域请求。点击时后端从库内模板重建 URL（不接受前端传入的 URL），校验协议为 https 且域名命中用户配置的允许列表（精确匹配或真子域，不做后缀匹配），空列表阻止全部点击；随后先落 `ad_click_log` 再调用 `ShellExecuteW`，确保到达广告方的点击都可对账。传出数据仅 `sub_id` 与一次性 `click_id`，应用内不收集任何个人信息，表单一律在广告方落地页完成。详见 `docs/AD_INTEGRATION_SPEC.md`。
 - 当前自定义 application commands 仍使用 Tauri 的默认应用命令可见性；若未来增加远程窗口或多权限窗口，应通过 `AppManifest::commands` 为这些 commands 建立显式 ACL。
 
 ## 8. 性能与一致性

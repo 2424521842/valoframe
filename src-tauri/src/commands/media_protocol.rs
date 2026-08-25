@@ -18,10 +18,13 @@ use crate::{db, thumbnail};
 
 const CLIP_MEDIA_PROTOCOL_PATH_PREFIX: &str = "clip";
 const COVER_MEDIA_PROTOCOL_PATH_PREFIX: &str = "cover";
+const PENDING_MEDIA_PROTOCOL_PATH_PREFIX: &str = "pending";
+const AD_MEDIA_PROTOCOL_PATH_PREFIX: &str = "ad";
 const CLIP_MEDIA_CONTENT_TYPE: &str = "video/mp4";
 const COVER_MEDIA_CONTENT_TYPE: &str = "image/jpeg";
 pub(super) const FILE_NOT_FOUND_MESSAGE: &str = "文件不存在";
 pub(super) const MAX_MEDIA_CHUNK_BYTES: u64 = 1024 * 1024;
+const MAX_AD_IMAGE_BYTES: u64 = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ByteRange {
@@ -32,9 +35,15 @@ pub(super) struct ByteRange {
 pub fn clip_media_protocol_response(
     database_path: &str,
     thumbnail_cache_root: &Path,
+    ad_cache_root: &Path,
     request: http::Request<Vec<u8>>,
 ) -> http::Response<Vec<u8>> {
     let media_path = percent_decode_path(request.uri().path().trim_start_matches('/'));
+
+    if let Some(creative_id) = media_path.strip_prefix(&format!("{AD_MEDIA_PROTOCOL_PATH_PREFIX}/"))
+    {
+        return ad_image_response(database_path, ad_cache_root, creative_id, request.method());
+    }
 
     if let Ok(clip_id) = media_id_from_path(&media_path, CLIP_MEDIA_PROTOCOL_PATH_PREFIX) {
         let clip = {
@@ -57,6 +66,40 @@ pub fn clip_media_protocol_response(
             .get(RANGE)
             .and_then(|value| value.to_str().ok());
         return media_file_response(Path::new(&clip.video_path), request.method(), range_header);
+    }
+
+    if let Ok(pending_id) = media_id_from_path(&media_path, PENDING_MEDIA_PROTOCOL_PATH_PREFIX) {
+        let target = {
+            let connection = match db::open_database_read_only(database_path) {
+                Ok(connection) => connection,
+                Err(message) => return text_response(StatusCode::INTERNAL_SERVER_ERROR, &message),
+            };
+            match db::find_pending_manual_clip_media_target(&connection, pending_id) {
+                Ok(Some(target)) => target,
+                Ok(None) => return text_response(StatusCode::NOT_FOUND, FILE_NOT_FOUND_MESSAGE),
+                Err(message) => return text_response(StatusCode::NOT_FOUND, &message),
+            }
+        };
+
+        // Pending rows are not indexed clips, so re-verify the recorded path is still a plain MP4
+        // inside its authorized source root before opening any handle.
+        let canonical_path = match super::ensure_mp4_inside_source_root(
+            &target.video_path,
+            &target.source_dir_path,
+            &target.extension,
+        ) {
+            Ok(path) => path,
+            Err(message) if message == FILE_NOT_FOUND_MESSAGE => {
+                return text_response(StatusCode::NOT_FOUND, &message);
+            }
+            Err(message) => return text_response(StatusCode::FORBIDDEN, &message),
+        };
+
+        let range_header = request
+            .headers()
+            .get(RANGE)
+            .and_then(|value| value.to_str().ok());
+        return media_file_response(&canonical_path, request.method(), range_header);
     }
 
     if let Ok(clip_id) = media_id_from_path(&media_path, COVER_MEDIA_PROTOCOL_PATH_PREFIX) {
@@ -93,6 +136,91 @@ pub fn clip_media_protocol_response(
         .unwrap_or_else(|error| error);
 
     text_response(StatusCode::BAD_REQUEST, &message)
+}
+
+/// Serves a locally cached ad creative image.
+///
+/// The requested id is resolved to a cache basename through the database, so a crafted request
+/// cannot name an arbitrary file; `ads::resolve_cached_image` then enforces that the resolved path
+/// stays inside the cache directory.
+fn ad_image_response(
+    database_path: &str,
+    ad_cache_root: &Path,
+    creative_id: &str,
+    method: &Method,
+) -> http::Response<Vec<u8>> {
+    if method != Method::GET && method != Method::HEAD {
+        return text_response(StatusCode::METHOD_NOT_ALLOWED, "不支持的请求方法");
+    }
+    if creative_id.is_empty() || creative_id.contains('/') {
+        return text_response(StatusCode::BAD_REQUEST, "invalid ad creative path");
+    }
+
+    let cache_file = {
+        let connection = match db::open_database_read_only(database_path) {
+            Ok(connection) => connection,
+            Err(message) => return text_response(StatusCode::INTERNAL_SERVER_ERROR, &message),
+        };
+        match db::find_ad_creative(&connection, creative_id) {
+            Ok(Some(creative)) => creative.cached_image_file,
+            Ok(None) => return text_response(StatusCode::NOT_FOUND, FILE_NOT_FOUND_MESSAGE),
+            Err(message) => return text_response(StatusCode::NOT_FOUND, &message),
+        }
+    };
+    let Some(cache_file) = cache_file else {
+        return text_response(StatusCode::NOT_FOUND, FILE_NOT_FOUND_MESSAGE);
+    };
+
+    let image_path = match crate::ads::resolve_cached_image(ad_cache_root, &cache_file) {
+        Ok(path) => path,
+        Err(_) => return text_response(StatusCode::NOT_FOUND, FILE_NOT_FOUND_MESSAGE),
+    };
+
+    let content_type = if cache_file.ends_with(".png") {
+        "image/png"
+    } else {
+        COVER_MEDIA_CONTENT_TYPE
+    };
+
+    let mut file = match File::open(&image_path) {
+        Ok(file) => file,
+        Err(_) => return text_response(StatusCode::NOT_FOUND, FILE_NOT_FOUND_MESSAGE),
+    };
+    let content_length = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            return text_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("无法读取广告素材信息: {error}"),
+            );
+        }
+    };
+    if content_length > MAX_AD_IMAGE_BYTES {
+        return text_response(StatusCode::PAYLOAD_TOO_LARGE, "广告素材过大");
+    }
+
+    let body = if method == Method::HEAD {
+        Vec::new()
+    } else {
+        let mut body = Vec::with_capacity(content_length as usize);
+        if let Err(error) = file.read_to_end(&mut body) {
+            return text_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("无法读取广告素材: {error}"),
+            );
+        }
+        body
+    };
+
+    http::Response::builder()
+        .status(StatusCode::OK)
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(CONTENT_TYPE, content_type)
+        .header(CACHE_CONTROL, "no-cache")
+        .header("x-content-type-options", "nosniff")
+        .header(CONTENT_LENGTH, content_length)
+        .body(body)
+        .expect("ad image response should build")
 }
 
 fn cover_file_response(

@@ -676,6 +676,35 @@ pub struct Tag {
     pub color: Option<String>,
 }
 
+/// A vendor-supplied ad creative cached locally.
+///
+/// `cached_image_file` is a basename inside the ad image cache directory, never a full path, so
+/// it cannot be used to point the media protocol outside that directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdCreative {
+    pub creative_id: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub image_url: String,
+    pub landing_url_template: String,
+    pub advertiser_name: String,
+    pub weight: i64,
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
+    pub cached_image_file: Option<String>,
+}
+
+/// One recorded ad click, kept as local reconciliation evidence against vendor reporting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdClickRecord {
+    pub click_id: String,
+    pub creative_id: String,
+    pub slot: String,
+    pub clicked_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchClipMutationResult {

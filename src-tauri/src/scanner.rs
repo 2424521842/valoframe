@@ -307,6 +307,10 @@ struct AclosScanGroup {
     path: PathBuf,
     name: String,
     clips: Vec<(PathBuf, i64)>,
+    /// Clips sharing `path` for cover discovery. Equal to `clips.len()` for a per-match
+    /// directory, but larger when several single-clip groups come out of one shared
+    /// directory, so the lone-cover fallback cannot reuse one cover across unrelated clips.
+    cover_scope_clip_count: usize,
 }
 
 struct CoverJpegDiscovery {
@@ -910,7 +914,33 @@ fn scan_one_source(
         }
         if entry_metadata.is_dir() {
             match canonicalize_regular_path_within_root(&path, &canonical_source_path) {
-                Ok(_) => raw_groups.push((path.clone(), path_file_name(&path), None)),
+                Ok(_) => {
+                    let dir_name = path_file_name(&path);
+                    if is_aclos_per_clip_group_dir(&dir_name) {
+                        // Files here belong to unrelated matches, so each becomes its own group.
+                        match mp4_files_in_dir(&path) {
+                            Ok(files) => {
+                                let shared_clip_count = files.len();
+                                for file in files {
+                                    let group_name = clip_group_name_for_file(&file);
+                                    raw_groups.push((
+                                        path.clone(),
+                                        group_name,
+                                        Some(file),
+                                        shared_clip_count,
+                                    ));
+                                }
+                            }
+                            Err(error) => {
+                                complete_for_missing = false;
+                                push_source_error(summary, &source_path, &error);
+                                push_unique_error(&mut source_errors, error);
+                            }
+                        }
+                    } else {
+                        raw_groups.push((path.clone(), dir_name, None, 0));
+                    }
+                }
                 Err(error) => {
                     complete_for_missing = false;
                     push_source_error(summary, &source_path, &error);
@@ -918,13 +948,9 @@ fn scan_one_source(
                 }
             }
         } else if entry_metadata.is_file() && has_extension(&path, "mp4") {
-            let group_name = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_string)
-                .unwrap_or_else(|| path_file_name(&path));
+            let group_name = clip_group_name_for_file(&path);
             match canonicalize_regular_path_within_root(&path, &canonical_source_path) {
-                Ok(_) => raw_groups.push((source_path.clone(), group_name, Some(path))),
+                Ok(_) => raw_groups.push((source_path.clone(), group_name, Some(path), 0)),
                 Err(error) => {
                     complete_for_missing = false;
                     push_source_error(summary, &source_path, &error);
@@ -937,7 +963,7 @@ fn scan_one_source(
     let _reconnect_plan = ScanReconnectPlanGuard::begin(connection, source_dir.id)?;
     let mut identity_diagnostics = IdentityReadDiagnostics::default();
     let mut scan_groups = Vec::with_capacity(raw_groups.len());
-    for (group_path, group_name, root_clip_path) in raw_groups {
+    for (group_path, group_name, root_clip_path, shared_dir_clip_count) in raw_groups {
         if runtime.is_cancelled() {
             return Ok(cancelled_source_step(
                 progress,
@@ -987,10 +1013,12 @@ fn scan_one_source(
             clips.push((candidate.path, candidate_id));
         }
         if !clips.is_empty() {
+            let cover_scope_clip_count = shared_dir_clip_count.max(clips.len());
             scan_groups.push(AclosScanGroup {
                 path: group_path,
                 name: group_name,
                 clips,
+                cover_scope_clip_count,
             });
         }
     }
@@ -1018,6 +1046,7 @@ fn scan_one_source(
         let group_path = group.path;
         let group_name = group.name;
         let staged_clips = group.clips;
+        let cover_scope_clip_count = group.cover_scope_clip_count;
 
         let clip_group = match db::upsert_clip_group(
             connection,
@@ -1053,7 +1082,7 @@ fn scan_one_source(
                 Vec::new()
             }
         };
-        let clip_count = staged_clips.len();
+        let clip_count = cover_scope_clip_count.max(staged_clips.len());
 
         for (clip_path, candidate_id) in &staged_clips {
             if runtime.is_cancelled() {
@@ -1961,6 +1990,22 @@ fn scan_root_from_aclos_path(value: &str) -> Option<PathBuf> {
     }
 }
 
+/// ACLOS keeps per-match clips in `<match-id>/` directories, but raw full-session
+/// recordings land in a shared `record/` directory. Folding `record/` into one clip
+/// group would present unrelated matches under a single match header, so its files
+/// are grouped per file instead. `metadata_ingest::record_src_group_key` already
+/// refuses to resolve this directory name for the same reason.
+fn is_aclos_per_clip_group_dir(dir_name: &str) -> bool {
+    dir_name.eq_ignore_ascii_case("record")
+}
+
+fn clip_group_name_for_file(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path_file_name(path))
+}
+
 fn mp4_files_in_dir(path: &Path) -> Result<Vec<PathBuf>, String> {
     let files = read_sorted_entries(path)?
         .into_iter()
@@ -2508,6 +2553,65 @@ mod tests {
                 error.contains("cover-linked-directory.jpeg") && error.contains("reparse point")
             }));
         }
+    }
+
+    #[test]
+    fn scan_directory_gives_each_shared_record_recording_its_own_clip_group() {
+        let fixture = TestFixture::new("shared-record-dir");
+        let root = fixture.path();
+        let source = root.join("wonderfulVideos1001");
+        let match_group = source.join("11111111-1111-1111-1111-111111111111");
+        let record = source.join("record");
+        fs::create_dir_all(&match_group).expect("match group should be created");
+        fs::create_dir_all(&record).expect("record directory should be created");
+        fs::write(match_group.join("ace.mp4"), b"video-one").expect("clip should be written");
+        fs::write(record.join("20260710-161959.mp4"), b"session-one")
+            .expect("recording should be written");
+        fs::write(record.join("20260710-172047.mp4"), b"session-two")
+            .expect("recording should be written");
+        fs::write(record.join("cover-20260710-161959.jpeg"), b"cover-one")
+            .expect("recording cover should be written");
+
+        let connection = Connection::open_in_memory().expect("database should open");
+        db::initialize_schema(&connection).expect("schema should initialize");
+
+        let summary = crate::scanner::scan_directory(&connection, root).expect("scan should run");
+        let clips = db::list_clips(&connection).expect("clips should list");
+
+        assert!(summary.errors.is_empty());
+        assert_eq!(summary.new_clip_count, 3);
+        // One group for the real match plus one per raw recording, never a shared `record` group.
+        assert_eq!(summary.clip_group_count, 3);
+
+        let mut group_names = clips
+            .iter()
+            .map(|clip| clip.clip_group_name.clone().unwrap_or_default())
+            .collect::<Vec<_>>();
+        group_names.sort();
+        assert_eq!(
+            group_names,
+            vec![
+                "11111111-1111-1111-1111-111111111111",
+                "20260710-161959",
+                "20260710-172047",
+            ]
+        );
+
+        // The lone cover in `record/` must stay with the clip whose stem it matches, even though
+        // every group carved out of that directory holds a single clip.
+        let matched = clips
+            .iter()
+            .find(|clip| clip.file_name == "20260710-161959.mp4")
+            .expect("covered recording should be indexed");
+        assert!(matched
+            .cover_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("cover-20260710-161959.jpeg")));
+        let unmatched = clips
+            .iter()
+            .find(|clip| clip.file_name == "20260710-172047.mp4")
+            .expect("uncovered recording should be indexed");
+        assert_eq!(unmatched.cover_path, None);
     }
 
     #[test]

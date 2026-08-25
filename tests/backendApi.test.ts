@@ -6,6 +6,7 @@ import {
   isDefaultAclosDirMissing,
   mapBackendClip,
   mapBackendClipSummary,
+  mapBackendPendingManualClip,
   mapBackendSource,
   mapBackendTag,
   mediaPathForClipId,
@@ -469,4 +470,43 @@ test("builds clip media paths from clip ids instead of local file paths", () => 
   assert.equal(coverPathForClipId("42"), "cover/42");
   assert.match(coverUrlForClipId("42", "revision/2"), /cover\/42\?v=revision%2F2$/);
   assert.equal(mediaPathForClipId("C:\\Clips\\ace.mp4"), "clip/C%3A%5CClips%5Cace.mp4");
+});
+
+test("normalizes pending manual clip timestamps stored as bare unix seconds", () => {
+  const mapped = mapBackendPendingManualClip({
+    id: 11,
+    sourceDirId: 4,
+    sourceDirName: "NVIDIA 录屏",
+    filePath: "D:\\Videos\\NVIDIA\\VALORANT\\clip.mp4",
+    fileName: "clip.mp4",
+    fileSize: 84_500_000,
+    modifiedAt: "1751491083",
+    sourceRelativeDir: "VALORANT",
+    ignored: false,
+    firstDiscoveredAt: "2026-07-02 22:45:00",
+  });
+
+  assert.equal(mapped.id, "11");
+  assert.equal(mapped.sourceDirId, "4");
+  assert.equal(mapped.modifiedAt, new Date(1_751_491_083 * 1_000).toISOString());
+  assert.equal(Number.isNaN(Date.parse(mapped.modifiedAt ?? "")), false);
+  assert.equal(Number.isNaN(Date.parse(mapped.firstDiscoveredAt ?? "")), false);
+});
+
+test("keeps unset pending manual clip timestamps null instead of epoch", () => {
+  const mapped = mapBackendPendingManualClip({
+    id: 12,
+    sourceDirId: 4,
+    sourceDirName: "NVIDIA 录屏",
+    filePath: "D:\\Videos\\NVIDIA\\VALORANT\\clip.mp4",
+    fileName: "clip.mp4",
+    fileSize: 1,
+    modifiedAt: null,
+    sourceRelativeDir: "",
+    ignored: true,
+    firstDiscoveredAt: null,
+  });
+
+  assert.equal(mapped.modifiedAt, null);
+  assert.equal(mapped.firstDiscoveredAt, null);
 });

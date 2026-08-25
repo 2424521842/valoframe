@@ -706,6 +706,8 @@ async fn upload_feedback_package(
     let (boundary, prefix, tail) = multipart_body_parts(&report_json, &built.suggested_file_name);
     let reader = MultipartReader::new(prefix, tail, file, built.total_bytes, Arc::clone(&progress));
     let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(reader));
+    // reqwest ships with no default crypto provider here; building a Client without this panics.
+    crate::http_client::ensure_crypto_provider();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(FEEDBACK_UPLOAD_TIMEOUT_SECS))
         .build()

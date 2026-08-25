@@ -12,6 +12,8 @@ const cargoManifest = readFileSync(
   new URL("../src-tauri/Cargo.toml", import.meta.url),
   "utf8",
 );
+/** Single source of truth: the release gates must track the Rust schema, not a copied literal. */
+const RUST_SCHEMA_VERSION = readRustSchemaVersion();
 const cargoLock = readFileSync(
   new URL("../src-tauri/Cargo.lock", import.meta.url),
   "utf8",
@@ -767,7 +769,7 @@ test("bundle gate proves NSIS format and all shipped compliance payload files", 
   assert.match(releaseWorkflow, /-FfmpegMode ResourceOverride/);
 });
 
-test("Windows startup smoke proves schema v18 and single-instance handoff", () => {
+test("Windows startup smoke proves the current schema and single-instance handoff", () => {
   assert.match(
     releaseSmokeScript,
     /IsNullOrEmpty\(\$env:WEBVIEW2_USER_DATA_FOLDER\)[\s\S]*Refusing to inherit WEBVIEW2_USER_DATA_FOLDER[\s\S]*\$realDataBefore\s*=\s*Get-TreeFingerprint/,
@@ -784,12 +786,17 @@ test("Windows startup smoke proves schema v18 and single-instance handoff", () =
     releaseSmokeScript,
     /IsNullOrWhiteSpace\(\$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS\)[\s\S]*Refusing to inherit WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS/,
   );
-  assert.match(releaseSmokeScript, /\$ExpectedSchemaVersion\s*=\s*18/);
+  assert.match(
+    releaseSmokeScript,
+    new RegExp(`\\$ExpectedSchemaVersion\\s*=\\s*${RUST_SCHEMA_VERSION}`),
+  );
   assert.match(releaseSmokeScript, /\$global:LASTEXITCODE\s*=\s*0/);
   assert.match(releaseWorkflow, /windows-release-smoke\.ps1 exited with code/);
   assert.match(
     releaseWorkflow,
-    /smokeReport\.database\.schemaVersion\s+-ne\s+18/,
+    new RegExp(
+      `smokeReport\\.database\\.schemaVersion\\s+-ne\\s+${RUST_SCHEMA_VERSION}`,
+    ),
   );
   assert.doesNotMatch(releaseWorkflow, /fresh schema-v13 database/);
   assert.match(releaseSmokeScript, /file_volume_serial/);
@@ -827,6 +834,16 @@ test("Windows startup smoke proves schema v18 and single-instance handoff", () =
 
 function readJson(path: string): JsonObject {
   return JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8")) as JsonObject;
+}
+
+function readRustSchemaVersion(): number {
+  const migrations = readFileSync(
+    new URL("../src-tauri/src/db/migrations.rs", import.meta.url),
+    "utf8",
+  );
+  const match = migrations.match(/SCHEMA_VERSION:\s*i64\s*=\s*(\d+)/);
+  assert.ok(match, "migrations.rs must declare SCHEMA_VERSION");
+  return Number(match![1]);
 }
 
 function objectAt(value: JsonObject, key: string): JsonObject {

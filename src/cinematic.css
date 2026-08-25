@@ -1270,10 +1270,26 @@
 .review-session {
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  /* header / card / decision actions / optional early-finish bar. The last row collapses to zero
+     height when the bar is absent, so an in-progress round keeps the original three-row layout. */
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   gap: 14px;
   padding: 16px clamp(16px, 4vw, 56px) 20px;
   overflow: hidden;
+}
+
+.review-session-finish {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  justify-self: center;
+}
+
+.review-session-finish small {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 .review-session--loading {
@@ -2260,6 +2276,31 @@
   color: #d6d5d2;
   background: #171b22;
   font-size: 11px;
+}
+
+.review-scope-reset {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid #353b46;
+  border-radius: 6px;
+  color: #afb3bc;
+  background: #15181f;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.review-scope-reset:hover {
+  border-color: rgba(255, 70, 85, 0.45);
+  color: #e6e3dc;
+}
+
+.review-scope-reset svg {
+  width: 11px;
+  height: 11px;
 }
 
 .review-setup-section--scope > p {
@@ -4799,6 +4840,39 @@ h1 {
 /* ===== 手动录入弹窗 ===== */
 .manual-import-dialog {
   width: min(540px, calc(100vw - 40px));
+  /* The form plus the preview player can exceed short viewports; scroll inside the dialog rather
+     than letting the footer actions fall outside the window. */
+  max-height: min(880px, calc(100vh - 32px));
+  overflow-y: auto;
+}
+
+.manual-import-video {
+  width: 100%;
+  max-height: 240px;
+  display: block;
+  margin-bottom: 10px;
+  border: 1px solid #262a33;
+  border-radius: 4px;
+  background: #05070a;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+}
+
+.manual-import-video-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 0 8px;
+  color: #f1d6a5;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.manual-import-video-error svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  color: var(--gold);
 }
 
 .manual-import-heading {
@@ -5311,6 +5385,93 @@ h1 {
   text-align: center;
 }
 
+/* Ad slot. Pushed to the bottom so it never competes with navigation, and visually separated so
+   it does not read as an app feature. */
+.cinematic-sidebar-ad {
+  margin-top: auto;
+  padding: 11px;
+  border-top: 1px solid #22262e;
+}
+
+.ad-card {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ad-card-button {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #292d36;
+  border-radius: 3px;
+  background: #0d0f14;
+  text-align: left;
+}
+
+.ad-card-button:hover {
+  border-color: #363b46;
+  background: #11141a;
+}
+
+.ad-card-image {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 2px;
+  object-fit: cover;
+  background: #161920;
+}
+
+.ad-card-text {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ad-card-title {
+  color: #c6cad2;
+  font-size: 11px;
+  font-weight: 500;
+  overflow-wrap: break-word;
+}
+
+.ad-card-body {
+  color: #8d919b;
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+}
+
+.ad-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Required by advertising regulation: the ad must be identifiable at a glance. */
+.ad-card-badge {
+  flex: none;
+  padding: 2px 5px;
+  border: 1px solid #3a3f4a;
+  border-radius: 2px;
+  color: #9ba0aa;
+  background: #14171d;
+  font-size: 8px;
+  font-style: normal;
+  letter-spacing: 0.06em;
+}
+
+.ad-card-advertiser {
+  min-width: 0;
+  color: #74787f;
+  font-size: 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cinematic-sidebar-item:hover {
   color: #f0ece5;
   border-color: #323640;
@@ -5447,7 +5608,7 @@ h1 {
 }
 
 .library-search-popover {
-  z-index: 1100;
+  z-index: 1600;
   width: min(540px, calc(100vw - 32px));
   overflow: hidden;
   padding: 0;
@@ -5630,6 +5791,58 @@ h1 {
   box-shadow: 0 0 0 2px rgba(255, 70, 85, 0.1);
 }
 
+/* Base select trigger. Every scoped variant below (library filters, settings, review, feedback)
+   overrides sizing on top of this; without it an unscoped `UiSelectTrigger` renders as a bare
+   unstyled button that reads as broken against the rest of the shell. */
+.ui-select-trigger {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid #2d313a;
+  border-radius: 5px;
+  outline: none;
+  color: #e6e3dc;
+  background: #0d1015;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ui-select-trigger:hover:not(:disabled) {
+  border-color: #484e59;
+  background: #12161c;
+}
+
+.ui-select-trigger:focus-visible,
+.ui-select-trigger[data-state="open"] {
+  border-color: rgba(255, 70, 85, 0.72);
+  box-shadow: 0 0 0 2px rgba(255, 70, 85, 0.12);
+}
+
+.ui-select-trigger[aria-invalid="true"] {
+  border-color: rgba(255, 70, 85, 0.7);
+}
+
+.ui-select-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* The value span must ellipsize instead of pushing the caret out of the trigger. */
+.ui-select-trigger > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ui-select-icon {
   width: 14px;
   height: 14px;
@@ -5644,8 +5857,12 @@ h1 {
   height: 12px;
 }
 
+/* Floating popups portal to <body>, so they must sit ABOVE the dialog layers (1500/1501) to stay
+   usable inside a dialog — at a lower value the dialog overlay covers them and swallows every
+   click, leaving the control visible but unselectable. Scale: dialog 1500/1501 < popover 1600
+   < select 1610 < context menu 1620 < tooltip 1630. */
 .ui-select-content {
-  z-index: 1200;
+  z-index: 1610;
   min-width: var(--radix-select-trigger-width);
   max-height: min(320px, var(--radix-select-content-available-height));
   overflow: hidden;
@@ -5748,7 +5965,7 @@ h1 {
 }
 
 .ui-tooltip-content {
-  z-index: 1300;
+  z-index: 1630;
   padding: 5px 8px;
   border: 1px solid #3a3f49;
   border-radius: 3px;
@@ -6360,7 +6577,7 @@ h1 {
 }
 
 .ui-context-menu-content {
-  z-index: 1400;
+  z-index: 1620;
   min-width: 208px;
   overflow: hidden;
   padding: 6px;
@@ -8626,6 +8843,29 @@ html[data-motion="reduced"] .ui-alert-dialog-content[data-state="open"] {
 .settings-category-picker .ui-select-trigger:hover {
   border-color: #505661;
   background: #1b1f27;
+}
+
+.settings-input {
+  min-width: 0;
+  width: 100%;
+  height: 38px;
+  padding: 0 11px;
+  border: 1px solid #3a3f49;
+  border-radius: 4px;
+  outline: 0;
+  color: #dedad3;
+  background: #171a21;
+  font-size: 11px;
+}
+
+.settings-input:hover {
+  border-color: #505661;
+  background: #1b1f27;
+}
+
+.settings-input:focus-visible {
+  border-color: rgba(255, 70, 85, 0.72);
+  box-shadow: 0 0 0 2px rgba(255, 70, 85, 0.12);
 }
 
 .settings-row-control .ui-select-trigger:focus-visible,

@@ -19,18 +19,22 @@ pub use migrations::initialize_schema;
 #[cfg(test)]
 use migrations::SCHEMA_VERSION;
 pub use models::{
-    AccountIdentitySource, AccountNameHint, BatchClipMutationResult, Clip, ClipAgentAssetHint,
-    ClipDetail, ClipEvent, ClipEventInput, ClipGroup, ClipGroupInput, ClipInput, ClipListQuery,
-    ClipMetadataInput, ClipPage, ClipReviewMutationResult, ClipReviewState, ClipSaveOutcome,
-    ClipSegmentInput, ClipSort, ClipSummary, FavoriteFilter, HighlightFilter, LibraryAccountFacet,
-    LibraryFacetValue, LibraryFacets, LibrarySourceFacet, LibraryTagFacet, ManualClipImportInput,
-    PendingManualClip, ReviewClipPage, ReviewDecision, ReviewQueueQuery, SavedClip, ScanMode,
-    Source, SourceDir, SourceDirInput, SourceKind, SourceProfileInput, Tag, ThumbnailCacheRef,
-    ThumbnailEnsureResult, ThumbnailJob, ThumbnailQueueStatus, ThumbnailReconcileResult,
-    ThumbnailStatus,
+    AccountIdentitySource, AccountNameHint, AdClickRecord, AdCreative, BatchClipMutationResult,
+    Clip, ClipAgentAssetHint, ClipDetail, ClipEvent, ClipEventInput, ClipGroup, ClipGroupInput,
+    ClipInput, ClipListQuery, ClipMetadataInput, ClipPage, ClipReviewMutationResult,
+    ClipReviewState, ClipSaveOutcome, ClipSegmentInput, ClipSort, ClipSummary, FavoriteFilter,
+    HighlightFilter, LibraryAccountFacet, LibraryFacetValue, LibraryFacets, LibrarySourceFacet,
+    LibraryTagFacet, ManualClipImportInput, PendingManualClip, ReviewClipPage, ReviewDecision,
+    ReviewQueueQuery, SavedClip, ScanMode, Source, SourceDir, SourceDirInput, SourceKind,
+    SourceProfileInput, Tag, ThumbnailCacheRef, ThumbnailEnsureResult, ThumbnailJob,
+    ThumbnailQueueStatus, ThumbnailReconcileResult, ThumbnailStatus,
 };
 pub(crate) use models::{
     ClipFileTarget, ClipMediaPaths, FeedbackClipSnapshot, FeedbackSiblingClip,
+};
+pub use repositories::ads::{
+    find_ad_creative, list_ad_creatives, list_recent_ad_clicks, record_ad_click,
+    record_ad_impression, replace_ad_creatives, set_ad_creative_cached_image,
 };
 #[cfg(test)]
 use repositories::clips::empty_batch_clip_mutation_result;
@@ -54,9 +58,10 @@ pub use repositories::library::{
     get_library_facets, list_clip_events_for_clip, list_clip_page, list_clips,
 };
 pub use repositories::pending::{
-    delete_missing_pending_manual_clips, find_pending_manual_clip_source_id_by_normalized_path,
-    import_pending_manual_clip, list_pending_manual_clips, set_pending_manual_clip_ignored,
-    upsert_pending_manual_clip, PendingManualClipInput,
+    delete_missing_pending_manual_clips, find_pending_manual_clip_media_target,
+    find_pending_manual_clip_source_id_by_normalized_path, import_pending_manual_clip,
+    list_pending_manual_clips, set_pending_manual_clip_ignored, upsert_pending_manual_clip,
+    PendingManualClipInput, PendingMediaTarget,
 };
 pub(crate) use repositories::reconnect::{
     apply_planned_scan_reconnect, begin_scan_reconnect_plan, clear_scan_reconnect_plan,
@@ -1942,7 +1947,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("repaired clip names should load");
-        assert_eq!(schema_user_version(&connection), 18);
+        assert_eq!(schema_user_version(&connection), SCHEMA_VERSION);
         assert_eq!(
             repaired_names,
             (
@@ -1983,7 +1988,7 @@ mod tests {
         assert!(backups[0]
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.contains("pre-v17-to-v18")));
+            .is_some_and(|name| name.contains(&format!("pre-v17-to-v{SCHEMA_VERSION}"))));
         let backup = open_database_read_only(&backups[0]).expect("v17 backup should be readable");
         assert_eq!(schema_user_version(&backup), 17);
         let backed_up_name: Option<String> = backup
@@ -2100,6 +2105,58 @@ mod tests {
         assert_eq!(backup_note, "keep this note");
 
         drop(backup);
+        drop(connection);
+        fs::remove_dir_all(root).expect("database fixture should be removed");
+    }
+
+    #[test]
+    fn migrate_database_v19_repairs_manual_import_epoch_match_times() {
+        let root = unique_database_temp_dir();
+        fs::create_dir_all(&root).expect("database fixture root should be created");
+        let database_path = root.join("v18-manual-epoch.sqlite3");
+        let connection = Connection::open(&database_path).expect("v18 database should open");
+        initialize_schema(&connection).expect("current schema fixture should initialize");
+        connection
+            .execute_batch(
+                "
+                INSERT INTO matches (game_id, account_id, player_name, started_at)
+                VALUES
+                    ('manual-epoch', 'manual-abc', 'Manual#0001', '1782634272'),
+                    ('official-datetime', 'account-1', 'Official#0002', '2026-07-02 22:34:00'),
+                    ('blank-time', 'account-2', 'Blank#0003', '');
+                PRAGMA user_version = 18;
+                ",
+            )
+            .expect("fixture should emulate schema v18 rows");
+        drop(connection);
+
+        migrate_database(&database_path).expect("v18 database should migrate");
+
+        let connection = open_database_read_only(&database_path)
+            .expect("migrated database should open read-only");
+        assert_eq!(schema_user_version(&connection), SCHEMA_VERSION);
+        let started_at = |game_id: &str| -> Option<String> {
+            connection
+                .query_row(
+                    "SELECT started_at FROM matches WHERE game_id = ?1",
+                    params![game_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .expect("match row should load")
+        };
+
+        // The bare epoch left behind by pre-v19 manual imports becomes a readable datetime.
+        assert_eq!(
+            started_at("manual-epoch").as_deref(),
+            Some("2026-06-28 08:11:12"),
+        );
+        // Rows written by the official ingest paths are untouched.
+        assert_eq!(
+            started_at("official-datetime").as_deref(),
+            Some("2026-07-02 22:34:00"),
+        );
+        assert_eq!(started_at("blank-time").as_deref(), Some(""));
+
         drop(connection);
         fs::remove_dir_all(root).expect("database fixture should be removed");
     }
@@ -2514,7 +2571,7 @@ mod tests {
         assert!(backup_path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.contains("pre-v13-to-v18")));
+            .is_some_and(|name| name.contains(&format!("pre-v13-to-v{SCHEMA_VERSION}"))));
         assert_eq!(schema_user_version(&backup), 13);
         assert!(!table_columns(&backup, "clips")
             .iter()
@@ -2918,7 +2975,7 @@ mod tests {
         assert!(backups[0]
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.contains("pre-v14-to-v18")));
+            .is_some_and(|name| name.contains(&format!("pre-v14-to-v{SCHEMA_VERSION}"))));
         let backup = open_database_read_only(&backups[0]).expect("v14 backup should be readable");
         assert_eq!(schema_user_version(&backup), 14);
         assert!(!table_columns(&backup, "clips")
@@ -4296,6 +4353,104 @@ mod tests {
                 })
                 .unwrap(),
             91_002
+        );
+    }
+
+    #[test]
+    fn schema_v20_splits_shared_aclos_record_clip_group() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_schema(&connection).expect("schema should initialize");
+        let source = upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: r"D:\captures\wonderfulVideos1001",
+                name: "wonderfulVideos1001",
+            },
+        )
+        .expect("source should insert");
+        let shared = upsert_clip_group(
+            &connection,
+            ClipGroupInput {
+                source_dir_id: source.id,
+                group_key: "record",
+                display_name: "record",
+            },
+        )
+        .expect("shared record group should insert");
+        let match_group = upsert_clip_group(
+            &connection,
+            ClipGroupInput {
+                source_dir_id: source.id,
+                group_key: "11111111-1111-1111-1111-111111111111",
+                display_name: "11111111-1111-1111-1111-111111111111",
+            },
+        )
+        .expect("match group should insert");
+        for (id, group_id, file_name, volume) in [
+            (93_001_i64, shared.id, "20260710-161959.mp4", 41_i64),
+            (93_002, shared.id, "20260710-172047.mp4", 42),
+            (93_003, match_group.id, "ace.mp4", 43),
+        ] {
+            connection
+                .execute(
+                    "
+                    INSERT INTO clips (
+                        id, source_dir_id, clip_group_id, file_path, normalized_path, file_name,
+                        size_bytes, file_status, file_volume_serial, file_index_high, file_index_low
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 10, 'available', ?7, 0, ?7)
+                    ",
+                    params![
+                        id,
+                        source.id,
+                        group_id,
+                        format!(r"D:\captures\wonderfulVideos1001\{file_name}"),
+                        format!("d:/captures/wonderfulvideos1001/{file_name}"),
+                        file_name,
+                        volume,
+                    ],
+                )
+                .expect("migration fixture clip should insert");
+        }
+        connection
+            .pragma_update(None, "user_version", 19)
+            .expect("fixture should become schema v19");
+
+        initialize_schema(&connection).expect("schema v20 migration should succeed");
+
+        let groups = connection
+            .prepare(
+                "
+                SELECT clips.id, clip_groups.group_key
+                FROM clips
+                JOIN clip_groups ON clip_groups.id = clips.clip_group_id
+                ORDER BY clips.id
+                ",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            groups,
+            vec![
+                (93_001, "20260710-161959".to_string()),
+                (93_002, "20260710-172047".to_string()),
+                (93_003, "11111111-1111-1111-1111-111111111111".to_string()),
+            ]
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM clip_groups WHERE group_key = 'record'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+            "the emptied shared record group should be removed"
         );
     }
 

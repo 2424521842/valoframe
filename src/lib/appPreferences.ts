@@ -25,6 +25,12 @@ export type AppPreferencesV1 = {
   automaticUpdateCheck: boolean;
   /** HTTPS endpoint for direct issue-feedback uploads; empty means save-to-file only. */
   feedbackEndpoint: string;
+  /** Whether the in-app ad slots render at all. Off also suppresses all manifest fetching. */
+  adsEnabled: boolean;
+  /** HTTPS endpoint serving the ad creative manifest; empty disables the slots. */
+  adManifestEndpoint: string;
+  /** Vendor-declared landing hosts. Empty blocks every click, by design. */
+  adAllowedHosts: string;
 };
 
 export type AppPreferencesPatch = Partial<
@@ -54,6 +60,9 @@ export const DEFAULT_APP_PREFERENCES: Readonly<AppPreferencesV1> = Object.freeze
   scanOnStartup: false,
   automaticUpdateCheck: true,
   feedbackEndpoint: "",
+  adsEnabled: false,
+  adManifestEndpoint: "",
+  adAllowedHosts: "",
 });
 
 const STARTUP_DESTINATIONS: readonly StartupDestination[] = [
@@ -131,6 +140,15 @@ export function normalizeAppPreferences(value: unknown): AppPreferencesV1 {
     feedbackEndpoint: isFeedbackEndpoint(value.feedbackEndpoint)
       ? value.feedbackEndpoint
       : DEFAULT_APP_PREFERENCES.feedbackEndpoint,
+    adsEnabled: isBoolean(value.adsEnabled)
+      ? value.adsEnabled
+      : DEFAULT_APP_PREFERENCES.adsEnabled,
+    adManifestEndpoint: isFeedbackEndpoint(value.adManifestEndpoint)
+      ? value.adManifestEndpoint
+      : DEFAULT_APP_PREFERENCES.adManifestEndpoint,
+    adAllowedHosts: isAllowedHostsValue(value.adAllowedHosts)
+      ? value.adAllowedHosts
+      : DEFAULT_APP_PREFERENCES.adAllowedHosts,
   };
 }
 
@@ -171,6 +189,15 @@ export function applyAppPreferencesPatch(
     feedbackEndpoint: isFeedbackEndpoint(patch.feedbackEndpoint)
       ? patch.feedbackEndpoint
       : current.feedbackEndpoint,
+    adsEnabled: isBoolean(patch.adsEnabled)
+      ? patch.adsEnabled
+      : current.adsEnabled,
+    adManifestEndpoint: isFeedbackEndpoint(patch.adManifestEndpoint)
+      ? patch.adManifestEndpoint
+      : current.adManifestEndpoint,
+    adAllowedHosts: isAllowedHostsValue(patch.adAllowedHosts)
+      ? patch.adAllowedHosts
+      : current.adAllowedHosts,
   };
 }
 
@@ -238,6 +265,12 @@ const MAX_FEEDBACK_ENDPOINT_CHARS = 300;
 
 function isFeedbackEndpoint(value: unknown): value is string {
   return typeof value === "string" && value.length <= MAX_FEEDBACK_ENDPOINT_CHARS;
+}
+
+const MAX_ALLOWED_HOSTS_CHARS = 600;
+
+function isAllowedHostsValue(value: unknown): value is string {
+  return typeof value === "string" && value.length <= MAX_ALLOWED_HOSTS_CHARS;
 }
 
 function isVolumePercent(value: unknown): value is number {

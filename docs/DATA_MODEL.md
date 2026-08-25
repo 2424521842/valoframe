@@ -1,6 +1,6 @@
 # Data Model
 
-当前 SQLite schema 版本为 v17，数据库文件名为 `highlight-index.sqlite3`，位于 Tauri app data 目录。本文只描述当前落地表，不再保留早期 `sources/assets/asset_metadata` 草案。
+当前 SQLite schema 版本为 v21，数据库文件名为 `highlight-index.sqlite3`，位于 Tauri app data 目录。本文只描述当前落地表，不再保留早期 `sources/assets/asset_metadata` 草案。
 
 ## 1. 生命周期与连接
 
@@ -33,8 +33,13 @@
 | `clip_tags` | clip 与 tag 的多对多绑定 |
 | `pending_manual_clips` | NVIDIA 目录扫描发现但尚未手动分类的 MP4；`(normalized_path)` 唯一，逐来源登记、完整扫描后清理 |
 | `scan_runs` | job、终态、批次统计（含 NVIDIA 新增待录入数）、错误摘要和起止时间 |
+| `ad_creatives` | 广告方清单的本地缓存：素材文案、图片 URL、落地页模板、广告主名、权重与投放期；`creative_id` 为主键 |
+| `ad_click_log` | 每次广告点击生成的 `click_id`、素材、广告位与时间；本地对账凭据，刷新清单时不清除 |
+| `ad_impression_log` | 按 `(creative_id, slot, impression_date)` 聚合的曝光计数，避免逐条事件无界增长 |
 
 当前没有 `app_settings` 表。`clips.cover_path` 仍只引用素材目录中已有的 `cover-*.jpeg`；自动生成文件由 `clip_thumbnails` 独立引用，避免扫描覆盖生成状态或把应用缓存误当成源文件。
+
+三张 `ad_*` 表只保存广告方素材元信息与本地计数，不含任何玩家、对局或文件字段；广告开关与接口配置存在前端偏好（localStorage）而非数据库。
 
 ## 3. 核心表
 
@@ -75,7 +80,7 @@
 
 v13 升级到 v14 的历史步骤会把现有来源回填为 `aclos + aclos-structured`，`scan_root_path = path`；相对目录优先由文件父目录与来源根做大小写无关的词法计算，无法计算时退回已有 group key。已有收藏回填为 `liked`，`reviewed_at` 使用该 clip 的 `updated_at`；非收藏保持 `unreviewed`。
 
-v14→v15 只增加稳定身份、事件本人死亡和扫描摘要可用性字段/索引，不在迁移中遍历磁盘；既有 clip 的三个文件身份字段保持 `NULL`，由后续扫描惰性填充。v16 随后统一普通与 Win32 verbatim 路径键，并只合并同来源、完整身份相同、去前缀路径等价且授权状态无歧义的双行配对。v17 新增 `pending_manual_clips` 待录入队列（幂等建表，已有库升级时由启动迁移自动创建），用于暂存 NVIDIA 目录中发现、但尚未手动分类的 MP4；同时为 `scan_runs` 增加 `pending_clip_count`，保证后台/启动扫描的终态摘要恢复后仍能提示待录入数量。v18 在同一迁移事务内按可靠时间戳传播 WonderfulDb 的最新账号名称，并清除旧版按文件排序猜测出的 ACLOS 封面绑定、同步转入视频缩略图生成队列；升级前仍创建经校验的数据库备份，任一数据修复失败都会连同 `user_version` 更新一起回滚。升级保留文件状态、普通路径 clip ID、收藏、评审、备注、标签、元数据、时间轴、可确认的精确封面、回收快照、删除 intent 和原始 JSON。
+v14→v15 只增加稳定身份、事件本人死亡和扫描摘要可用性字段/索引，不在迁移中遍历磁盘；既有 clip 的三个文件身份字段保持 `NULL`，由后续扫描惰性填充。v16 随后统一普通与 Win32 verbatim 路径键，并只合并同来源、完整身份相同、去前缀路径等价且授权状态无歧义的双行配对。v17 新增 `pending_manual_clips` 待录入队列（幂等建表，已有库升级时由启动迁移自动创建），用于暂存 NVIDIA 目录中发现、但尚未手动分类的 MP4；同时为 `scan_runs` 增加 `pending_clip_count`，保证后台/启动扫描的终态摘要恢复后仍能提示待录入数量。v18 在同一迁移事务内按可靠时间戳传播 WonderfulDb 的最新账号名称，并清除旧版按文件排序猜测出的 ACLOS 封面绑定、同步转入视频缩略图生成队列；升级前仍创建经校验的数据库备份，任一数据修复失败都会连同 `user_version` 更新一起回滚。v19 修正手动录入的比赛时间：v19 之前 NVIDIA 手动录入把扫描得到的裸 Unix 秒 `modified_at` 直接写入 `matches.started_at`，与其他元数据通道写入的可读日期时间格式不一致，素材库因此把原始纪元秒当作比赛时间显示；迁移在同一事务内就地重写这些纯数字取值，官方通道写入的日期时间保持不变。v20 拆分共享的原始录像分组：无畏时刻把每场对局的高光放在各自的 `<对局 ID>/` 目录，但完整对局录像统一落在共享的 `record/` 目录，早期扫描把整个目录当作一个 group，导致互不相关的对局被折叠为同一场；迁移按文件为 `record/` 中每段录像单独建组，并清除随之空掉的旧 group。v21 新增 `ad_creatives`、`ad_click_log`、`ad_impression_log` 三张广告位表（幂等建表），仅在用户开启广告后写入。升级保留文件状态、普通路径 clip ID、收藏、评审、备注、标签、元数据、时间轴、可确认的精确封面、回收快照、删除 intent 和原始 JSON。
 
 `trashed` 本身只是应用数据库状态，不会移动或删除视频。`remove_clip_from_index` / `remove_clips_from_index` 只允许普通库中 missing 或来源不可用、且没有删除 intent 的记录；它删除索引行及级联的标签/备注等应用状态，不触碰原视频，批量操作逐项报告结果。用户在回收站明确二次确认 `delete_clips_permanently` 后，应用先持久化 `clip_delete_intents`，再触碰本地文件，最后在一个短事务内同时移除 intent 与 clip；非 `trashed` 记录会被后端拒绝。
 

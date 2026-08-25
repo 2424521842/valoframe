@@ -25,6 +25,9 @@ const VALID_NON_DEFAULT_PREFERENCES: AppPreferencesV1 = {
   scanOnStartup: true,
   automaticUpdateCheck: false,
   feedbackEndpoint: "https://feedback.example.com/api",
+  adsEnabled: true,
+  adManifestEndpoint: "https://ad.example.com/manifest",
+  adAllowedHosts: "ad.example.com",
 };
 
 test("app preferences expose the documented v1 defaults", () => {
@@ -40,6 +43,9 @@ test("app preferences expose the documented v1 defaults", () => {
     scanOnStartup: false,
     automaticUpdateCheck: true,
     feedbackEndpoint: "",
+    adsEnabled: false,
+    adManifestEndpoint: "",
+    adAllowedHosts: "",
   });
 
   const first = createDefaultAppPreferences();
@@ -61,6 +67,9 @@ test("older v1 payloads default only the newer fields", () => {
   const {
     scanOnStartup: _missingScan,
     feedbackEndpoint: _missingEndpoint,
+    adsEnabled: _missingAdsEnabled,
+    adManifestEndpoint: _missingAdEndpoint,
+    adAllowedHosts: _missingAdHosts,
     ...olderPayload
   } = VALID_NON_DEFAULT_PREFERENCES;
 
@@ -68,6 +77,9 @@ test("older v1 payloads default only the newer fields", () => {
     ...VALID_NON_DEFAULT_PREFERENCES,
     scanOnStartup: false,
     feedbackEndpoint: "",
+    adsEnabled: false,
+    adManifestEndpoint: "",
+    adAllowedHosts: "",
   });
 });
 
@@ -86,6 +98,11 @@ test("each invalid v1 field falls back independently", () => {
     ["automaticUpdateCheck", null],
     ["feedbackEndpoint", 123],
     ["feedbackEndpoint", "x".repeat(301)],
+    ["adsEnabled", "yes"],
+    ["adManifestEndpoint", 123],
+    ["adManifestEndpoint", "x".repeat(301)],
+    ["adAllowedHosts", 123],
+    ["adAllowedHosts", "x".repeat(601)],
   ];
 
   for (const [field, invalidValue] of invalidCases) {

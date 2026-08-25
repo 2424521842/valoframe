@@ -23,6 +23,8 @@ type CinematicSidebarProps = {
   updateVersion?: string;
   isOpen: boolean;
   isOverlay: boolean;
+  /** Rendered below the nav; null when ads are disabled or unavailable. */
+  adSlot?: ReactNode;
   onClose: () => void;
   onModeChange: (mode: LibraryMode) => void;
   onOpenTagManager: () => void;
@@ -43,6 +45,7 @@ export function CinematicSidebar({
   updateVersion,
   isOpen,
   isOverlay,
+  adSlot = null,
   onClose,
   onModeChange,
   onOpenTagManager,
@@ -128,6 +131,8 @@ export function CinematicSidebar({
           onClick={onOpenSettings}
         />
       </nav>
+
+      {adSlot ? <div className="cinematic-sidebar-ad">{adSlot}</div> : null}
 
     </aside>
   );

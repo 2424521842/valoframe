@@ -58,7 +58,6 @@ type LibraryWorkspaceProps = {
   isActive: boolean;
   errorMessage: string | null;
   facetError: string | null;
-  isFacetLoading: boolean;
   loadMoreError: string | null;
   hasMore: boolean;
   listGeneration: number;
@@ -468,8 +467,6 @@ export function LibraryWorkspace(props: LibraryWorkspaceProps) {
 
       {props.facetError ? (
         <p className="library-load-more-error" role="status">{props.facetError}</p>
-      ) : props.isFacetLoading ? (
-        <p className="library-load-more-status" role="status">正在加载全库筛选统计…</p>
       ) : null}
 
       <LibraryToolbar

@@ -7,6 +7,7 @@ import {
   mockTags,
 } from "../data/mockData.ts";
 import { TAG_COLORS } from "../lib/tags.ts";
+import type { AdCreative, AdSlot } from "../lib/ads.ts";
 import {
   matchesVideoType,
   VIDEO_TYPE_FILTERS,
@@ -523,7 +524,7 @@ export async function importPendingManualClip(
   return mapBackendClip(result.clip);
 }
 
-function mapBackendPendingManualClip(pending: BackendPendingManualClip): PendingManualClip {
+export function mapBackendPendingManualClip(pending: BackendPendingManualClip): PendingManualClip {
   return {
     id: String(pending.id),
     sourceDirId: String(pending.sourceDirId),
@@ -531,10 +532,12 @@ function mapBackendPendingManualClip(pending: BackendPendingManualClip): Pending
     filePath: pending.filePath,
     fileName: pending.fileName,
     fileSize: pending.fileSize,
-    modifiedAt: pending.modifiedAt,
+    // Stored as bare unix seconds by the scanner; normalize like clips so the UI never receives
+    // a string that `new Date(...)` cannot parse.
+    modifiedAt: normalizeOptionalDateValue(pending.modifiedAt),
     sourceRelativeDir: pending.sourceRelativeDir,
     ignored: pending.ignored,
-    firstDiscoveredAt: pending.firstDiscoveredAt,
+    firstDiscoveredAt: normalizeOptionalDateValue(pending.firstDiscoveredAt),
   };
 }
 
@@ -1394,6 +1397,14 @@ export function coverPathForClipId(clipId: string): string {
   return `cover/${encodeURIComponent(clipId)}`;
 }
 
+/**
+ * Streaming URL for a pending NVIDIA recording that has no clip row yet. The backend re-verifies
+ * the stored path is a plain MP4 inside its authorized source root before serving any bytes.
+ */
+export function pendingMediaUrlForId(pendingId: string): string {
+  return mediaUrlFromPath(`pending/${encodeURIComponent(pendingId)}`);
+}
+
 export function coverUrlForClipId(
   clipId: string,
   revision: string | null | undefined = null,
@@ -1410,6 +1421,55 @@ export function mediaUrlFromPath(mediaPath: string): string {
     return mediaPath;
   }
   return convertFileSrc(mediaPath, CLIP_MEDIA_PROTOCOL);
+}
+
+/**
+ * Ad slot commands.
+ *
+ * The webview never contacts an ad vendor: creative images are fetched and cached by the Rust
+ * backend and served over the `clip-media` protocol, and clicks are opened in the system browser
+ * by the backend after it re-validates the landing host. See `docs/AD_INTEGRATION_SPEC.md`.
+ */
+export async function listAdCreatives(): Promise<AdCreative[]> {
+  if (isBrowserPreviewRuntime()) {
+    return [];
+  }
+  return invoke<AdCreative[]>("list_ad_creatives");
+}
+
+export async function refreshAdCreatives(endpoint: string): Promise<number> {
+  if (isBrowserPreviewRuntime()) {
+    return 0;
+  }
+  return invoke<number>("refresh_ad_creatives", { input: { endpoint } });
+}
+
+export async function recordAdImpression(
+  creativeId: string,
+  slot: AdSlot,
+): Promise<void> {
+  if (isBrowserPreviewRuntime()) {
+    return;
+  }
+  await invoke("record_ad_impression", { creativeId, slot });
+}
+
+/** Returns the generated click id, which is the local reconciliation key for this click. */
+export async function recordAdClick(
+  creativeId: string,
+  slot: AdSlot,
+  allowedHosts: string[],
+): Promise<string> {
+  if (isBrowserPreviewRuntime()) {
+    return "";
+  }
+  return invoke<string>("record_ad_click", {
+    input: { creativeId, slot, allowedHosts },
+  });
+}
+
+export function adImageUrl(imagePath: string): string {
+  return mediaUrlFromPath(imagePath);
 }
 
 export function mapBackendClip(clip: BackendClip): Clip {

@@ -12,6 +12,7 @@ use std::{
 };
 
 use rusqlite::{params, Connection, OptionalExtension};
+use time::{format_description::BorrowedFormatItem, OffsetDateTime};
 
 use super::super::{
     ensure_row_changed, find_clip_source_id_by_normalized_path, normalize_optional, normalize_path,
@@ -223,6 +224,45 @@ pub fn delete_missing_pending_manual_clips(
     Ok(deleted)
 }
 
+/// Resolves the on-disk video path for one pending row so the UI can preview the recording
+/// before classifying it. Returns the owning source root too, letting the caller re-verify the
+/// path is still inside an authorized source before opening any handle.
+pub fn find_pending_manual_clip_media_target(
+    connection: &Connection,
+    pending_id: i64,
+) -> DbResult<Option<PendingMediaTarget>> {
+    connection
+        .query_row(
+            "
+            SELECT
+                pending_manual_clips.file_path,
+                pending_manual_clips.extension,
+                source_dirs.path
+            FROM pending_manual_clips
+            JOIN source_dirs ON source_dirs.id = pending_manual_clips.source_dir_id
+            WHERE pending_manual_clips.id = ?1
+            ",
+            params![pending_id],
+            |row| {
+                Ok(PendingMediaTarget {
+                    video_path: row.get(0)?,
+                    extension: row.get(1)?,
+                    source_dir_path: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| readable_error("reading pending clip media target", error))
+}
+
+/// On-disk location of a not-yet-indexed pending recording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMediaTarget {
+    pub video_path: String,
+    pub extension: String,
+    pub source_dir_path: String,
+}
+
 pub fn set_pending_manual_clip_ignored(
     connection: &Connection,
     pending_id: i64,
@@ -306,6 +346,10 @@ pub fn import_pending_manual_clip(
     let account_id =
         resolve_manual_account_id(&transaction, &input.account_key, &display_identity_name)?;
     let game_id = unique_identifier("game", pending_id);
+    // Scanned rows store `modified_at` as bare unix seconds, but every other metadata path writes
+    // `matches.started_at` as a readable datetime. Convert so manual imports sort and display like
+    // official clips instead of leaking a raw epoch into the library.
+    let match_started_at = readable_match_started_at(pending.modified_at.as_deref());
 
     let deleted = transaction
         .execute(
@@ -363,7 +407,7 @@ pub fn import_pending_manual_clip(
                 agent_name,
                 map_name,
                 game_mode,
-                pending.modified_at,
+                match_started_at,
             ],
         )
         .map_err(|error| readable_error("inserting manual import match", error))?;
@@ -477,6 +521,27 @@ fn resolve_manual_account_id(
         MANUAL_ACCOUNT_ID_PREFIX.trim_end_matches('-'),
         pending_salt(),
     ))
+}
+
+/// `matches.started_at` display format shared with the official metadata ingest paths.
+const MATCH_STARTED_AT_FORMAT: &[BorrowedFormatItem<'_>] =
+    time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+
+/// Converts a scanned `modified_at` into the readable datetime other ingest paths store. Values
+/// that are already datetimes pass through unchanged; unparsable values become `None` so the row
+/// simply carries no match time rather than a misleading one.
+pub(in crate::db) fn readable_match_started_at(modified_at: Option<&str>) -> Option<String> {
+    let value = modified_at
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let Ok(unix_seconds) = value.parse::<i64>() else {
+        return Some(value.to_string());
+    };
+
+    OffsetDateTime::from_unix_timestamp(unix_seconds)
+        .ok()?
+        .format(MATCH_STARTED_AT_FORMAT)
+        .ok()
 }
 
 fn pending_salt() -> i64 {
@@ -650,6 +715,162 @@ mod tests {
             list_pending_manual_clips(&connection, true).unwrap().len(),
             1
         );
+
+        drop(connection);
+        fs::remove_dir_all(&fixture).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn manual_import_stores_a_readable_match_time_like_official_ingest() {
+        // Scanner rows carry bare unix seconds; leaking that into `matches.started_at` made the
+        // library show a raw epoch instead of a date for every manually imported recording.
+        assert_eq!(
+            readable_match_started_at(Some("1782634272")).as_deref(),
+            Some("2026-06-28 08:11:12"),
+        );
+        // Already-readable values and blanks are left alone.
+        assert_eq!(
+            readable_match_started_at(Some("2026-07-02 22:34:00")).as_deref(),
+            Some("2026-07-02 22:34:00"),
+        );
+        assert_eq!(readable_match_started_at(Some("   ")), None);
+        assert_eq!(readable_match_started_at(None), None);
+    }
+
+    #[test]
+    fn diag_manual_import_survives_rescan() {
+        let (fixture, data, root) = temp_fixture("diag-rescan");
+        for name in ["a.mp4", "b.mp4", "c.mp4"] {
+            fs::write(root.join(name), b"x").unwrap();
+        }
+        let database_path = db::initialize_database_in(&data).unwrap();
+        let source = register_nvidia_source(&database_path, &root);
+        let connection = db::open_database(&database_path).unwrap();
+
+        for name in ["a.mp4", "b.mp4", "c.mp4"] {
+            let path = root.join(name).display().to_string();
+            upsert_pending_manual_clip(
+                &connection,
+                PendingManualClipInput {
+                    source_dir_id: source.id,
+                    video_path: &path,
+                    file_name: name,
+                    file_size: 1,
+                    modified_at: Some("1782634272"),
+                    source_relative_dir: "",
+                },
+            )
+            .unwrap();
+        }
+        let ids: Vec<i64> = list_pending_manual_clips(&connection, false)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+
+        let maps = ["霓虹町", "亚海悬城", "森寒冬港"];
+        for (index, id) in ids.iter().enumerate() {
+            let mut input = import_input(None, "同一账号");
+            input.map_name = Some(maps[index].to_string());
+            import_pending_manual_clip(&connection, *id, &input).unwrap();
+        }
+
+        eprintln!("--- after import ---");
+        let page = db::list_clip_page(&connection, &Default::default()).unwrap();
+        eprintln!("JSON {}", serde_json::to_string(&page.items[0]).unwrap());
+        for c in &db::list_clip_page(&connection, &Default::default())
+            .unwrap()
+            .items
+        {
+            eprintln!(
+                "id={} status={} match={:?} agent={:?} map={:?} mode={:?} acct={:?}",
+                c.id,
+                c.metadata_status,
+                c.match_id,
+                c.agent_name,
+                c.map_name,
+                c.game_mode,
+                c.account_display_name,
+            );
+        }
+
+        let scan = crate::scanner::sync_scan_sources(&connection, &[source.id]).unwrap();
+        eprintln!("--- after rescan (new={}) ---", scan.new_clip_count);
+        for c in &db::list_clip_page(&connection, &Default::default())
+            .unwrap()
+            .items
+        {
+            eprintln!(
+                "id={} status={} match={:?} agent={:?} map={:?} mode={:?} acct={:?}",
+                c.id,
+                c.metadata_status,
+                c.match_id,
+                c.agent_name,
+                c.map_name,
+                c.game_mode,
+                c.account_display_name,
+            );
+        }
+
+        drop(connection);
+        fs::remove_dir_all(&fixture).unwrap();
+    }
+
+    #[test]
+    fn manual_imports_keep_one_match_group_per_recording() {
+        let (fixture, data, root) = temp_fixture("group-per-clip");
+        for name in ["a.mp4", "b.mp4", "c.mp4"] {
+            fs::write(root.join(name), b"x").expect("fixture file should be written");
+        }
+        let database_path = db::initialize_database_in(&data).expect("database should initialize");
+        let source = register_nvidia_source(&database_path, &root);
+        let connection = db::open_database(&database_path).expect("database should open");
+
+        for name in ["a.mp4", "b.mp4", "c.mp4"] {
+            let path = root.join(name).display().to_string();
+            upsert_pending_manual_clip(
+                &connection,
+                PendingManualClipInput {
+                    source_dir_id: source.id,
+                    video_path: &path,
+                    file_name: name,
+                    file_size: 1,
+                    modified_at: Some("1782634272"),
+                    source_relative_dir: "",
+                },
+            )
+            .expect("pending row should upsert");
+        }
+        let pending_ids = list_pending_manual_clips(&connection, false)
+            .unwrap()
+            .into_iter()
+            .map(|clip| clip.id)
+            .collect::<Vec<_>>();
+
+        // Three recordings classified identically: same account, but each keeps its own match so
+        // the library never collapses them into a single pile.
+        for pending_id in &pending_ids {
+            import_pending_manual_clip(&connection, *pending_id, &import_input(None, "同一账号"))
+                .expect("import should succeed");
+        }
+
+        let page = db::list_clip_page(&connection, &Default::default()).unwrap();
+        assert_eq!(page.items.len(), 3);
+        let match_ids = page
+            .items
+            .iter()
+            .map(|clip| clip.match_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(match_ids.len(), 3, "each recording needs its own match row");
+        for clip in &page.items {
+            assert_eq!(clip.agent_name.as_deref(), Some("捷风"));
+            assert_eq!(clip.map_name.as_deref(), Some("霓虹町"));
+            assert_eq!(
+                clip.match_started_at.as_deref(),
+                Some("2026-06-28 08:11:12"),
+                "match time must be readable, not a raw epoch",
+            );
+        }
 
         drop(connection);
         fs::remove_dir_all(&fixture).expect("fixture should be removed");

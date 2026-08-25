@@ -28,6 +28,7 @@ import {
   setScanSourceEnabled,
 } from "./api/backend";
 import { AmbientBackdrop } from "./components/AmbientBackdrop";
+import { AdCard } from "./components/AdCard";
 import { CinematicSidebar } from "./components/CinematicSidebar";
 import { UiIcon } from "./components/UiIcon";
 import { groupClipsByMatch } from "./lib/accountGrouping";
@@ -53,6 +54,8 @@ import { useTagController } from "./hooks/useTagController";
 import { useThumbnailController } from "./hooks/useThumbnailController";
 import { useAppUpdaterController } from "./hooks/useAppUpdaterController";
 import { useAppPreferences } from "./hooks/useAppPreferences";
+import { useAdController } from "./hooks/useAdController";
+import { AD_SLOTS } from "./lib/ads";
 import type { StartupDestination } from "./lib/appPreferences";
 import { normalizeCustomScanPath } from "./lib/customScan";
 import { dateRangeForPreset } from "./lib/libraryFlow";
@@ -177,6 +180,12 @@ function App() {
   const appUpdater = useAppUpdaterController({
     automaticCheck: preferences.automaticUpdateCheck,
   });
+  const sidebarAds = useAdController({
+    allowedHosts: preferences.adAllowedHosts,
+    enabled: preferences.adsEnabled,
+    manifestEndpoint: preferences.adManifestEndpoint,
+    slot: AD_SLOTS.sidebar,
+  });
   const appUpdateBadge = appUpdater.phase === "downloaded"
     ? "待安装" as const
     : ["available", "downloading", "cancelling"].includes(appUpdater.phase)
@@ -277,7 +286,6 @@ function App() {
   const {
     facets: libraryFacets,
     error: facetError,
-    isLoading: isLoadingFacets,
     refresh: loadLibraryFacets,
   } = useLibraryFacetsController();
   const {
@@ -1065,6 +1073,13 @@ function App() {
           <CinematicSidebar
             activeMode={libraryMode}
             activeScreen={activeScreen}
+            adSlot={
+              <AdCard
+                creative={sidebarAds.creative}
+                onClick={sidebarAds.onClick}
+                onImpression={sidebarAds.onImpression}
+              />
+            }
             favoriteCount={libraryFacets?.activeFavoriteCount ?? 0}
             isOpen={!isSidebarOverlay || isSidebarOpen}
             isOverlay={isSidebarOverlay}
@@ -1099,7 +1114,6 @@ function App() {
             gameModes={gameModes}
             highlightFilter={highlightFilter}
             videoTypes={videoTypes}
-            isFacetLoading={isLoadingFacets}
             isLoading={isLoadingClips}
             isLoadingMore={isLoadingMoreClips}
             isPending={isFilterPending || query !== debouncedQuery}

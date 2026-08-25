@@ -744,7 +744,63 @@ fn reveal_clip_in_explorer(clip_path: &Path) -> Result<(), String> {
     }
 }
 
-fn ensure_non_reparse_path_chain(path: &Path, root: &Path) -> Result<(), String> {
+/// Verifies `video_path` is a real MP4 file still contained in `source_root`, rejecting parent
+/// traversal, non-files and any reparse point along the chain. Shared by indexed-clip shell
+/// resolution and pending-recording preview so both enforce one boundary contract.
+pub(super) fn ensure_mp4_inside_source_root(
+    video_path: &str,
+    source_dir_path: &str,
+    extension: &str,
+) -> Result<PathBuf, String> {
+    if !extension.eq_ignore_ascii_case("mp4") {
+        return Err("仅支持预览 MP4 文件".to_string());
+    }
+
+    let source_root = Path::new(source_dir_path);
+    let clip_path = Path::new(video_path);
+
+    if !clip_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("mp4"))
+    {
+        return Err("仅支持预览 MP4 文件".to_string());
+    }
+
+    if source_root
+        .components()
+        .chain(clip_path.components())
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("视频路径包含不允许的父目录跳转".to_string());
+    }
+
+    let source_metadata = std::fs::symlink_metadata(source_root)
+        .map_err(|error| format!("来源目录不可用：{error}"))?;
+    if !source_metadata.is_dir() || metadata_is_reparse_point(&source_metadata) {
+        return Err("来源目录不可用或已变为 reparse point".to_string());
+    }
+    let clip_metadata =
+        std::fs::symlink_metadata(clip_path).map_err(|_| FILE_NOT_FOUND_MESSAGE.to_string())?;
+    if !clip_metadata.is_file() || metadata_is_reparse_point(&clip_metadata) {
+        return Err("视频路径不是普通文件".to_string());
+    }
+
+    let canonical_root = source_root
+        .canonicalize()
+        .map_err(|error| format!("无法验证来源目录：{error}"))?;
+    let canonical_clip = clip_path
+        .canonicalize()
+        .map_err(|_| FILE_NOT_FOUND_MESSAGE.to_string())?;
+    if canonical_clip == canonical_root || !canonical_clip.starts_with(&canonical_root) {
+        return Err("视频路径已越出已授权来源目录".to_string());
+    }
+    ensure_non_reparse_path_chain(clip_path, source_root)?;
+
+    Ok(canonical_clip)
+}
+
+pub(super) fn ensure_non_reparse_path_chain(path: &Path, root: &Path) -> Result<(), String> {
     let mut cursor = Some(path);
     while let Some(current) = cursor {
         let metadata = std::fs::symlink_metadata(current)
@@ -890,7 +946,7 @@ impl Drop for ComInitialization {
     }
 }
 
-fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+pub(super) fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }

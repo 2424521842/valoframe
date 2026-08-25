@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::{configure_connection, readable_error, DbResult};
 use crate::metadata::{classify_timeline_event_time, TimelineEventTimeSemantics};
 
-pub(super) const SCHEMA_VERSION: i64 = 18;
+pub(super) const SCHEMA_VERSION: i64 = 21;
 
 /// Applies the idempotent schema migration to a caller-controlled connection.
 pub fn initialize_schema(connection: &Connection) -> DbResult<()> {
@@ -504,6 +504,44 @@ fn initialize_schema_versioned(
                 FOREIGN KEY (clip_id) REFERENCES clips(id) ON DELETE RESTRICT
             );
 
+            -- Ad slot tables. These hold only vendor-supplied creative metadata and local
+            -- click/impression counters used for revenue reconciliation. No user, game, or
+            -- file data is recorded here, and nothing here is ever sent outward except the
+            -- click_id echoed into the vendor landing URL the user chose to open.
+            CREATE TABLE IF NOT EXISTS ad_creatives (
+                creative_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                body TEXT,
+                image_url TEXT NOT NULL,
+                landing_url_template TEXT NOT NULL,
+                advertiser_name TEXT NOT NULL,
+                weight INTEGER NOT NULL DEFAULT 100 CHECK (weight > 0),
+                start_at TEXT,
+                end_at TEXT,
+                cached_image_file TEXT,
+                fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS ad_click_log (
+                click_id TEXT PRIMARY KEY,
+                creative_id TEXT NOT NULL,
+                slot TEXT NOT NULL,
+                clicked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- Impressions are aggregated per creative and per day on purpose: a per-event log
+            -- would grow without bound while adding nothing for reconciliation.
+            CREATE TABLE IF NOT EXISTS ad_impression_log (
+                creative_id TEXT NOT NULL,
+                slot TEXT NOT NULL,
+                impression_date TEXT NOT NULL,
+                impression_count INTEGER NOT NULL DEFAULT 0 CHECK (impression_count >= 0),
+                PRIMARY KEY (creative_id, slot, impression_date)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ad_click_log_creative
+                ON ad_click_log(creative_id, clicked_at DESC);
+
             CREATE INDEX IF NOT EXISTS idx_source_dirs_enabled
                 ON source_dirs(enabled);
             CREATE INDEX IF NOT EXISTS idx_source_dirs_status
@@ -785,6 +823,12 @@ fn initialize_schema_versioned(
         let _ = super::repositories::thumbnails::repair_legacy_aclos_source_covers_in_transaction(
             connection,
         )?;
+    }
+    if previous_schema_version < 19 {
+        repair_manual_import_epoch_match_times(connection)?;
+    }
+    if previous_schema_version < 20 {
+        split_shared_aclos_record_clip_groups(connection)?;
     }
     if previous_schema_version < SCHEMA_VERSION {
         connection
@@ -2021,6 +2065,132 @@ fn remove_legacy_official_precedence_trigger(connection: &Connection) -> DbResul
     connection
         .execute_batch("DROP TRIGGER IF EXISTS preserve_wonderful_kill_count;")
         .map_err(|error| readable_error("removing legacy official metadata trigger", error))
+}
+
+/// Manual NVIDIA imports before schema v19 copied the scanner's bare unix-second `modified_at`
+/// straight into `matches.started_at`, where every other ingest path writes a readable datetime.
+/// Those rows surfaced a raw epoch as the match time in the library, so rewrite them in place.
+/// Only all-digit values are touched; real datetimes are left untouched.
+fn repair_manual_import_epoch_match_times(connection: &Connection) -> DbResult<()> {
+    let epoch_rows = {
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT matches.id, TRIM(matches.started_at)
+                FROM matches
+                WHERE NULLIF(TRIM(matches.started_at), '') IS NOT NULL
+                  AND TRIM(matches.started_at) NOT GLOB '*[^0-9]*'
+                ",
+            )
+            .map_err(|error| readable_error("preparing manual match time repair", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| readable_error("querying manual match times", error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| readable_error("reading manual match times", error))?
+    };
+
+    for (match_id, raw_value) in epoch_rows {
+        let Some(readable) =
+            super::repositories::pending::readable_match_started_at(Some(raw_value.as_str()))
+        else {
+            continue;
+        };
+        if readable == raw_value {
+            continue;
+        }
+        connection
+            .execute(
+                "UPDATE matches SET started_at = ?2 WHERE id = ?1",
+                rusqlite::params![match_id, readable],
+            )
+            .map_err(|error| readable_error("repairing manual match time", error))?;
+    }
+
+    Ok(())
+}
+
+/// ACLOS stores per-match clips under `<match-id>/`, but raw full-session recordings land in a
+/// shared `record/` directory. Scans up to schema v19 folded that whole directory into one clip
+/// group, so unrelated matches collapsed under a single library match header. Give every clip in
+/// such a group its own group, keyed on the file stem the way the scanner now does.
+fn split_shared_aclos_record_clip_groups(connection: &Connection) -> DbResult<()> {
+    let shared_clips = {
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT clips.id, clips.source_dir_id, clips.file_name
+                FROM clips
+                JOIN clip_groups ON clip_groups.id = clips.clip_group_id
+                WHERE clip_groups.group_key = 'record' COLLATE NOCASE
+                ORDER BY clips.id
+                ",
+            )
+            .map_err(|error| readable_error("preparing shared record group repair", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| readable_error("querying shared record groups", error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| readable_error("reading shared record groups", error))?
+    };
+
+    for (clip_id, source_dir_id, file_name) in shared_clips {
+        let group_key = file_name
+            .rsplit_once('.')
+            .map(|(stem, _)| stem)
+            .unwrap_or(file_name.as_str())
+            .trim();
+        if group_key.is_empty() {
+            continue;
+        }
+
+        connection
+            .execute(
+                "
+                INSERT INTO clip_groups (source_dir_id, group_key, display_name)
+                VALUES (?1, ?2, ?2)
+                ON CONFLICT(source_dir_id, group_key) DO NOTHING
+                ",
+                params![source_dir_id, group_key],
+            )
+            .map_err(|error| readable_error("creating per-clip record group", error))?;
+        connection
+            .execute(
+                "
+                UPDATE clips
+                SET clip_group_id = (
+                    SELECT id FROM clip_groups
+                    WHERE source_dir_id = ?2 AND group_key = ?3
+                )
+                WHERE id = ?1
+                ",
+                params![clip_id, source_dir_id, group_key],
+            )
+            .map_err(|error| readable_error("reassigning shared record clip", error))?;
+    }
+
+    connection
+        .execute(
+            "
+            DELETE FROM clip_groups
+            WHERE group_key = 'record' COLLATE NOCASE
+              AND NOT EXISTS (
+                SELECT 1 FROM clips WHERE clips.clip_group_id = clip_groups.id
+              )
+            ",
+            [],
+        )
+        .map_err(|error| readable_error("removing emptied record groups", error))?;
+
+    Ok(())
 }
 
 fn migrate_video_types_out_of_tags(connection: &Connection) -> DbResult<()> {

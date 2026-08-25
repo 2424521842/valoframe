@@ -114,6 +114,7 @@ export function ReviewSetup({
 }: ReviewSetupProps) {
   const resumeCounts = resumableSession ? reviewSessionCounts(resumableSession) : null;
   const hasCandidates = candidateCount > 0;
+  const hasActiveFilters = filterLabels.length > 0;
   const [isScopeEditorOpen, setIsScopeEditorOpen] = useState(false);
 
   return (
@@ -158,11 +159,17 @@ export function ReviewSetup({
             <strong aria-live="polite">{isPreparing ? "正在计算…" : `${candidateCount} 条素材`}</strong>
           </div>
           <div className="review-scope-chips">
-            {filterLabels.length > 0 ? filterLabels.map((label) => (
+            {hasActiveFilters ? filterLabels.map((label) => (
               <span key={label}>{label}</span>
             )) : <span>全部可用素材</span>}
           </div>
-          <p>可在此页修改账号、英雄、地图、模式、日期、视频类型、标签或搜索条件。</p>
+          {hasActiveFilters ? (
+            <button className="review-scope-reset" type="button" onClick={scopeEditor.onClearFilters}>
+              <X weight="bold" />清空全部条件，回到全部素材
+            </button>
+          ) : (
+            <p>可在此页修改账号、英雄、地图、模式、日期、视频类型、标签或搜索条件。</p>
+          )}
         </section>
 
         <fieldset className="review-setup-section review-option-fieldset">

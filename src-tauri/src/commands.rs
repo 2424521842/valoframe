@@ -1,3 +1,4 @@
+mod ads;
 mod export;
 mod feedback;
 mod library;
@@ -22,6 +23,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+pub use ads::*;
 pub use export::*;
 pub use feedback::*;
 pub use library::*;
@@ -2140,11 +2142,108 @@ mod tests {
         assert_eq!(json["clipId"], missing_id);
     }
 
+    /// Pending NVIDIA recordings have no clip row yet, so the protocol resolves them from the
+    /// pending queue and must re-verify the path boundary itself.
+    #[test]
+    fn pending_media_streams_a_recording_inside_its_source_root() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        let video_path = root.join("nvidia-clip.mp4");
+        fs::write(&video_path, b"mp4 bytes").unwrap();
+        let database_path = root.join("highlight-index.sqlite3");
+        let thumbnail_cache_root = root.join("thumbnail-cache");
+        db::migrate_database(&database_path).unwrap();
+        let connection = db::open_database(&database_path).unwrap();
+        let source_dir = db::upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: root.to_string_lossy().as_ref(),
+                name: "NVIDIA",
+            },
+        )
+        .unwrap();
+        assert!(db::upsert_pending_manual_clip(
+            &connection,
+            db::PendingManualClipInput {
+                source_dir_id: source_dir.id,
+                video_path: video_path.to_string_lossy().as_ref(),
+                file_name: "nvidia-clip.mp4",
+                file_size: 9,
+                modified_at: Some("1782634272"),
+                source_relative_dir: "",
+            },
+        )
+        .unwrap());
+        let pending_id = db::list_pending_manual_clips(&connection, true).unwrap()[0].id;
+        drop(connection);
+
+        let response = request_pending_media(&database_path, &thumbnail_cache_root, pending_id);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body().as_slice(), b"mp4 bytes");
+
+        let missing =
+            request_pending_media(&database_path, &thumbnail_cache_root, pending_id + 10_000);
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        // The row survives a deleted file; the protocol must report it rather than panic.
+        fs::remove_file(&video_path).unwrap();
+        let gone = request_pending_media(&database_path, &thumbnail_cache_root, pending_id);
+        assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pending_media_rejects_non_mp4_and_out_of_root_paths() {
+        let root = unique_temp_dir();
+        let source_root = root.join("source");
+        let outside = root.join("outside");
+        fs::create_dir_all(&source_root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let escaped_path = outside.join("escaped.mp4");
+        fs::write(&escaped_path, b"mp4 bytes").unwrap();
+        let database_path = root.join("highlight-index.sqlite3");
+        let thumbnail_cache_root = root.join("thumbnail-cache");
+        db::migrate_database(&database_path).unwrap();
+        let connection = db::open_database(&database_path).unwrap();
+        let source_dir = db::upsert_source_dir(
+            &connection,
+            SourceDirInput {
+                path: source_root.to_string_lossy().as_ref(),
+                name: "NVIDIA",
+            },
+        )
+        .unwrap();
+        // A row whose recorded path sits outside the source root must never stream, even though
+        // the file exists and ends in .mp4.
+        assert!(db::upsert_pending_manual_clip(
+            &connection,
+            db::PendingManualClipInput {
+                source_dir_id: source_dir.id,
+                video_path: escaped_path.to_string_lossy().as_ref(),
+                file_name: "escaped.mp4",
+                file_size: 9,
+                modified_at: None,
+                source_relative_dir: "",
+            },
+        )
+        .unwrap());
+        let pending_id = db::list_pending_manual_clips(&connection, true).unwrap()[0].id;
+        drop(connection);
+
+        let response = request_pending_media(&database_path, &thumbnail_cache_root, pending_id);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(String::from_utf8_lossy(response.body()).contains("越出"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     struct ClipCommandFixture {
         database_path: PathBuf,
         clip_id: i64,
         clip_path: PathBuf,
         thumbnail_cache_root: PathBuf,
+        ad_image_cache_root: PathBuf,
         _root: PathBuf,
     }
 
@@ -2164,6 +2263,7 @@ mod tests {
             fs::create_dir_all(&root).expect("fixture root should be created");
             let clip_path = root.join(file_name);
             let thumbnail_cache_root = root.join("thumbnail-cache");
+            let ad_image_cache_root = root.join("ad-cache");
             let database_path = root.join("highlight-index.sqlite3");
             db::migrate_database(&database_path).expect("database should migrate");
             let connection = db::open_database(&database_path).expect("database should open");
@@ -2197,6 +2297,7 @@ mod tests {
                 clip_id: clip.id,
                 clip_path,
                 thumbnail_cache_root,
+                ad_image_cache_root,
                 _root: root,
             }
         }
@@ -2225,6 +2326,25 @@ mod tests {
         clip_media_protocol_response(
             fixture.database_path.to_string_lossy().as_ref(),
             &fixture.thumbnail_cache_root,
+            &fixture.ad_image_cache_root,
+            request,
+        )
+    }
+
+    fn request_pending_media(
+        database_path: &std::path::Path,
+        thumbnail_cache_root: &std::path::Path,
+        pending_id: i64,
+    ) -> Response<Vec<u8>> {
+        let request = tauri::http::Request::builder()
+            .method(Method::GET)
+            .uri(format!("https://clip-media.localhost/pending/{pending_id}"))
+            .body(Vec::new())
+            .expect("pending request should build");
+        clip_media_protocol_response(
+            database_path.to_string_lossy().as_ref(),
+            thumbnail_cache_root,
+            thumbnail_cache_root,
             request,
         )
     }
@@ -2241,6 +2361,7 @@ mod tests {
         clip_media_protocol_response(
             fixture.database_path.to_string_lossy().as_ref(),
             &fixture.thumbnail_cache_root,
+            &fixture.ad_image_cache_root,
             request,
         )
     }
@@ -2271,6 +2392,156 @@ mod tests {
             .expect("response header should be present")
             .to_str()
             .expect("response header should be text")
+    }
+
+    fn request_ad_image(
+        fixture: &ClipCommandFixture,
+        creative_id: &str,
+        method: Method,
+    ) -> Response<Vec<u8>> {
+        let request = tauri::http::Request::builder()
+            .method(method)
+            .uri(format!("https://clip-media.localhost/ad/{creative_id}"))
+            .body(Vec::new())
+            .expect("ad request should build");
+        clip_media_protocol_response(
+            fixture.database_path.to_string_lossy().as_ref(),
+            &fixture.thumbnail_cache_root,
+            &fixture.ad_image_cache_root,
+            request,
+        )
+    }
+
+    fn seed_ad_creative(fixture: &ClipCommandFixture, cached_image_file: Option<&str>) {
+        let connection = db::open_database(&fixture.database_path).unwrap();
+        db::replace_ad_creatives(
+            &connection,
+            &[db::AdCreative {
+                creative_id: "cr-001".to_string(),
+                title: "标题".to_string(),
+                body: None,
+                image_url: "https://cdn.example.com/a.png".to_string(),
+                landing_url_template: "https://ad.example.com/lp?click_id={click_id}".to_string(),
+                advertiser_name: "广告主".to_string(),
+                weight: 100,
+                start_at: None,
+                end_at: None,
+                cached_image_file: cached_image_file.map(str::to_string),
+            }],
+        )
+        .unwrap();
+    }
+
+    const TEST_PNG: [u8; 12] = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+    ];
+
+    #[test]
+    fn ad_protocol_serves_cached_creative_image() {
+        let fixture = ClipCommandFixture::with_file("ad-clip.mp4");
+        fs::create_dir_all(&fixture.ad_image_cache_root).unwrap();
+        fs::write(fixture.ad_image_cache_root.join("cr-001.png"), TEST_PNG).unwrap();
+        seed_ad_creative(&fixture, Some("cr-001.png"));
+
+        let response = request_ad_image(&fixture, "cr-001", Method::GET);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header(&response, tauri::http::header::CONTENT_TYPE),
+            "image/png"
+        );
+        assert_eq!(
+            header(
+                &response,
+                tauri::http::header::HeaderName::from_static("x-content-type-options")
+            ),
+            "nosniff"
+        );
+        assert_eq!(response.body().as_slice(), TEST_PNG);
+    }
+
+    #[test]
+    fn ad_protocol_reports_missing_creative_and_missing_cache_file() {
+        let fixture = ClipCommandFixture::with_file("ad-clip.mp4");
+        fs::create_dir_all(&fixture.ad_image_cache_root).unwrap();
+
+        // Unknown creative id.
+        assert_eq!(
+            request_ad_image(&fixture, "cr-unknown", Method::GET).status(),
+            StatusCode::NOT_FOUND
+        );
+
+        // Known creative whose image was never cached.
+        seed_ad_creative(&fixture, None);
+        assert_eq!(
+            request_ad_image(&fixture, "cr-001", Method::GET).status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn ad_protocol_rejects_traversal_and_unsupported_methods() {
+        let fixture = ClipCommandFixture::with_file("ad-clip.mp4");
+        fs::create_dir_all(&fixture.ad_image_cache_root).unwrap();
+        seed_ad_creative(&fixture, Some("cr-001.png"));
+
+        // A nested path never reaches the database lookup.
+        assert_eq!(
+            request_ad_image(&fixture, "..%2F..%2Fsecret.png", Method::GET).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request_ad_image(&fixture, "cr-001", Method::POST).status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+    }
+
+    #[test]
+    fn ad_click_log_persists_the_generated_click_id() {
+        let fixture = ClipCommandFixture::with_file("ad-clip.mp4");
+        seed_ad_creative(&fixture, Some("cr-001.png"));
+        let connection = db::open_database(&fixture.database_path).unwrap();
+
+        db::record_ad_click(&connection, "vf-1-2", "cr-001", "valoframe-sidebar").unwrap();
+        let clicks = db::list_recent_ad_clicks(&connection, 10).unwrap();
+
+        assert_eq!(clicks.len(), 1);
+        assert_eq!(clicks[0].click_id, "vf-1-2");
+        assert_eq!(clicks[0].creative_id, "cr-001");
+        assert_eq!(clicks[0].slot, "valoframe-sidebar");
+    }
+
+    #[test]
+    fn ad_impressions_aggregate_per_creative_and_day() {
+        let fixture = ClipCommandFixture::with_file("ad-clip.mp4");
+        seed_ad_creative(&fixture, Some("cr-001.png"));
+        let connection = db::open_database(&fixture.database_path).unwrap();
+
+        db::record_ad_impression(&connection, "cr-001", "valoframe-sidebar").unwrap();
+        db::record_ad_impression(&connection, "cr-001", "valoframe-sidebar").unwrap();
+
+        let count: i64 = connection
+            .query_row(
+                "SELECT impression_count FROM ad_impression_log WHERE creative_id = 'cr-001'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn replacing_creatives_preserves_the_click_log() {
+        let fixture = ClipCommandFixture::with_file("ad-clip.mp4");
+        seed_ad_creative(&fixture, Some("cr-001.png"));
+        let connection = db::open_database(&fixture.database_path).unwrap();
+        db::record_ad_click(&connection, "vf-1-2", "cr-001", "valoframe-sidebar").unwrap();
+
+        // A new manifest must never erase reconciliation evidence for past clicks.
+        db::replace_ad_creatives(&connection, &[]).unwrap();
+
+        assert!(db::list_ad_creatives(&connection).unwrap().is_empty());
+        assert_eq!(db::list_recent_ad_clicks(&connection, 10).unwrap().len(), 1);
     }
 
     fn directory_file_names(path: &std::path::Path) -> BTreeSet<String> {
