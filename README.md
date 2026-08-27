@@ -23,8 +23,8 @@
 
 当前版本：[`v0.2.5`](https://github.com/2424521842/valoframe/releases/tag/v0.2.5) · Windows 10/11 x64 · Personal Community Stable
 
-- **GitHub（推荐）**：[下载 `VALOFRAME-0.2.5-x64-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.2.5/VALOFRAME-0.2.5-x64-setup.exe)
-  - 文件大小与 SHA-256 见同一 Release 的 `SHA256SUMS.txt` 与[发布说明](https://github.com/2424521842/valoframe/releases/tag/v0.2.5)。
+- **GitHub（推荐）**：[下载 `VALOFRAME-0.2.5-x64-setup.exe`](https://github.com/2424521842/valoframe/releases/download/v0.2.5/VALOFRAME-0.2.5-x64-setup.exe)（8.50 MB）
+  - SHA-256：`ae0bc7d7e112c9885c54aaf8097a4ef7631706f1b70ce33cb2a86c00d7fe2766`
 - **蓝奏云（备用，供无法访问 GitHub 的用户）**：v0.2.5 镜像上传后在[发布说明](https://github.com/2424521842/valoframe/releases/tag/v0.2.5)中给出链接与提取码；镜像与 GitHub 是同一个文件，校验值相同。
 - **完整性校验**：在同一 Release 下载 `SHA256SUMS.txt`，核对安装包文件名与 SHA-256。发布流程会在公开前后重新下载并逐文件复核全部资产。
 
