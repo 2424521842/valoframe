@@ -177,9 +177,12 @@ Windows 上 Tauri 通过 Known Folder API 解析应用数据目录；仅在子�
 - 扫描、永久删除、视频导出、来源根重新定位与安装由 Rust 关键任务门禁互斥；
 - Community Beta 不嵌入公钥且不生成 updater 资产；稳定构建从仓库 Variable/Secrets 注入公钥、私钥和私钥密码；
 - `stable-release` workflow 由规范稳定 tag 自动触发，拒绝版本错配、倒退、重复 Release 和缺失密钥；先创建并重新下载验证不可见 draft 的全部资产，公开后二次验证失败则把精确 Release 恢复为 draft；
+- `lanzou-sync` workflow 只在上述稳定发布成功后运行，从公开 Release 重新下载版本化安装器和 `SHA256SUMS.txt`，核对哈希后同步到固定蓝奏云文件夹，并把文件夹链接、提取码、文件名和 SHA-256 写入该版本发布说明；镜像失败不回滚已验证的 GitHub Release；
 - `v0.1.0-beta.1` 用户必须手动安装一次 `v0.2.1`；只有嵌入正确公钥并指向稳定端点的该版本，才能应用内升级到 `v0.2.2`。Community Beta、内部 RC、prerelease 或未配置公钥的构建不具备该资格。
 
 发布前必须配置仓库 Secrets `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 和 Variable `VALOFRAME_UPDATER_PUBLIC_KEY`，并保留一份加密离线私钥备份。缺少任一配置时，稳定 workflow 在构建前失败。
+
+蓝奏云自动镜像需要一次性配置 Repository Secret `LANZOU_COOKIE` 和 Repository Variable `LANZOU_FOLDER_ID`。前者应是登录 `pc.woozooo.com` 后浏览器请求中的单行 Cookie，至少包含 `ylogin` 与 `phpdisk_info`；后者必须是已经开启分享的非根目录数字 ID。Cookie 只能保存到 Actions Secret，不得写入仓库、Issue、日志或发布说明。Cookie 失效时只需更新 Secret；可从 Actions 手动运行 `Sync stable release to Lanzou Cloud` 并指定已经发布的稳定 tag 进行补传。上传器保留蓝奏云官方 100 MiB 和扩展名限制，不启用分片、伪装或关闭 TLS 校验；同名文件只有带有相同 SHA-256 描述标记时才视为幂等成功，否则拒绝覆盖。
 
 不得把 Authenticode 与 Tauri 更新签名视为同一件事：更新包必须具有 Tauri/Minisign 签名；Windows Authenticode 当前可选，只用于减少未知发布者和 SmartScreen 信誉提示。
 

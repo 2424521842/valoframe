@@ -1,0 +1,170 @@
+name: Sync stable release to Lanzou Cloud
+
+on:
+  workflow_run:
+    workflows:
+      - Stable signed release
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable tag to synchronize (for example, v0.2.5)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lanzou-stable-mirror
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Verify and synchronize installer
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      EXPECTED_REPOSITORY: 2424521842/valoframe
+    steps:
+      - name: Check out the trusted default-branch synchronizer
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Resolve and bind the published stable release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          UPSTREAM_TAG: ${{ github.event.workflow_run.head_branch }}
+          UPSTREAM_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != "$EXPECTED_REPOSITORY" ]]; then
+            echo "This workflow is restricted to $EXPECTED_REPOSITORY." >&2
+            exit 1
+          fi
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$DISPATCH_TAG"
+          else
+            tag="$UPSTREAM_TAG"
+          fi
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Stable mirror tags must use canonical vMAJOR.MINOR.PATCH syntax." >&2
+            exit 1
+          fi
+          version="${tag#v}"
+
+          release_json="$(gh api "repos/$EXPECTED_REPOSITORY/releases/tags/$tag")"
+          if [[ "$(jq -r '.draft' <<<"$release_json")" != "false" ||
+                "$(jq -r '.prerelease' <<<"$release_json")" != "false" ||
+                "$(jq -r '.tag_name' <<<"$release_json")" != "$tag" ]]; then
+            echo "The requested release is not a published stable release." >&2
+            exit 1
+          fi
+
+          tag_ref="$(gh api "repos/$EXPECTED_REPOSITORY/git/ref/tags/$tag")"
+          if [[ "$(jq -r '.object.type' <<<"$tag_ref")" != "commit" ]]; then
+            echo "The stable tag must be a lightweight commit tag." >&2
+            exit 1
+          fi
+          tag_sha="$(jq -r '.object.sha' <<<"$tag_ref")"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" && "$tag_sha" != "$UPSTREAM_SHA" ]]; then
+            echo "The completed stable workflow SHA does not match its tag." >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "installer=VALOFRAME-$version-x64-setup.exe" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Test the repository-owned synchronization scripts
+        run: python -m unittest discover -s scripts/release/tests -p "test_lanzou_sync.py" -v
+
+      - name: Require one-time Lanzou Cloud configuration
+        shell: bash
+        env:
+          LANZOU_COOKIE: ${{ secrets.LANZOU_COOKIE }}
+          LANZOU_FOLDER_ID: ${{ vars.LANZOU_FOLDER_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$LANZOU_COOKIE" ]]; then
+            echo "Repository secret LANZOU_COOKIE is missing." >&2
+            exit 1
+          fi
+          if [[ ! "$LANZOU_FOLDER_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Repository variable LANZOU_FOLDER_ID must be a positive integer." >&2
+            exit 1
+          fi
+
+      - name: Download the exact public installer and checksum manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          INSTALLER_NAME: ${{ steps.release.outputs.installer }}
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/valoframe-lanzou-release"
+          mkdir -p "$release_dir"
+          gh release download "$RELEASE_TAG" \
+            --repo "$EXPECTED_REPOSITORY" \
+            --pattern "$INSTALLER_NAME" \
+            --pattern SHA256SUMS.txt \
+            --dir "$release_dir"
+          if [[ ! -f "$release_dir/$INSTALLER_NAME" || ! -f "$release_dir/SHA256SUMS.txt" ]]; then
+            echo "The published release is missing the installer or SHA256SUMS.txt." >&2
+            exit 1
+          fi
+          echo "RELEASE_DIR=$release_dir" >> "$GITHUB_ENV"
+
+      - name: Upload the checksum-bound installer to the fixed folder
+        shell: bash
+        env:
+          LANZOU_COOKIE: ${{ secrets.LANZOU_COOKIE }}
+          LANZOU_FOLDER_ID: ${{ vars.LANZOU_FOLDER_ID }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          INSTALLER_NAME: ${{ steps.release.outputs.installer }}
+        run: |
+          set -euo pipefail
+          python scripts/release/upload_lanzou.py \
+            --file "$RELEASE_DIR/$INSTALLER_NAME" \
+            --checksums "$RELEASE_DIR/SHA256SUMS.txt" \
+            --tag "$RELEASE_TAG" \
+            --repository "$EXPECTED_REPOSITORY" \
+            --folder-id "$LANZOU_FOLDER_ID" \
+            --result "$RUNNER_TEMP/lanzou-sync-result.json"
+
+      - name: Publish the verified mirror details in the release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          current_notes="$RUNNER_TEMP/current-release-notes.md"
+          updated_notes="$RUNNER_TEMP/updated-release-notes.md"
+          gh release view "$RELEASE_TAG" \
+            --repo "$EXPECTED_REPOSITORY" \
+            --json body \
+            --jq .body > "$current_notes"
+          python scripts/release/update_lanzou_release_notes.py \
+            --notes "$current_notes" \
+            --result "$RUNNER_TEMP/lanzou-sync-result.json" \
+            --output "$updated_notes"
+          gh release edit "$RELEASE_TAG" \
+            --repo "$EXPECTED_REPOSITORY" \
+            --notes-file "$updated_notes"
