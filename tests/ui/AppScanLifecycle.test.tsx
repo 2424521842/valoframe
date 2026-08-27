@@ -199,6 +199,20 @@ describe("production scan lifecycle", () => {
     expect(mocks.updaterOptions).toHaveBeenCalledWith({ automaticCheck: false });
   });
 
+  it("applies and persists the selected global font size immediately", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(document.documentElement).toHaveAttribute("data-font-size", "standard");
+    await user.click(screen.getByRole("button", { name: /^设置/ }));
+    await user.click(await screen.findByRole("combobox", { name: "字体大小" }));
+    await user.click(screen.getByRole("option", { name: "特大" }));
+
+    expect(document.documentElement).toHaveAttribute("data-font-size", "extra-large");
+    expect(JSON.parse(window.localStorage.getItem(APP_PREFERENCES_STORAGE_KEY) ?? "{}"))
+      .toEqual(expect.objectContaining({ fontSize: "extra-large" }));
+  });
+
   it("keeps startup scanning off by default", async () => {
     Reflect.defineProperty(window, "__TAURI_INTERNALS__", {
       configurable: true,
@@ -303,7 +317,7 @@ describe("production scan lifecycle", () => {
     await user.click(screen.getByRole("button", { name: "开始扫描" }));
     emitProgress(progress("scan-new", "新任务进度"));
     emitProgress(progress("scan-old", "旧任务迟到事件"));
-    expect(screen.getAllByText("新任务进度").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/新任务进度/).length).toBeGreaterThan(0);
     expect(screen.queryByText("旧任务迟到事件")).not.toBeInTheDocument();
 
     second.resolve(jobResult("scan-new", "completed"));

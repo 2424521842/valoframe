@@ -348,6 +348,7 @@ describe("MatchLibrary card behavior", () => {
 
     const failedImage = container.querySelector<HTMLImageElement>(".match-clip-thumb img");
     expect(failedImage).toHaveAttribute("src", first.thumbnailUrl);
+    expect(failedImage).toHaveAttribute("loading", "eager");
     fireEvent.error(failedImage!);
     expect(container.querySelector(".match-clip-thumb img")).not.toBeInTheDocument();
     expect(container.querySelector(".clip-thumb-fallback")).toBeInTheDocument();

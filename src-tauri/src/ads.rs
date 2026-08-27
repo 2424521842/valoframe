@@ -12,6 +12,7 @@ use std::{
 };
 
 use serde::Deserialize;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::db::AdCreative;
 
@@ -26,6 +27,8 @@ const MAX_BODY_CHARS: usize = 60;
 const MAX_ADVERTISER_CHARS: usize = 20;
 const MAX_CREATIVE_ID_CHARS: usize = 64;
 const FETCH_TIMEOUT_SECS: u64 = 20;
+const TRUSTED_AD_MANIFEST_ENDPOINT: Option<&str> = option_env!("VALOFRAME_AD_MANIFEST_ENDPOINT");
+const TRUSTED_AD_ALLOWED_HOSTS: Option<&str> = option_env!("VALOFRAME_AD_ALLOWED_HOSTS");
 
 /// Slot identifiers double as the `sub_id` reported to the vendor.
 pub const AD_SLOT_SIDEBAR: &str = "valoframe-sidebar";
@@ -33,6 +36,75 @@ pub const AD_SLOT_LIBRARY: &str = "valoframe-library";
 
 pub fn is_known_ad_slot(slot: &str) -> bool {
     matches!(slot, AD_SLOT_SIDEBAR | AD_SLOT_LIBRARY)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedAdConfig {
+    pub manifest_endpoint: String,
+    pub allowed_hosts: Vec<String>,
+}
+
+/// Returns the maintainer-owned ad configuration embedded when the application is built.
+///
+/// The webview and local preferences never supply either trust boundary. A missing endpoint means
+/// the campaign channel is intentionally disabled; a partial or invalid configuration fails closed.
+pub fn trusted_ad_config() -> Result<Option<TrustedAdConfig>, String> {
+    trusted_ad_config_from(TRUSTED_AD_MANIFEST_ENDPOINT, TRUSTED_AD_ALLOWED_HOSTS)
+}
+
+fn trusted_ad_config_from(
+    endpoint: Option<&str>,
+    allowed_hosts: Option<&str>,
+) -> Result<Option<TrustedAdConfig>, String> {
+    let endpoint = normalize_ad_endpoint(endpoint.unwrap_or_default())?;
+    if endpoint.is_empty() {
+        return Ok(None);
+    }
+
+    let mut normalized_hosts = Vec::new();
+    for candidate in allowed_hosts
+        .unwrap_or_default()
+        .split(|character: char| character.is_whitespace() || matches!(character, ',' | ';'))
+        .filter(|candidate| !candidate.trim().is_empty())
+    {
+        let host = normalize_trusted_allowed_host(candidate)?;
+        if !normalized_hosts.contains(&host) {
+            normalized_hosts.push(host);
+        }
+    }
+    if normalized_hosts.is_empty() {
+        return Err("广告落地域名受信任配置缺失".to_string());
+    }
+    if normalized_hosts.len() > 32 {
+        return Err("广告落地域名受信任配置过长".to_string());
+    }
+
+    Ok(Some(TrustedAdConfig {
+        manifest_endpoint: endpoint,
+        allowed_hosts: normalized_hosts,
+    }))
+}
+
+fn normalize_trusted_allowed_host(raw: &str) -> Result<String, String> {
+    let host = raw.trim().to_ascii_lowercase();
+    let is_loopback = matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]");
+    let labels_are_valid = host.len() <= 253
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+        && !host.contains("..")
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        });
+    if !is_loopback && (!host.contains('.') || !labels_are_valid) {
+        return Err(format!("广告落地域名受信任配置无效：{raw}"));
+    }
+    Ok(host)
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,6 +238,16 @@ fn validate_manifest_creative(raw: ManifestCreative) -> Option<AdCreative> {
         return None;
     }
 
+    let start_at = normalize_optional_flight_time(raw.start_at).ok()?;
+    let end_at = normalize_optional_flight_time(raw.end_at).ok()?;
+    if let (Some(start), Some(end)) = (&start_at, &end_at) {
+        let start = OffsetDateTime::parse(start, &Rfc3339).ok()?;
+        let end = OffsetDateTime::parse(end, &Rfc3339).ok()?;
+        if start > end {
+            return None;
+        }
+    }
+
     Some(AdCreative {
         creative_id,
         title,
@@ -174,16 +256,22 @@ fn validate_manifest_creative(raw: ManifestCreative) -> Option<AdCreative> {
         landing_url_template,
         advertiser_name,
         weight: raw.weight.unwrap_or(100).clamp(1, 10_000),
-        start_at: raw
-            .start_at
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        end_at: raw
-            .end_at
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
+        start_at,
+        end_at,
         cached_image_file: None,
     })
+}
+
+fn normalize_optional_flight_time(value: Option<String>) -> Result<Option<String>, ()> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    OffsetDateTime::parse(&value, &Rfc3339).map_err(|_| ())?;
+    Ok(Some(value))
 }
 
 /// Substitutes the tracking placeholders and verifies the result is safe to hand to the shell.
@@ -433,6 +521,36 @@ mod tests {
     }
 
     #[test]
+    fn trusted_config_is_disabled_without_an_embedded_endpoint() {
+        assert_eq!(trusted_ad_config_from(None, None), Ok(None));
+        assert_eq!(
+            trusted_ad_config_from(Some("   "), Some("bad host")),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn trusted_config_requires_and_normalizes_embedded_landing_hosts() {
+        let config = trusted_ad_config_from(
+            Some("https://ads.example.com/manifest"),
+            Some("AD.EXAMPLE.COM, lp.example.com ad.example.com"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.manifest_endpoint, "https://ads.example.com/manifest");
+        assert_eq!(
+            config.allowed_hosts,
+            vec!["ad.example.com".to_string(), "lp.example.com".to_string()]
+        );
+        assert!(trusted_ad_config_from(Some("https://ads.example.com/manifest"), None).is_err());
+        assert!(trusted_ad_config_from(
+            Some("https://ads.example.com/manifest"),
+            Some("https://ad.example.com/path")
+        )
+        .is_err());
+    }
+
+    #[test]
     fn endpoint_normalization_accepts_https_and_loopback_http_only() {
         assert_eq!(normalize_ad_endpoint("  "), Ok(String::new()));
         assert_eq!(
@@ -495,6 +613,34 @@ mod tests {
         let oversized = vec![b'x'; MAX_MANIFEST_BYTES + 1];
         assert!(parse_ad_manifest(&oversized).is_err());
         assert!(parse_ad_manifest(br#"{"schemaVersion": 99, "creatives": []}"#).is_err());
+    }
+
+    #[test]
+    fn manifest_parsing_drops_invalid_or_reversed_flight_windows() {
+        let payload = r#"{
+            "schemaVersion": 1,
+            "creatives": [
+                {
+                    "creativeId": "bad-date",
+                    "title": "日期无效",
+                    "imageUrl": "https://cdn.example.com/a.jpg",
+                    "landingUrlTemplate": "https://ad.example.com/lp?click_id={click_id}",
+                    "advertiserName": "广告主",
+                    "startAt": "not-a-date"
+                },
+                {
+                    "creativeId": "reversed",
+                    "title": "日期倒置",
+                    "imageUrl": "https://cdn.example.com/b.jpg",
+                    "landingUrlTemplate": "https://ad.example.com/lp?click_id={click_id}",
+                    "advertiserName": "广告主",
+                    "startAt": "2026-09-01T00:00:00Z",
+                    "endAt": "2026-08-01T00:00:00Z"
+                }
+            ]
+        }"#;
+
+        assert!(parse_ad_manifest(payload.as_bytes()).unwrap().is_empty());
     }
 
     #[test]

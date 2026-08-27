@@ -31,7 +31,10 @@ const clip: PendingManualClip = {
   firstDiscoveredAt: "2026-07-02T22:45:00Z",
 };
 
-function renderDialog(onSubmit: (input: ManualClipImportInput) => void = vi.fn()) {
+function renderDialog(
+  onSubmit: (input: ManualClipImportInput) => void = vi.fn(),
+  state: { isSubmitting?: boolean; error?: string | null } = {},
+) {
   render(
     <ManualClipImportDialog
       open={true}
@@ -40,8 +43,8 @@ function renderDialog(onSubmit: (input: ManualClipImportInput) => void = vi.fn()
       agentNames={["捷风", "幽影"]}
       mapNames={["霓虹町", "亚海悬城"]}
       gameModes={["竞技模式"]}
-      isSubmitting={false}
-      error={null}
+      isSubmitting={state.isSubmitting ?? false}
+      error={state.error ?? null}
       onOpenChange={vi.fn()}
       onSubmit={onSubmit}
     />,
@@ -62,7 +65,19 @@ describe("ManualClipImportDialog", () => {
     expect(await screen.findByText("请选择账户")).toBeVisible();
     expect(screen.getByText("请选择英雄")).toBeVisible();
     expect(screen.getByText("请选择地图")).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "选择账户" })).toHaveFocus();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("keeps actions outside the keyboard-scrollable preview and form region", () => {
+    renderDialog();
+
+    const scrollRegion = screen.getByLabelText("视频预览与分类信息");
+    const submitButton = screen.getByRole("button", { name: "录入到素材库" });
+    expect(scrollRegion).toHaveAttribute("tabindex", "0");
+    expect(scrollRegion).toContainElement(screen.getByLabelText("待录入文件"));
+    expect(scrollRegion).not.toContainElement(submitButton);
+    expect(submitButton.closest(".manual-import-actions")).not.toBeNull();
   });
 
   it("submits a new-account payload after filling the classification", async () => {
@@ -119,6 +134,16 @@ describe("ManualClipImportDialog", () => {
     }));
   });
 
+  it("renders select options in a portal outside the clipped scroll region", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.click(screen.getByRole("combobox", { name: "选择英雄" }));
+    const listbox = await screen.findByRole("listbox");
+    expect(listbox.closest(".manual-import-scroll")).toBeNull();
+    expect(screen.getByRole("option", { name: "捷风" })).toBeVisible();
+  });
+
   it("streams the pending recording so the user can watch it before classifying", () => {
     renderDialog();
 
@@ -141,5 +166,11 @@ describe("ManualClipImportDialog", () => {
     expect(screen.getByRole("combobox", { name: "选择英雄" })).toBeVisible();
     expect(screen.getByRole("button", { name: "录入到素材库" })).toBeEnabled();
   });
-});
 
+  it("keeps submission feedback readable without allowing a duplicate submit", () => {
+    renderDialog(vi.fn(), { isSubmitting: true, error: "录入失败，请重试" });
+
+    expect(screen.getByRole("alert")).toHaveTextContent("录入失败，请重试");
+    expect(screen.getByRole("button", { name: "正在录入…" })).toBeDisabled();
+  });
+});

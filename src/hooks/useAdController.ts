@@ -8,7 +8,6 @@ import {
 } from "../api/backend";
 import {
   activeCreatives,
-  parseAllowedHosts,
   selectCreative,
   type AdCreative,
   type AdSlot,
@@ -22,33 +21,26 @@ export type AdController = {
 };
 
 export type UseAdControllerOptions = {
-  enabled: boolean;
-  manifestEndpoint: string;
-  allowedHosts: string;
   slot: AdSlot;
   /** Distinct per mounted slot so two slots do not always show the same creative. */
   rotationSeed?: number;
 };
 
 export function useAdController(options: UseAdControllerOptions): AdController {
-  const { enabled, manifestEndpoint, allowedHosts, slot, rotationSeed = 0 } = options;
+  const { slot, rotationSeed = 0 } = options;
   const [creatives, setCreatives] = useState<AdCreative[]>([]);
   const reportedImpressions = useRef(new Set<string>());
 
   useEffect(() => {
-    if (!enabled || manifestEndpoint.trim() === "") {
-      setCreatives([]);
-      return;
-    }
-
     let cancelled = false;
+    setCreatives([]);
     void (async () => {
-      // A refresh failure is expected offline and must never surface as an error: the slot just
-      // stays on whatever is already cached, or empty.
+      // The backend owns the trusted endpoint and landing-host policy. Refresh failures are
+      // expected offline and fail closed: stale cached campaigns are never displayed.
       try {
-        await refreshAdCreatives(manifestEndpoint);
+        await refreshAdCreatives();
       } catch {
-        // Intentionally ignored; fall through to the cached list.
+        return;
       }
       try {
         const cached = await listAdCreatives();
@@ -61,12 +53,11 @@ export function useAdController(options: UseAdControllerOptions): AdController {
     return () => {
       cancelled = true;
     };
-  }, [enabled, manifestEndpoint]);
+  }, []);
 
   const creative = useMemo(() => {
-    if (!enabled) return null;
     return selectCreative(activeCreatives(creatives), rotationSeed);
-  }, [creatives, enabled, rotationSeed]);
+  }, [creatives, rotationSeed]);
 
   const onImpression = useCallback(
     (creativeId: string) => {
@@ -80,15 +71,13 @@ export function useAdController(options: UseAdControllerOptions): AdController {
 
   const onClick = useCallback(
     async (creativeId: string) => {
-      const hosts = parseAllowedHosts(allowedHosts);
-      if (hosts.length === 0) return;
       try {
-        await recordAdClick(creativeId, slot, hosts);
+        await recordAdClick(creativeId, slot);
       } catch {
         // The backend refuses to open anything it cannot validate; nothing useful to show here.
       }
     },
-    [allowedHosts, slot],
+    [slot],
   );
 
   return { creative, onImpression, onClick };

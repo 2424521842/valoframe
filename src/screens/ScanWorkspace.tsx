@@ -36,6 +36,7 @@ import {
   summarizeScanFreshness,
 } from "../lib/scanFreshness";
 import { scanTerminalActivityMessage } from "../lib/scanSummary";
+import { scanProgressPresentation } from "../lib/scanProgress";
 import { scanPathKey, scanTargetPathForSource } from "../lib/scanTargets";
 import type {
   AccountSummary,
@@ -170,13 +171,8 @@ export function ScanWorkspace({
   const latestModifiedAt = facets?.modifiedAtMax
     ? new Date(facets.modifiedAtMax * 1_000).toISOString()
     : null;
-  const hasDeterminateProgress = progress?.total !== null
-    && progress?.total !== undefined && progress.total > 0;
-  const progressPercent = hasDeterminateProgress && progress
-    ? Math.min(100, Math.round((progress.processed / progress.total!) * 100))
-    : progress?.terminal
-      ? 100
-      : null;
+  const progressPresentation = scanProgressPresentation(progress, scanStatus);
+  const progressPercent = progressPresentation.percent;
   const freshnessBySourceId = useMemo(() => new Map(
     sourceDirs.map((source) => [
       source.id,
@@ -570,28 +566,31 @@ export function ScanWorkspace({
                     </span>
                     <div>
                       <small>{isScanning ? "当前任务" : "任务状态"}</small>
-                      <strong>{scanStatus === "cancelling"
-                        ? "正在完成安全取消…"
-                        : isScanning
-                          ? progress?.message ?? "正在分析录像内容…"
-                          : terminalMessage ?? "尚未开始新的扫描"}</strong>
+                      <strong>{isScanning
+                        ? progressPresentation.stageLabel
+                        : terminalMessage ?? "尚未开始新的扫描"}</strong>
                     </div>
                     <b>{progressPercent === null ? isScanning ? "处理中" : "—" : `${progressPercent}%`}</b>
                   </header>
                   <div
-                    aria-label="扫描进度"
+                    aria-label={progressPresentation.ariaLabel}
                     aria-valuemax={100}
                     aria-valuemin={0}
                     aria-valuenow={progressPercent ?? undefined}
-                    className={isScanning && !hasDeterminateProgress ? "cinematic-progress cinematic-progress--busy" : "cinematic-progress"}
+                    aria-valuetext={progressPresentation.ariaValueText}
+                    className={isScanning && !progressPresentation.determinate ? "cinematic-progress cinematic-progress--busy" : "cinematic-progress"}
                     role="progressbar"
                   >
                     <span style={progressPercent === null ? undefined : { width: `${progressPercent}%` }} />
                   </div>
                   <footer>
-                    <span>{progress?.currentRoot
-                      ? `当前目录：${progress.currentRoot}`
-                      : terminalMessage ?? activityMessage}</span>
+                    <span>{isScanning && progress?.message
+                      ? progress.currentRoot
+                        ? `${progress.message} · 当前目录：${progress.currentRoot}`
+                        : progress.message
+                      : progress?.currentRoot && !progress.terminal
+                        ? `当前目录：${progress.currentRoot}`
+                        : terminalMessage ?? activityMessage}</span>
                     {isScanning ? (
                       <button
                         className="cinematic-button cinematic-button--secondary"

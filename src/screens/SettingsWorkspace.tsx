@@ -80,6 +80,12 @@ const LIBRARY_SORT_OPTIONS = [
   { value: "name-asc", label: "文件名 A–Z" },
 ] as const;
 
+const FONT_SIZE_OPTIONS = [
+  { value: "standard", label: "标准" },
+  { value: "large", label: "大号" },
+  { value: "extra-large", label: "特大" },
+] as const;
+
 export function SettingsWorkspace({
   preferences,
   updater,
@@ -279,54 +285,26 @@ export function SettingsWorkspace({
                 </SettingRow>
 
                 <SettingRow
-                  description="开启后会在侧栏底部显示带「广告」标识的静态图文卡片。素材由瓦刻后端下载到本机后再显示，界面本身不会连接任何外部服务器；关闭后不再发起素材请求。"
-                  title="显示广告"
-                  titleId="ads-enabled-label"
+                  description="即时调整全部工作区的文字与控件尺寸；重新启动后仍会保留。"
+                  title="字体大小"
+                  titleId="font-size-label"
                 >
-                  <UiSwitch
-                    aria-labelledby="ads-enabled-label"
-                    checked={values.adsEnabled}
-                    onCheckedChange={(checked) => preferences.updatePreferences({ adsEnabled: checked })}
-                  />
+                  <UiSelect
+                    value={values.fontSize}
+                    onValueChange={(value) => preferences.updatePreferences({
+                      fontSize: value as typeof values.fontSize,
+                    })}
+                  >
+                    <UiSelectTrigger aria-labelledby="font-size-label">
+                      <UiSelectValue />
+                    </UiSelectTrigger>
+                    <UiSelectContent>
+                      {FONT_SIZE_OPTIONS.map((option) => (
+                        <UiSelectItem key={option.value} value={option.value}>{option.label}</UiSelectItem>
+                      ))}
+                    </UiSelectContent>
+                  </UiSelect>
                 </SettingRow>
-
-                {values.adsEnabled ? (
-                  <>
-                    <SettingRow
-                      description="广告方提供的素材清单接口，必须以 https:// 开头（本机联调可用 http://localhost）。留空则不显示广告。"
-                      title="广告素材接口"
-                      titleId="ad-endpoint-label"
-                    >
-                      <input
-                        aria-labelledby="ad-endpoint-label"
-                        className="settings-input"
-                        placeholder="https://ad.example.com/manifest"
-                        type="url"
-                        value={values.adManifestEndpoint}
-                        onChange={(event) => preferences.updatePreferences({
-                          adManifestEndpoint: event.target.value,
-                        })}
-                      />
-                    </SettingRow>
-
-                    <SettingRow
-                      description="广告方落地页域名，多个用逗号或空格分隔。只有列表内的域名（含其子域名）才允许打开；留空将阻止所有广告点击。"
-                      title="落地页域名允许列表"
-                      titleId="ad-hosts-label"
-                    >
-                      <input
-                        aria-labelledby="ad-hosts-label"
-                        className="settings-input"
-                        placeholder="ad.example.com, lp.example.com"
-                        type="text"
-                        value={values.adAllowedHosts}
-                        onChange={(event) => preferences.updatePreferences({
-                          adAllowedHosts: event.target.value,
-                        })}
-                      />
-                    </SettingRow>
-                  </>
-                ) : null}
 
                 <SettingRow
                   description="只重置本页中的偏好，不会修改来源、标签、索引、缓存、视频或更新检查记录。"
@@ -883,7 +861,7 @@ function confirmationDescription(
   criticalTaskMessage: string | null,
 ): string {
   if (confirmation === "reset") {
-    return "启动位置、启动扫描、素材库视图与排序、播放、动态效果和自动更新偏好将恢复默认值。来源、标签、索引、缓存、视频和更新检查记录不会改变。";
+    return "启动位置、启动扫描、素材库视图与排序、播放、字体大小、动态效果和自动更新偏好将恢复默认值；字体大小会恢复为“标准”。来源、标签、索引、缓存、视频和更新检查记录不会改变。";
   }
   if (confirmation === "install" && criticalTaskMessage) {
     return `${criticalTaskMessage}。请等待任务结束后再安装更新。`;

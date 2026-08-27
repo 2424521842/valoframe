@@ -3,7 +3,6 @@ import { test } from "node:test";
 
 import {
   activeCreatives,
-  parseAllowedHosts,
   selectCreative,
   type AdCreative,
 } from "../src/lib/ads.ts";
@@ -78,24 +77,4 @@ test("selectCreative tolerates hostile weights from a vendor manifest", () => {
   assert.notEqual(selectCreative(creatives, 0), null);
   assert.notEqual(selectCreative(creatives, Number.NaN), null);
   assert.notEqual(selectCreative(creatives, -3), null);
-});
-
-test("parseAllowedHosts normalizes separators, schemes, and paths", () => {
-  assert.deepEqual(
-    parseAllowedHosts("https://ad.example.com/lp, LP.Example.com  other.example.com"),
-    ["ad.example.com", "lp.example.com", "other.example.com"],
-  );
-});
-
-test("parseAllowedHosts drops entries that are not hostnames", () => {
-  assert.deepEqual(parseAllowedHosts("localhost, ad.example.com, 中文, a_b.com"), [
-    "ad.example.com",
-  ]);
-});
-
-test("parseAllowedHosts deduplicates and returns empty for blank input", () => {
-  assert.deepEqual(parseAllowedHosts("ad.example.com ad.example.com"), [
-    "ad.example.com",
-  ]);
-  assert.deepEqual(parseAllowedHosts("   "), []);
 });

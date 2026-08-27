@@ -1,5 +1,5 @@
 import { MonitorPlay, Plus, UserCircle, WarningCircle } from "@phosphor-icons/react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { pendingMediaUrlForId } from "../api/backend";
 import { formatBytes } from "../lib/formatters";
 import type { AccountSummary, ManualClipImportInput, PendingManualClip } from "../types";
@@ -56,6 +56,10 @@ export function ManualClipImportDialog({
   const [form, setForm] = useState<ManualImportFormState>(EMPTY_MANUAL_IMPORT_FORM);
   const [fieldErrors, setFieldErrors] = useState<ManualImportFormErrors>({});
   const [previewFailed, setPreviewFailed] = useState(false);
+  const accountTriggerRef = useRef<HTMLButtonElement>(null);
+  const newAccountInputRef = useRef<HTMLInputElement>(null);
+  const agentTriggerRef = useRef<HTMLButtonElement>(null);
+  const mapTriggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -74,7 +78,18 @@ export function ManualClipImportDialog({
     if (isSubmitting) return;
     const nextErrors = validateManualImportForm(form, accounts);
     setFieldErrors(nextErrors);
-    if (Object.keys(nextErrors).length > 0) return;
+    if (Object.keys(nextErrors).length > 0) {
+      const firstInvalidField = nextErrors.accountName
+        ? form.accountMode === "new"
+          ? newAccountInputRef.current
+          : accountTriggerRef.current
+        : nextErrors.agentName
+          ? agentTriggerRef.current
+          : mapTriggerRef.current;
+      firstInvalidField?.focus({ preventScroll: true });
+      firstInvalidField?.scrollIntoView?.({ block: "center", inline: "nearest" });
+      return;
+    }
     onSubmit(manualImportInputFromForm(form, accounts));
   };
 
@@ -97,35 +112,40 @@ export function ManualClipImportDialog({
           </div>
         </header>
 
-        {clip ? (
-          <section className="manual-import-file" aria-label="待录入文件">
-            <video
-              className="manual-import-video"
-              controls
-              preload="metadata"
-              // Keyed so switching pending rows reloads the source instead of keeping the old
-              // buffer, and reset on close so no stream stays open behind a hidden dialog.
-              key={clip.id}
-              src={pendingMediaUrlForId(clip.id)}
-              onError={() => setPreviewFailed(true)}
-              onLoadedMetadata={() => setPreviewFailed(false)}
-            />
-            {previewFailed ? (
-              <p className="manual-import-video-error" role="status">
-                <WarningCircle weight="fill" />
-                无法在应用内预览该视频，可能是当前 WebView2 解码链不支持；分类信息仍可正常填写。
-              </p>
-            ) : null}
-            <strong>{clip.fileName}</strong>
-            <small>
-              {clip.sourceDirName}
-              {clip.sourceRelativeDir ? ` · ${clip.sourceRelativeDir}` : ""}
-              {` · ${formatBytes(clip.fileSize)}`}
-            </small>
-          </section>
-        ) : null}
-
         <form className="manual-import-form" onSubmit={submit}>
+          <div
+            aria-label="视频预览与分类信息"
+            className="manual-import-scroll"
+            tabIndex={0}
+          >
+            {clip ? (
+              <section className="manual-import-file" aria-label="待录入文件">
+                <video
+                  className="manual-import-video"
+                  controls
+                  preload="metadata"
+                  // Keyed so switching pending rows reloads the source instead of keeping the old
+                  // buffer, and reset on close so no stream stays open behind a hidden dialog.
+                  key={clip.id}
+                  src={pendingMediaUrlForId(clip.id)}
+                  onError={() => setPreviewFailed(true)}
+                  onLoadedMetadata={() => setPreviewFailed(false)}
+                />
+                {previewFailed ? (
+                  <p className="manual-import-video-error" role="status">
+                    <WarningCircle weight="fill" />
+                    无法在应用内预览该视频，可能是当前 WebView2 解码链不支持；分类信息仍可正常填写。
+                  </p>
+                ) : null}
+                <strong>{clip.fileName}</strong>
+                <small>
+                  {clip.sourceDirName}
+                  {clip.sourceRelativeDir ? ` · ${clip.sourceRelativeDir}` : ""}
+                  {` · ${formatBytes(clip.fileSize)}`}
+                </small>
+              </section>
+            ) : null}
+
           <label className="manual-import-field">
             <span>账户</span>
             <UiSelect
@@ -146,7 +166,12 @@ export function ManualClipImportDialog({
                 }
               }}
             >
-              <UiSelectTrigger aria-label="选择账户">
+              <UiSelectTrigger
+                aria-describedby={fieldErrors.accountName ? "manual-import-account-error" : undefined}
+                aria-invalid={Boolean(fieldErrors.accountName) || undefined}
+                aria-label="选择账户"
+                ref={accountTriggerRef}
+              >
                 <UiSelectValue placeholder="选择已有账户" />
               </UiSelectTrigger>
               <UiSelectContent>
@@ -159,7 +184,9 @@ export function ManualClipImportDialog({
               </UiSelectContent>
             </UiSelect>
             {accountMode === "existing" && fieldErrors.accountName ? (
-              <small className="manual-import-error">{fieldErrors.accountName}</small>
+              <small className="manual-import-error" id="manual-import-account-error">
+                {fieldErrors.accountName}
+              </small>
             ) : null}
           </label>
 
@@ -167,15 +194,19 @@ export function ManualClipImportDialog({
             <label className="manual-import-field">
               <span>新账户名称</span>
               <input
+                aria-describedby={fieldErrors.accountName ? "manual-import-account-error" : undefined}
                 aria-invalid={Boolean(fieldErrors.accountName) || undefined}
                 className="manual-import-input"
                 placeholder="例如：小号#1234"
+                ref={newAccountInputRef}
                 type="text"
                 value={form.newAccountName}
                 onChange={(event) => setField("newAccountName", event.target.value)}
               />
               {fieldErrors.accountName ? (
-                <small className="manual-import-error">{fieldErrors.accountName}</small>
+                <small className="manual-import-error" id="manual-import-account-error">
+                  {fieldErrors.accountName}
+                </small>
               ) : null}
             </label>
           ) : null}
@@ -183,7 +214,12 @@ export function ManualClipImportDialog({
           <label className="manual-import-field">
             <span>英雄</span>
             <UiSelect value={form.agentName} onValueChange={(value) => setField("agentName", value)}>
-              <UiSelectTrigger aria-label="选择英雄" aria-invalid={Boolean(fieldErrors.agentName) || undefined}>
+              <UiSelectTrigger
+                aria-describedby={fieldErrors.agentName ? "manual-import-agent-error" : undefined}
+                aria-label="选择英雄"
+                aria-invalid={Boolean(fieldErrors.agentName) || undefined}
+                ref={agentTriggerRef}
+              >
                 <UiSelectValue placeholder="选择本局使用的英雄" />
               </UiSelectTrigger>
               <UiSelectContent>
@@ -193,14 +229,21 @@ export function ManualClipImportDialog({
               </UiSelectContent>
             </UiSelect>
             {fieldErrors.agentName ? (
-              <small className="manual-import-error">{fieldErrors.agentName}</small>
+              <small className="manual-import-error" id="manual-import-agent-error">
+                {fieldErrors.agentName}
+              </small>
             ) : null}
           </label>
 
           <label className="manual-import-field">
             <span>地图</span>
             <UiSelect value={form.mapName} onValueChange={(value) => setField("mapName", value)}>
-              <UiSelectTrigger aria-label="选择地图" aria-invalid={Boolean(fieldErrors.mapName) || undefined}>
+              <UiSelectTrigger
+                aria-describedby={fieldErrors.mapName ? "manual-import-map-error" : undefined}
+                aria-label="选择地图"
+                aria-invalid={Boolean(fieldErrors.mapName) || undefined}
+                ref={mapTriggerRef}
+              >
                 <UiSelectValue placeholder="选择本局地图" />
               </UiSelectTrigger>
               <UiSelectContent>
@@ -210,7 +253,9 @@ export function ManualClipImportDialog({
               </UiSelectContent>
             </UiSelect>
             {fieldErrors.mapName ? (
-              <small className="manual-import-error">{fieldErrors.mapName}</small>
+              <small className="manual-import-error" id="manual-import-map-error">
+                {fieldErrors.mapName}
+              </small>
             ) : null}
           </label>
 
@@ -249,6 +294,7 @@ export function ManualClipImportDialog({
               {error}
             </p>
           ) : null}
+          </div>
 
           <footer className="manual-import-actions">
             <UiDialogClose type="button">取消</UiDialogClose>

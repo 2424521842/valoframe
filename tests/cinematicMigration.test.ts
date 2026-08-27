@@ -4,6 +4,7 @@ import test from "node:test";
 
 const app = source("../src/App.tsx");
 const scanController = source("../src/hooks/useScanController.ts");
+const scanProgress = source("../src/lib/scanProgress.ts");
 const scan = source("../src/screens/ScanWorkspace.tsx");
 const preview = source("../src/screens/PreviewWorkspace.tsx");
 const matchLibrary = source("../src/components/MatchLibrary.tsx");
@@ -13,6 +14,7 @@ const command = source("../src/components/ui/command.tsx");
 const contextMenu = source("../src/components/ui/context-menu.tsx");
 const checkbox = source("../src/components/ui/checkbox.tsx");
 const dialog = source("../src/components/ui/dialog.tsx");
+const manualImportDialog = source("../src/components/ManualClipImportDialog.tsx");
 const alertDialog = source("../src/components/ui/alert-dialog.tsx");
 const sidebar = source("../src/components/CinematicSidebar.tsx");
 const libraryWorkspace = source("../src/screens/LibraryWorkspace.tsx");
@@ -132,14 +134,17 @@ test("batch management uses Radix selection and confirmation primitives with rea
   assert.match(css, /\.batch-tag-dialog/);
 });
 
-test("library animation keeps its visual effects while isolating offscreen and repeated work", () => {
+test("library animation keeps hover feedback while virtualized cards mount visibly", () => {
   assert.match(matchLibrary, /const prefersReducedMotion = Boolean\(useReducedMotion\(\)\)/);
   assert.match(matchLibrary, /motionProfile=\{sharedMotionProfile\}/);
   assert.match(matchLibrary, /<m\.article/);
+  assert.match(matchLibrary, /initial=\{false\}/);
   assert.match(matchLibrary, /whileHover=\{\{ y: profile\.hoverY \}\}/);
+  assert.match(matchLibrary, /loading="eager"/);
   assert.match(libraryWorkspace, /const handleSelectionGesture = useCallback/);
   assert.match(libraryWorkspace, /selectedClipIdsRef/);
-  assert.match(css, /\.match-board\s*\{[^}]*content-visibility:\s*auto;[^}]*contain:\s*layout paint style;/s);
+  assert.doesNotMatch(css, /\.match-board\s*\{[^}]*content-visibility:/s);
+  assert.doesNotMatch(css, /\.match-board\s*\{[^}]*contain-intrinsic-size:/s);
   assert.match(css, /\.ambient-orb\s*\{[^}]*will-change:\s*transform;/s);
 });
 
@@ -155,10 +160,30 @@ test("scan workspace is connected to the existing backend operations", () => {
   assert.match(scan, /\{accounts\.map\(\(account\) => \(/);
   assert.doesNotMatch(scan, /accounts\.slice/);
   assert.match(css, /\.scan-account-grid\s*\{[^}]*max-height:[^}]*overflow-y:\s*auto;[^}]*scrollbar-gutter:\s*stable;/s);
-  assert.match(scan, /progress\.processed \/ progress\.total/);
+  assert.match(scan, /scanProgressPresentation\(progress, scanStatus\)/);
+  assert.match(scanProgress, /SCAN_END_PERCENT = 85/);
+  assert.match(scanProgress, /progress\?\.terminal && status === "completed"/);
   assert.match(scan, /onClick=\{onCancelScan\}/);
   assert.match(scan, /summary\.newClipCount/);
   assert.match(scan, /onClick=\{onOpenLibrary\}/);
+});
+
+test("the NVIDIA import dialog keeps its actions reachable in short viewports", () => {
+  assert.match(manualImportDialog, /className="manual-import-scroll"/);
+  assert.match(manualImportDialog, /tabIndex=\{0\}/);
+  assert.match(manualImportDialog, /firstInvalidField\?\.scrollIntoView/);
+  assert.match(
+    css,
+    /\.manual-import-dialog\s*\{[^}]*max-height:[^}]*display:\s*flex;[^}]*overflow:\s*hidden;/s,
+  );
+  assert.match(
+    css,
+    /\.manual-import-scroll\s*\{[^}]*overflow-y:\s*auto;[^}]*scrollbar-gutter:\s*stable;/s,
+  );
+  assert.match(
+    css,
+    /\.manual-import-actions\s*\{[^}]*border-top:[^}]*background:/s,
+  );
 });
 
 test("preview keeps interactive timeline flags without restoring the event list", () => {

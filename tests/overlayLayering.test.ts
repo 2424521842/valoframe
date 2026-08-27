@@ -53,7 +53,9 @@ test("select trigger has a base style so unscoped selects match the shell", () =
   assert.match(css, /^\.ui-select-trigger:disabled\s*\{[^}]*cursor:\s*not-allowed;/ms);
 });
 
-test("manual import dialog scrolls internally and bounds the preview player", () => {
-  assert.match(css, /\.manual-import-dialog\s*\{[^}]*overflow-y:\s*auto;/s);
+test("manual import dialog keeps a bounded scroll region above stable actions", () => {
+  assert.match(css, /\.manual-import-dialog\s*\{[^}]*overflow:\s*hidden;/s);
+  assert.match(css, /\.manual-import-scroll\s*\{[^}]*overflow-y:\s*auto;/s);
+  assert.match(css, /\.manual-import-actions\s*\{[^}]*border-top:[^}]*background:/s);
   assert.match(css, /\.manual-import-video\s*\{[^}]*max-height:\s*240px;/s);
 });

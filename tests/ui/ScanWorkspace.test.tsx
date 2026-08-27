@@ -8,6 +8,7 @@ import type {
   PendingManualClip,
   RelocateScanSourceResult,
   ScanSourceRelocationPreview,
+  ScanProgress,
   ScanSummary,
   SourceDir,
 } from "../../src/types";
@@ -150,6 +151,50 @@ describe("ScanWorkspace freshness and terminal feedback", () => {
 
     rerender(workspace({ scanStatus: "completed", summary: null }));
     expect(screen.getAllByText("扫描完成：新增数量不可用").length).toBeGreaterThan(0);
+  });
+
+  it("caps completed traversal at 85% before entering database stages", () => {
+    renderWorkspace({
+      activeJobId: "scan-job",
+      isScanning: true,
+      progress: scanProgress("scanning", 4, 4),
+      scanStatus: "running",
+    });
+
+    expect(screen.getByText("正在扫描录像 · 已处理 4 / 4")).toBeVisible();
+    expect(screen.getByText("85%")).toBeVisible();
+    const progressbar = screen.getByRole("progressbar", {
+      name: "扫描进度：正在扫描录像 · 已处理 4 / 4",
+    });
+    expect(progressbar).toHaveAttribute("aria-valuenow", "85");
+    expect(progressbar).toHaveAttribute("aria-valuetext", "正在扫描录像 · 已处理 4 / 4，85%");
+  });
+
+  it("announces importing as indeterminate and reserves 100% for success", () => {
+    const view = renderWorkspace({
+      activeJobId: "scan-job",
+      isScanning: true,
+      progress: scanProgress("importing", 4, 4),
+      scanStatus: "running",
+    });
+
+    expect(screen.getByText("扫描完成，正在导入数据")).toBeVisible();
+    const importing = screen.getByRole("progressbar", {
+      name: "扫描进度：扫描完成，正在导入数据",
+    });
+    expect(importing).not.toHaveAttribute("aria-valuenow");
+    expect(importing).toHaveClass("cinematic-progress--busy");
+    expect(screen.getByText("处理中")).toBeVisible();
+
+    view.rerender(workspace({
+      activeJobId: null,
+      isScanning: false,
+      progress: scanProgress("completed", 4, 4, { status: "completed", terminal: true }),
+      scanStatus: "completed",
+    }));
+    expect(screen.getByText("100%")).toBeVisible();
+    expect(screen.getByRole("progressbar", { name: "扫描进度：扫描完成" }))
+      .toHaveAttribute("aria-valuenow", "100");
   });
 
   it("opens relocation only from its source action and keeps cancellation side-effect free", async () => {
@@ -571,6 +616,29 @@ function scanSummary(): ScanSummary {
     coverMissingCount: 0,
     errors: [],
     message: null,
+  };
+}
+
+function scanProgress(
+  phase: string,
+  processed: number,
+  total: number | null,
+  overrides: Partial<ScanProgress> = {},
+): ScanProgress {
+  return {
+    jobId: "scan-job",
+    phase,
+    currentRoot: "D:\\clips",
+    source: null,
+    processed,
+    total,
+    terminal: false,
+    status: "running",
+    sourceDirCount: processed,
+    clipGroupCount: 0,
+    clipFileCount: 0,
+    message: "扫描中",
+    ...overrides,
   };
 }
 

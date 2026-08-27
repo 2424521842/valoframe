@@ -836,13 +836,7 @@ export type CancelScanResult = {
 };
 
 export type ScanProgress = {
-  phase:
-    | "discovering"
-    | "scanning"
-    | "metadata"
-    | "finalizing"
-    | "completed"
-    | string;
+  phase: KnownScanProgressPhase | (string & {});
   jobId: string;
   currentRoot: string | null;
   source: string | null;
@@ -855,6 +849,20 @@ export type ScanProgress = {
   clipFileCount: number;
   message: string;
 };
+
+export type KnownScanProgressPhase =
+    | "starting"
+    | "discovering"
+    | "drive-discovery"
+    | "scanning"
+    | "importing"
+    | "metadata"
+    | "finalizing"
+    | "cancelling"
+    | "completed"
+    | "partial"
+    | "failed"
+    | "cancelled";
 
 export type ClipMedia = {
   clipId: string;

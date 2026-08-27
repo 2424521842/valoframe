@@ -78,19 +78,3 @@ function parseTimestamp(value: string | null): number | null {
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? null : parsed;
 }
-
-/**
- * Splits a user-configured allowlist into hostnames.
- *
- * The backend re-validates every entry before opening a browser; this only tidies input so a
- * stray scheme or trailing slash does not silently block all clicks.
- */
-export function parseAllowedHosts(raw: string): string[] {
-  return raw
-    .split(/[\s,;]+/)
-    .map((entry) => entry.trim().toLowerCase())
-    .filter((entry) => entry !== "")
-    .map((entry) => entry.replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
-    .filter((entry) => /^[a-z0-9.-]+$/.test(entry) && entry.includes("."))
-    .filter((entry, index, all) => all.indexOf(entry) === index);
-}

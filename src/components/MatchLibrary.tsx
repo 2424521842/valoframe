@@ -446,7 +446,7 @@ const MatchClipCard = memo(function MatchClipCard({
           data-clip-id={clip.id}
           data-clip-index={index}
           data-view-mode={viewMode}
-          initial={{ opacity: 0, y: profile.enterY }}
+          initial={false}
           ref={cardRef}
           transition={{ duration: profile.duration, delay: Math.min(index, 8) * profile.stagger }}
           whileHover={{ y: profile.hoverY }}
@@ -484,7 +484,7 @@ const MatchClipCard = memo(function MatchClipCard({
               alt=""
               decoding="async"
               fallback={<div className="clip-thumb-fallback" aria-hidden="true"><span /><span /></div>}
-              loading="lazy"
+              loading="eager"
               src={clip.thumbnailUrl}
             />
             <span className="match-clip-play"><Play weight="fill" /></span>

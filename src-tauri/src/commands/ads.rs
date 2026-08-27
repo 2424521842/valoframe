@@ -8,8 +8,6 @@ use crate::{
     db, AppState,
 };
 
-const MAX_ALLOWED_HOSTS: usize = 32;
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdCreativeView {
@@ -27,17 +25,9 @@ pub struct AdCreativeView {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RefreshAdCreativesInput {
-    pub endpoint: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RecordAdClickInput {
     pub creative_id: String,
     pub slot: String,
-    /// Landing-page hosts the vendor declared. An empty list blocks every click by design.
-    pub allowed_hosts: Vec<String>,
 }
 
 /// Returns cached creatives that have a usable local image.
@@ -46,6 +36,9 @@ pub struct RecordAdClickInput {
 /// vendor is unreachable.
 #[tauri::command]
 pub fn list_ad_creatives(state: State<'_, AppState>) -> Result<Vec<AdCreativeView>, String> {
+    if ads::trusted_ad_config()?.is_none() {
+        return Ok(Vec::new());
+    }
     let connection = db::open_database_read_only(&state.database_path)?;
     let creatives = db::list_ad_creatives(&connection)?;
 
@@ -70,25 +63,39 @@ pub fn list_ad_creatives(state: State<'_, AppState>) -> Result<Vec<AdCreativeVie
 
 /// Fetches the vendor manifest and refreshes the local cache.
 #[tauri::command]
-pub async fn refresh_ad_creatives(
-    app: AppHandle,
-    input: RefreshAdCreativesInput,
-) -> Result<usize, String> {
-    let endpoint = ads::normalize_ad_endpoint(&input.endpoint)?;
-    if endpoint.is_empty() {
-        return Ok(0);
-    }
+pub async fn refresh_ad_creatives(app: AppHandle) -> Result<usize, String> {
+    let config = match ads::trusted_ad_config() {
+        Ok(Some(config)) => config,
+        Ok(None) => return clear_cached_ad_creatives(&app),
+        Err(error) => {
+            let _ = clear_cached_ad_creatives(&app);
+            return Err(error);
+        }
+    };
 
     let cache_root = app
         .path()
         .app_cache_dir()
         .map_err(|error| format!("无法定位缓存目录：{error}"))?
         .join(AD_IMAGE_CACHE_DIR_NAME);
-    let creatives = ads::fetch_ad_creatives(&endpoint, &cache_root).await?;
+    let creatives = match ads::fetch_ad_creatives(&config.manifest_endpoint, &cache_root).await {
+        Ok(creatives) => creatives,
+        Err(error) => {
+            // A stale campaign must not survive an offline, malformed, or rejected refresh.
+            let _ = clear_cached_ad_creatives(&app);
+            return Err(error);
+        }
+    };
 
     let database_path = app.state::<AppState>().database_path.clone();
     let connection = db::open_database(&database_path)?;
     db::replace_ad_creatives(&connection, &creatives)
+}
+
+fn clear_cached_ad_creatives(app: &AppHandle) -> Result<usize, String> {
+    let database_path = app.state::<AppState>().database_path.clone();
+    let connection = db::open_database(&database_path)?;
+    db::replace_ad_creatives(&connection, &[])
 }
 
 #[tauri::command]
@@ -97,6 +104,9 @@ pub fn record_ad_impression(
     creative_id: String,
     slot: String,
 ) -> Result<(), String> {
+    if ads::trusted_ad_config()?.is_none() {
+        return Err("广告活动未配置".to_string());
+    }
     if !ads::is_known_ad_slot(&slot) {
         return Err("未知广告位".to_string());
     }
@@ -113,14 +123,9 @@ pub fn record_ad_click(
     state: State<'_, AppState>,
     input: RecordAdClickInput,
 ) -> Result<String, String> {
+    let config = ads::trusted_ad_config()?.ok_or_else(|| "广告活动未配置".to_string())?;
     if !ads::is_known_ad_slot(&input.slot) {
         return Err("未知广告位".to_string());
-    }
-    if input.allowed_hosts.is_empty() {
-        return Err("尚未配置落地页域名允许列表".to_string());
-    }
-    if input.allowed_hosts.len() > MAX_ALLOWED_HOSTS {
-        return Err("落地页域名允许列表过长".to_string());
     }
 
     let connection = db::open_database(&state.database_path)?;
@@ -132,7 +137,7 @@ pub fn record_ad_click(
         &creative.landing_url_template,
         &input.slot,
         &click_id,
-        &input.allowed_hosts,
+        &config.allowed_hosts,
     )?;
 
     // Persist before opening: an unrecorded click that reaches the vendor cannot be reconciled.

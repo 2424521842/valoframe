@@ -29,7 +29,7 @@ describe("SettingsWorkspace", () => {
     expect(screen.queryByRole("heading", { name: "常规", level: 2 })).not.toBeInTheDocument();
   });
 
-  it("updates startup, automatic scan, and motion preferences from the general section", async () => {
+  it("updates startup, automatic scan, motion, and font preferences from the general section", async () => {
     const user = userEvent.setup();
     const preferences = preferenceController();
     renderSettings({ preferences });
@@ -46,6 +46,21 @@ describe("SettingsWorkspace", () => {
     await user.click(screen.getByRole("combobox", { name: "动态效果" }));
     await user.click(screen.getByRole("option", { name: "始终减少动效" }));
     expect(preferences.updatePreferences).toHaveBeenCalledWith({ motionMode: "reduced" });
+
+    await user.click(screen.getByRole("combobox", { name: "字体大小" }));
+    expect(screen.getByRole("option", { name: "标准" })).toBeVisible();
+    expect(screen.getByRole("option", { name: "大号" })).toBeVisible();
+    await user.click(screen.getByRole("option", { name: "特大" }));
+    expect(preferences.updatePreferences).toHaveBeenCalledWith({ fontSize: "extra-large" });
+  });
+
+  it("does not expose maintainer-owned advertising controls", () => {
+    renderSettings();
+
+    expect(screen.queryByRole("switch", { name: "显示广告" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("广告素材接口")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("落地页域名允许列表")).not.toBeInTheDocument();
+    expect(screen.queryByText(/广告素材接口|落地页域名允许列表/)).not.toBeInTheDocument();
   });
 
   it("keeps library view and sort controls connected to preferences", async () => {
@@ -91,6 +106,7 @@ describe("SettingsWorkspace", () => {
     expect(preferences.resetPreferences).not.toHaveBeenCalled();
     expect(screen.getByText("恢复默认设置？")).toBeVisible();
     expect(screen.getByText(/启动扫描、素材库视图与排序/)).toBeVisible();
+    expect(screen.getByText(/字体大小会恢复为“标准”/)).toBeVisible();
     expect(screen.getByText(/来源、标签、索引、缓存、视频和更新检查记录不会改变/)).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "确认恢复" }));

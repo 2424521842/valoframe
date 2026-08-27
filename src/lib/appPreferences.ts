@@ -12,6 +12,8 @@ export type StartupDestination =
 
 export type MotionMode = "system" | "reduced";
 
+export type FontSizePreference = "standard" | "large" | "extra-large";
+
 export type AppPreferencesV1 = {
   schemaVersion: typeof APP_PREFERENCES_SCHEMA_VERSION;
   startupDestination: StartupDestination;
@@ -21,16 +23,11 @@ export type AppPreferencesV1 = {
   previewMuted: boolean;
   reviewAutoplay: boolean;
   motionMode: MotionMode;
+  fontSize: FontSizePreference;
   scanOnStartup: boolean;
   automaticUpdateCheck: boolean;
   /** HTTPS endpoint for direct issue-feedback uploads; empty means save-to-file only. */
   feedbackEndpoint: string;
-  /** Whether the in-app ad slots render at all. Off also suppresses all manifest fetching. */
-  adsEnabled: boolean;
-  /** HTTPS endpoint serving the ad creative manifest; empty disables the slots. */
-  adManifestEndpoint: string;
-  /** Vendor-declared landing hosts. Empty blocks every click, by design. */
-  adAllowedHosts: string;
 };
 
 export type AppPreferencesPatch = Partial<
@@ -57,13 +54,17 @@ export const DEFAULT_APP_PREFERENCES: Readonly<AppPreferencesV1> = Object.freeze
   previewMuted: false,
   reviewAutoplay: true,
   motionMode: "system",
+  fontSize: "standard",
   scanOnStartup: false,
   automaticUpdateCheck: true,
   feedbackEndpoint: "",
-  adsEnabled: false,
-  adManifestEndpoint: "",
-  adAllowedHosts: "",
 });
+
+const LEGACY_AD_PREFERENCE_KEYS = [
+  "adsEnabled",
+  "adManifestEndpoint",
+  "adAllowedHosts",
+] as const;
 
 const STARTUP_DESTINATIONS: readonly StartupDestination[] = [
   "library-all",
@@ -84,6 +85,12 @@ const LIBRARY_SORTS: readonly ClipSort[] = [
 ];
 
 const MOTION_MODES: readonly MotionMode[] = ["system", "reduced"];
+
+const FONT_SIZE_PREFERENCES: readonly FontSizePreference[] = [
+  "standard",
+  "large",
+  "extra-large",
+];
 
 export function createDefaultAppPreferences(): AppPreferencesV1 {
   return { ...DEFAULT_APP_PREFERENCES };
@@ -131,6 +138,9 @@ export function normalizeAppPreferences(value: unknown): AppPreferencesV1 {
     motionMode: isOneOf(value.motionMode, MOTION_MODES)
       ? value.motionMode
       : DEFAULT_APP_PREFERENCES.motionMode,
+    fontSize: isOneOf(value.fontSize, FONT_SIZE_PREFERENCES)
+      ? value.fontSize
+      : DEFAULT_APP_PREFERENCES.fontSize,
     scanOnStartup: isBoolean(value.scanOnStartup)
       ? value.scanOnStartup
       : DEFAULT_APP_PREFERENCES.scanOnStartup,
@@ -140,15 +150,6 @@ export function normalizeAppPreferences(value: unknown): AppPreferencesV1 {
     feedbackEndpoint: isFeedbackEndpoint(value.feedbackEndpoint)
       ? value.feedbackEndpoint
       : DEFAULT_APP_PREFERENCES.feedbackEndpoint,
-    adsEnabled: isBoolean(value.adsEnabled)
-      ? value.adsEnabled
-      : DEFAULT_APP_PREFERENCES.adsEnabled,
-    adManifestEndpoint: isFeedbackEndpoint(value.adManifestEndpoint)
-      ? value.adManifestEndpoint
-      : DEFAULT_APP_PREFERENCES.adManifestEndpoint,
-    adAllowedHosts: isAllowedHostsValue(value.adAllowedHosts)
-      ? value.adAllowedHosts
-      : DEFAULT_APP_PREFERENCES.adAllowedHosts,
   };
 }
 
@@ -180,6 +181,9 @@ export function applyAppPreferencesPatch(
     motionMode: isOneOf(patch.motionMode, MOTION_MODES)
       ? patch.motionMode
       : current.motionMode,
+    fontSize: isOneOf(patch.fontSize, FONT_SIZE_PREFERENCES)
+      ? patch.fontSize
+      : current.fontSize,
     scanOnStartup: isBoolean(patch.scanOnStartup)
       ? patch.scanOnStartup
       : current.scanOnStartup,
@@ -189,15 +193,6 @@ export function applyAppPreferencesPatch(
     feedbackEndpoint: isFeedbackEndpoint(patch.feedbackEndpoint)
       ? patch.feedbackEndpoint
       : current.feedbackEndpoint,
-    adsEnabled: isBoolean(patch.adsEnabled)
-      ? patch.adsEnabled
-      : current.adsEnabled,
-    adManifestEndpoint: isFeedbackEndpoint(patch.adManifestEndpoint)
-      ? patch.adManifestEndpoint
-      : current.adManifestEndpoint,
-    adAllowedHosts: isAllowedHostsValue(patch.adAllowedHosts)
-      ? patch.adAllowedHosts
-      : current.adAllowedHosts,
   };
 }
 
@@ -207,16 +202,29 @@ export type AppPreferencesLoadResult = {
 };
 
 export function loadAppPreferences(
-  storage: Pick<AppPreferencesStorage, "getItem"> | null,
+  storage: (
+    Pick<AppPreferencesStorage, "getItem">
+    & Partial<Pick<AppPreferencesStorage, "setItem">>
+  ) | null,
 ): AppPreferencesLoadResult {
   if (storage === null) {
     return { preferences: createDefaultAppPreferences(), storageError: null };
   }
 
   try {
+    const serialized = storage.getItem(APP_PREFERENCES_STORAGE_KEY);
+    const preferences = parseAppPreferences(serialized);
+    let storageError: string | null = null;
+    if (hasLegacyAdPreferences(serialized) && storage.setItem) {
+      try {
+        storage.setItem(APP_PREFERENCES_STORAGE_KEY, JSON.stringify(preferences));
+      } catch {
+        storageError = APP_PREFERENCES_STORAGE_ERRORS.write;
+      }
+    }
     return {
-      preferences: parseAppPreferences(storage.getItem(APP_PREFERENCES_STORAGE_KEY)),
-      storageError: null,
+      preferences,
+      storageError,
     };
   } catch {
     return {
@@ -267,10 +275,16 @@ function isFeedbackEndpoint(value: unknown): value is string {
   return typeof value === "string" && value.length <= MAX_FEEDBACK_ENDPOINT_CHARS;
 }
 
-const MAX_ALLOWED_HOSTS_CHARS = 600;
-
-function isAllowedHostsValue(value: unknown): value is string {
-  return typeof value === "string" && value.length <= MAX_ALLOWED_HOSTS_CHARS;
+function hasLegacyAdPreferences(serialized: string | null): boolean {
+  if (serialized === null) return false;
+  try {
+    const value: unknown = JSON.parse(serialized);
+    return isRecord(value) && LEGACY_AD_PREFERENCE_KEYS.some((key) => (
+      Object.prototype.hasOwnProperty.call(value, key)
+    ));
+  } catch {
+    return false;
+  }
 }
 
 function isVolumePercent(value: unknown): value is number {

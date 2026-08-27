@@ -89,6 +89,7 @@ pub struct ScanProgress {
 enum ScanProgressPhase {
     Discovering,
     Scanning,
+    Importing,
     Metadata,
     Finalizing,
     Completed,
@@ -101,6 +102,7 @@ impl ScanProgressPhase {
         match self {
             Self::Discovering => "discovering",
             Self::Scanning => "scanning",
+            Self::Importing => "importing",
             Self::Metadata => "metadata",
             Self::Finalizing => "finalizing",
             Self::Completed => "completed",
@@ -540,7 +542,7 @@ fn run_scan_batch(
         }
     }
 
-    progress.emit(ScanProgressPhase::Finalizing, "正在检查丢失文件");
+    progress.emit(ScanProgressPhase::Importing, "扫描完成，正在导入数据");
     if !reconcile_missing_clips(connection, &outcomes, &mut summary, runtime)? {
         return finish_cancelled_scan(scan_run, &progress, summary);
     }
@@ -637,6 +639,11 @@ fn run_scan_batch(
         if runtime.is_cancelled() {
             return finish_cancelled_scan(scan_run, &progress, summary);
         }
+    }
+
+    progress.emit(ScanProgressPhase::Finalizing, "正在完成扫描收尾");
+    if runtime.is_cancelled() {
+        return finish_cancelled_scan(scan_run, &progress, summary);
     }
 
     summary.message = Some(if summary.errors.is_empty() {
@@ -4366,6 +4373,16 @@ mod tests {
                 && event.clip_group_count == 1
                 && event.clip_file_count == 2
         }));
+        let phase_position = |phase: &str| {
+            progress_events
+                .iter()
+                .position(|event| event.phase == phase)
+                .unwrap_or_else(|| panic!("missing {phase} progress phase"))
+        };
+        assert!(phase_position("scanning") < phase_position("importing"));
+        assert!(phase_position("importing") < phase_position("metadata"));
+        assert!(phase_position("metadata") < phase_position("finalizing"));
+        assert!(phase_position("finalizing") < phase_position("completed"));
         assert_eq!(
             progress_events.last().map(|event| event.phase.as_str()),
             Some("completed")

@@ -22,12 +22,10 @@ const VALID_NON_DEFAULT_PREFERENCES: AppPreferencesV1 = {
   previewMuted: true,
   reviewAutoplay: false,
   motionMode: "reduced",
+  fontSize: "extra-large",
   scanOnStartup: true,
   automaticUpdateCheck: false,
   feedbackEndpoint: "https://feedback.example.com/api",
-  adsEnabled: true,
-  adManifestEndpoint: "https://ad.example.com/manifest",
-  adAllowedHosts: "ad.example.com",
 };
 
 test("app preferences expose the documented v1 defaults", () => {
@@ -40,12 +38,10 @@ test("app preferences expose the documented v1 defaults", () => {
     previewMuted: false,
     reviewAutoplay: true,
     motionMode: "system",
+    fontSize: "standard",
     scanOnStartup: false,
     automaticUpdateCheck: true,
     feedbackEndpoint: "",
-    adsEnabled: false,
-    adManifestEndpoint: "",
-    adAllowedHosts: "",
   });
 
   const first = createDefaultAppPreferences();
@@ -66,21 +62,47 @@ test("valid v1 preferences survive parsing and unknown fields are ignored", () =
 test("older v1 payloads default only the newer fields", () => {
   const {
     scanOnStartup: _missingScan,
+    fontSize: _missingFontSize,
     feedbackEndpoint: _missingEndpoint,
-    adsEnabled: _missingAdsEnabled,
-    adManifestEndpoint: _missingAdEndpoint,
-    adAllowedHosts: _missingAdHosts,
     ...olderPayload
   } = VALID_NON_DEFAULT_PREFERENCES;
 
   assert.deepEqual(normalizeAppPreferences(olderPayload), {
     ...VALID_NON_DEFAULT_PREFERENCES,
     scanOnStartup: false,
+    fontSize: "standard",
     feedbackEndpoint: "",
-    adsEnabled: false,
-    adManifestEndpoint: "",
-    adAllowedHosts: "",
   });
+});
+
+test("v0.2.4 ad preferences are ignored and removed without changing other values", () => {
+  const values = new Map<string, string>([[
+    APP_PREFERENCES_STORAGE_KEY,
+    JSON.stringify({
+      ...VALID_NON_DEFAULT_PREFERENCES,
+      adsEnabled: true,
+      adManifestEndpoint: "https://legacy.example.com/manifest",
+      adAllowedHosts: "legacy.example.com",
+    }),
+  ]]);
+  const storage = {
+    getItem(key: string) {
+      return values.get(key) ?? null;
+    },
+    setItem(key: string, value: string) {
+      values.set(key, value);
+    },
+  };
+
+  assert.deepEqual(loadAppPreferences(storage), {
+    preferences: VALID_NON_DEFAULT_PREFERENCES,
+    storageError: null,
+  });
+  const rewritten = JSON.parse(values.get(APP_PREFERENCES_STORAGE_KEY) ?? "{}");
+  assert.deepEqual(rewritten, VALID_NON_DEFAULT_PREFERENCES);
+  assert.equal("adsEnabled" in rewritten, false);
+  assert.equal("adManifestEndpoint" in rewritten, false);
+  assert.equal("adAllowedHosts" in rewritten, false);
 });
 
 test("each invalid v1 field falls back independently", () => {
@@ -94,15 +116,11 @@ test("each invalid v1 field falls back independently", () => {
     ["previewMuted", 1],
     ["reviewAutoplay", "true"],
     ["motionMode", "always"],
+    ["fontSize", "huge"],
     ["scanOnStartup", "true"],
     ["automaticUpdateCheck", null],
     ["feedbackEndpoint", 123],
     ["feedbackEndpoint", "x".repeat(301)],
-    ["adsEnabled", "yes"],
-    ["adManifestEndpoint", 123],
-    ["adManifestEndpoint", "x".repeat(301)],
-    ["adAllowedHosts", 123],
-    ["adAllowedHosts", "x".repeat(601)],
   ];
 
   for (const [field, invalidValue] of invalidCases) {

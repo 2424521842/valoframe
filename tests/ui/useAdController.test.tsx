@@ -11,9 +11,9 @@ const recordAdImpression = vi.fn();
 
 vi.mock("../../src/api/backend", () => ({
   listAdCreatives: () => listAdCreatives(),
-  refreshAdCreatives: (endpoint: string) => refreshAdCreatives(endpoint),
-  recordAdClick: (creativeId: string, slot: string, hosts: string[]) =>
-    recordAdClick(creativeId, slot, hosts),
+  refreshAdCreatives: () => refreshAdCreatives(),
+  recordAdClick: (creativeId: string, slot: string) =>
+    recordAdClick(creativeId, slot),
   recordAdImpression: (creativeId: string, slot: string) =>
     recordAdImpression(creativeId, slot),
 }));
@@ -31,9 +31,6 @@ const creative = {
 
 function options(overrides: Record<string, unknown> = {}) {
   return {
-    enabled: true,
-    manifestEndpoint: "https://ad.example.com/manifest",
-    allowedHosts: "ad.example.com",
     slot: AD_SLOTS.sidebar,
     ...overrides,
   } as Parameters<typeof useAdController>[0];
@@ -48,33 +45,28 @@ describe("useAdController", () => {
     recordAdImpression.mockResolvedValue(undefined);
   });
 
-  it("does not touch the network when ads are disabled", async () => {
-    const { result } = renderHook(() => useAdController(options({ enabled: false })));
+  it("refreshes through the maintainer-owned backend configuration before reading cache", async () => {
+    const { result } = renderHook(() => useAdController(options()));
 
-    await waitFor(() => expect(result.current.creative).toBeNull());
-    expect(refreshAdCreatives).not.toHaveBeenCalled();
-    expect(listAdCreatives).not.toHaveBeenCalled();
-  });
-
-  it("does not fetch when no endpoint is configured", async () => {
-    const { result } = renderHook(() =>
-      useAdController(options({ manifestEndpoint: "  " })),
+    await waitFor(() => expect(result.current.creative?.creativeId).toBe("cr-001"));
+    expect(refreshAdCreatives).toHaveBeenCalledWith();
+    expect(listAdCreatives).toHaveBeenCalledTimes(1);
+    expect(refreshAdCreatives.mock.invocationCallOrder[0]).toBeLessThan(
+      listAdCreatives.mock.invocationCallOrder[0],
     );
-
-    await waitFor(() => expect(result.current.creative).toBeNull());
-    expect(refreshAdCreatives).not.toHaveBeenCalled();
   });
 
-  it("serves the cached creative when the refresh fails offline", async () => {
+  it("fails closed instead of serving a stale cached creative when refresh fails", async () => {
     refreshAdCreatives.mockRejectedValue(new Error("offline"));
 
     const { result } = renderHook(() => useAdController(options()));
 
-    await waitFor(() => expect(result.current.creative?.creativeId).toBe("cr-001"));
+    await waitFor(() => expect(refreshAdCreatives).toHaveBeenCalled());
+    expect(result.current.creative).toBeNull();
+    expect(listAdCreatives).not.toHaveBeenCalled();
   });
 
-  it("degrades to no ad when the cache read also fails", async () => {
-    refreshAdCreatives.mockRejectedValue(new Error("offline"));
+  it("degrades to no ad when the refreshed cache cannot be read", async () => {
     listAdCreatives.mockRejectedValue(new Error("db unavailable"));
 
     const { result } = renderHook(() => useAdController(options()));
@@ -83,27 +75,21 @@ describe("useAdController", () => {
     expect(result.current.creative).toBeNull();
   });
 
-  it("blocks clicks when the landing host allowlist is empty", async () => {
-    const { result } = renderHook(() => useAdController(options({ allowedHosts: "" })));
+  it("shows no card when the backend disables the campaign with an empty list", async () => {
+    listAdCreatives.mockResolvedValue([]);
+    const { result } = renderHook(() => useAdController(options()));
 
-    await waitFor(() => expect(result.current.creative?.creativeId).toBe("cr-001"));
-    await result.current.onClick("cr-001");
-
-    expect(recordAdClick).not.toHaveBeenCalled();
+    await waitFor(() => expect(listAdCreatives).toHaveBeenCalled());
+    expect(result.current.creative).toBeNull();
   });
 
-  it("sends the parsed host list with a click", async () => {
-    const { result } = renderHook(() =>
-      useAdController(options({ allowedHosts: "https://ad.example.com/lp, lp.example.com" })),
-    );
+  it("delegates click trust policy to the backend", async () => {
+    const { result } = renderHook(() => useAdController(options()));
 
     await waitFor(() => expect(result.current.creative?.creativeId).toBe("cr-001"));
     await result.current.onClick("cr-001");
 
-    expect(recordAdClick).toHaveBeenCalledWith("cr-001", AD_SLOTS.sidebar, [
-      "ad.example.com",
-      "lp.example.com",
-    ]);
+    expect(recordAdClick).toHaveBeenCalledWith("cr-001", AD_SLOTS.sidebar);
   });
 
   it("reports each creative impression only once", async () => {

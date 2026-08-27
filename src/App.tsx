@@ -181,9 +181,6 @@ function App() {
     automaticCheck: preferences.automaticUpdateCheck,
   });
   const sidebarAds = useAdController({
-    allowedHosts: preferences.adAllowedHosts,
-    enabled: preferences.adsEnabled,
-    manifestEndpoint: preferences.adManifestEndpoint,
     slot: AD_SLOTS.sidebar,
   });
   const appUpdateBadge = appUpdater.phase === "downloaded"
@@ -206,6 +203,13 @@ function App() {
       delete document.documentElement.dataset.motion;
     };
   }, [preferences.motionMode]);
+
+  useLayoutEffect(() => {
+    document.documentElement.dataset.fontSize = preferences.fontSize;
+    return () => {
+      delete document.documentElement.dataset.fontSize;
+    };
+  }, [preferences.fontSize]);
 
   const effectiveDatePreset = libraryMode === "today" ? "today" : datePreset;
   const localDay = useLocalDay();

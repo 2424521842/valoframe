@@ -1437,11 +1437,11 @@ export async function listAdCreatives(): Promise<AdCreative[]> {
   return invoke<AdCreative[]>("list_ad_creatives");
 }
 
-export async function refreshAdCreatives(endpoint: string): Promise<number> {
+export async function refreshAdCreatives(): Promise<number> {
   if (isBrowserPreviewRuntime()) {
     return 0;
   }
-  return invoke<number>("refresh_ad_creatives", { input: { endpoint } });
+  return invoke<number>("refresh_ad_creatives");
 }
 
 export async function recordAdImpression(
@@ -1458,13 +1458,12 @@ export async function recordAdImpression(
 export async function recordAdClick(
   creativeId: string,
   slot: AdSlot,
-  allowedHosts: string[],
 ): Promise<string> {
   if (isBrowserPreviewRuntime()) {
     return "";
   }
   return invoke<string>("record_ad_click", {
-    input: { creativeId, slot, allowedHosts },
+    input: { creativeId, slot },
   });
 }
 
