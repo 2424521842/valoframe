@@ -8,6 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
 const workflow = read(".github/workflows/lanzou-sync.yml");
 const uploader = read("scripts/release/upload_lanzou.py");
+const readme = read("README.md");
 
 test("Lanzou sync follows only a successful stable release or an explicit retry", () => {
   assert.match(
@@ -66,4 +67,11 @@ test("Lanzou sync consumes only the checksum-bound public installer", () => {
   assert.match(workflow, /upload_lanzou\.py[\s\S]*?--checksums/u);
   assert.match(workflow, /update_lanzou_release_notes\.py/u);
   assert.match(workflow, /gh release edit "\$RELEASE_TAG"/u);
+});
+
+test("repository home page keeps the stable Lanzou folder discoverable", () => {
+  assert.match(readme, /https:\/\/wwbfc\.lanzoue\.com\/b01euqdb0h/u);
+  assert.match(readme, /提取码：`h0wz`/u);
+  assert.match(readme, /以后稳定版也会自动同步到这个固定文件夹/u);
+  assert.doesNotMatch(readme, /镜像上传后/u);
 });
