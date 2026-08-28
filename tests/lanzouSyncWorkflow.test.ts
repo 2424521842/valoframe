@@ -72,6 +72,5 @@ test("Lanzou sync consumes only the checksum-bound public installer", () => {
 test("repository home page keeps the stable Lanzou folder discoverable", () => {
   assert.match(readme, /https:\/\/wwbfc\.lanzoue\.com\/b01euqdb0h/u);
   assert.match(readme, /提取码：`h0wz`/u);
-  assert.match(readme, /以后稳定版也会自动同步到这个固定文件夹/u);
-  assert.doesNotMatch(readme, /镜像上传后/u);
+  assert.doesNotMatch(readme, /镜像上传后|其 SHA-256 与上方|以后稳定版也会/u);
 });
