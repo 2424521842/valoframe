@@ -33,6 +33,11 @@ def json_response(payload) -> upload_module.HttpResponse:
 
 
 class UploadLanzouTests(unittest.TestCase):
+    def test_current_html5_upload_endpoint_is_pinned(self):
+        self.assertEqual(
+            upload_module.UPLOAD_URL, "https://pc.woozooo.com/html5up.php"
+        )
+
     def create_release_files(self, root: Path) -> tuple[Path, Path, str]:
         installer = root / "VALOFRAME-0.2.5-x64-setup.exe"
         installer.write_bytes(b"verified installer bytes")

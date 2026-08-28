@@ -27,7 +27,7 @@ from typing import Any, Mapping, Protocol
 
 DISK_URL = "https://pc.woozooo.com/mydisk.php"
 MANAGE_URL = "https://pc.woozooo.com/doupload.php"
-UPLOAD_URL = "https://pc.woozooo.com/fileup.php"
+UPLOAD_URL = "https://pc.woozooo.com/html5up.php"
 MAX_FILE_BYTES = 100 * 1024 * 1024
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
